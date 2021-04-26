@@ -276,4 +276,5 @@ legacy_checks: _List = []
 
 logwatch_rules: _List = []
 
-config_storage_format = "standard"  # new in 2.1. Possible also: "raw"
+config_storage_format = "standard"  # new in 2.1. Possible also: "raw", "pkl"
+config_load_hosts_in_page_menu = False

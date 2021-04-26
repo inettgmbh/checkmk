@@ -122,10 +122,15 @@ class DT_AGGR_WARN:
 
 
 config_storage_format = "standard"  # new in 2.1. Possible also: "raw"
+config_load_hosts_in_page_menu = False
 
 
 def get_storage_format() -> 'store.StorageFormat':
     return store.StorageFormat.from_str(config_storage_format)
+
+
+def load_hosts_in_page_menu() -> 'store.StorageFormat':
+    return config_load_hosts_in_page_menu
 
 
 # Has to be declared here once since the functions can be assigned in

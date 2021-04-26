@@ -20,7 +20,7 @@ import cmk.gui.weblib as weblib
 import cmk.gui.forms as forms
 import cmk.gui.view_utils
 
-from cmk.gui.watolib.hosts_and_folders import Folder
+from cmk.gui.watolib.hosts_and_folders import Folder, Host
 from cmk.gui.watolib.host_attributes import host_attribute_registry
 from cmk.gui.watolib.groups import load_contact_group_information
 from cmk.gui.watolib.changes import make_object_audit_log_url
@@ -103,6 +103,8 @@ class ModeFolder(WatoMode):
         return make_folder_breadcrumb(self._folder)
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
+        if config.load_hosts_in_page_menu():
+            Host.all()
         if not self._folder.is_disk_folder():
             return self._search_folder_page_menu(breadcrumb)
 

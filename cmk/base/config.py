@@ -376,6 +376,7 @@ def _load_config(with_conf_d: bool, exclude_parents_mk: bool) -> None:
     experimental_config = cmk.utils.paths.make_experimental_config_file()
     if experimental_config.exists():
         _load_config_file(experimental_config, global_dict)
+    storage_format = globals().get("config_storage_format", "standard")
 
     cleanup_fs_used_marker_flag(console.info)  # safety cleanup for 1.6->1.7 update
 
@@ -403,13 +404,19 @@ def _load_config(with_conf_d: bool, exclude_parents_mk: bool) -> None:
             all_hosts.set_current_path(current_path)
             clusters.set_current_path(current_path)
 
-            if Path(_f).suffix == store.StorageFormat.RAW.extension():
-                loader = store.RawStorageLoader()
+            if Path(_f).suffix == store.StorageFormat.PKL.extension():
+                if storage_format == "standard":
+                    continue
+                loader = store.PickleStorageLoader()
                 loader.read(Path(_f))
                 loader.parse()
                 loader.apply(global_dict)
-            else:
+            elif Path(_f).suffix in [store.StorageFormat.RAW.extension()]:
+                continue
+            elif _f.endswith("hosts.mk") and storage_format == "standard":
                 _load_config_file(_f, global_dict)
+            else:
+                continue
 
             if not isinstance(all_hosts, SetFolderPathList):
                 raise MKGeneralException(
@@ -503,7 +510,7 @@ def _get_config_file_paths(with_conf_d: bool) -> List[Path]:
     list_of_files = [Path(cmk.utils.paths.main_config_file)]
     if with_conf_d:
         all_files = Path(cmk.utils.paths.check_mk_config_dir).rglob("*")
-        list_of_files += sorted([p for p in all_files if p.suffix in {".mk", ".cfg"}],
+        list_of_files += sorted([p for p in all_files if p.suffix in {".mk", ".cfg", ".pkl"}],
                                 key=cmk.utils.key_config_paths)
     for path in [Path(cmk.utils.paths.final_config_file), Path(cmk.utils.paths.local_config_file)]:
         if path.exists():
@@ -1032,9 +1039,9 @@ _old_service_descriptions = {
 
 
 def service_description(
-    hostname: HostName,
-    check_plugin_name: CheckPluginName,
-    item: Item,
+        hostname: HostName,
+        check_plugin_name: CheckPluginName,
+        item: Item,
 ) -> ServiceName:
     plugin = agent_based_register.get_check_plugin(check_plugin_name)
     if plugin is None:
@@ -1134,9 +1141,9 @@ def get_final_service_description(hostname: HostName, description: ServiceName) 
 
 
 def service_ignored(
-    host_name: HostName,
-    check_plugin_name: Optional[CheckPluginName],
-    description: Optional[ServiceName],
+        host_name: HostName,
+        check_plugin_name: Optional[CheckPluginName],
+        description: Optional[ServiceName],
 ) -> bool:
     if check_plugin_name is not None:
         check_plugin_name_str = str(check_plugin_name)
@@ -1155,8 +1162,8 @@ def service_ignored(
 
 
 def _checktype_ignored_for_host(
-    host_name: HostName,
-    check_plugin_name_str: str,
+        host_name: HostName,
+        check_plugin_name_str: str,
 ) -> bool:
     ignored = get_config_cache().host_extra_conf(host_name, ignored_checks)
     for e in ignored:
@@ -1972,8 +1979,8 @@ AUTO_MIGRATION_ERR_MSG = ("Failed to auto-migrate legacy plugin to %s: %s\n"
 
 
 def _extract_agent_and_snmp_sections(
-    *,
-    validate_creation_kwargs: bool,
+        *,
+        validate_creation_kwargs: bool,
 ) -> List[str]:
     """Here comes the next layer of converting-to-"new"-api.
 
@@ -2018,8 +2025,8 @@ def _extract_agent_and_snmp_sections(
 
 
 def _extract_check_plugins(
-    *,
-    validate_creation_kwargs: bool,
+        *,
+        validate_creation_kwargs: bool,
 ) -> List[str]:
     """Here comes the next layer of converting-to-"new"-api.
 
@@ -2105,8 +2112,8 @@ def _get_plugin_parameters(
 
 
 def get_discovery_parameters(
-    host_name: HostName,
-    check_plugin: CheckPlugin,
+        host_name: HostName,
+        check_plugin: CheckPlugin,
 ) -> Union[None, Parameters, List[Parameters]]:
     return _get_plugin_parameters(
         host_name=host_name,
@@ -2118,8 +2125,8 @@ def get_discovery_parameters(
 
 
 def get_host_label_parameters(
-    host_name: HostName,
-    section_plugin: SectionPlugin,
+        host_name: HostName,
+        section_plugin: SectionPlugin,
 ) -> Union[None, Parameters, List[Parameters]]:
     return _get_plugin_parameters(
         host_name=host_name,
@@ -2131,11 +2138,11 @@ def get_host_label_parameters(
 
 
 def compute_check_parameters(
-    host: HostName,
-    plugin_name: CheckPluginName,
-    item: Item,
-    params: LegacyCheckParameters,
-    for_static_checks: bool = False,
+        host: HostName,
+        plugin_name: CheckPluginName,
+        item: Item,
+        params: LegacyCheckParameters,
+        for_static_checks: bool = False,
 ) -> Optional[LegacyCheckParameters]:
     """Compute parameters for a check honoring factory settings,
     default settings of user in main.mk, check_parameters[] and
@@ -2154,8 +2161,8 @@ def compute_check_parameters(
 
 
 def _update_with_default_check_parameters(
-    check_default_parameters: Dict[str, Any],
-    params: LegacyCheckParameters,
+        check_default_parameters: Dict[str, Any],
+        params: LegacyCheckParameters,
 ) -> LegacyCheckParameters:
 
     # Handle case where parameter is None but the type of the
@@ -3041,9 +3048,9 @@ class HostConfig:
         return self._merge_with_optional_exit_code_parameters(spec, merged_spec)
 
     def _extract_data_source_exit_code_spec(
-        self,
-        spec: _NestedExitSpec,
-        data_source_id: Optional[str],
+            self,
+            spec: _NestedExitSpec,
+            data_source_id: Optional[str],
     ) -> ExitSpec:
         if data_source_id is not None:
             try:
@@ -3060,9 +3067,9 @@ class HostConfig:
         return spec
 
     def _merge_with_optional_exit_code_parameters(
-        self,
-        spec: _NestedExitSpec,
-        merged_spec: ExitSpec,
+            self,
+            spec: _NestedExitSpec,
+            merged_spec: ExitSpec,
     ) -> ExitSpec:
         # Additional optional parameters which are not part of individual
         # or overall parameters
@@ -3101,8 +3108,8 @@ class HostConfig:
         return entries[0]
 
     def set_autochecks(
-        self,
-        new_services: Sequence[ServiceWithNodes],
+            self,
+            new_services: Sequence[ServiceWithNodes],
     ) -> None:
         """Merge existing autochecks with the given autochecks for a host and save it"""
         if self.is_cluster:
@@ -3164,9 +3171,9 @@ def lookup_mgmt_board_ip_address(host_config: HostConfig) -> Optional[HostAddres
 
 
 def lookup_ip_address(
-    host_config: HostConfig,
-    *,
-    family: Optional[socket.AddressFamily] = None,
+        host_config: HostConfig,
+        *,
+        family: Optional[socket.AddressFamily] = None,
 ) -> Optional[HostAddress]:
     if family is None:
         family = host_config.default_address_family
@@ -3272,9 +3279,9 @@ class ConfigCache:
         self._host_configs: Dict[HostName, HostConfig] = {}
 
     def _discovered_labels_of_service(
-        self,
-        hostname: HostName,
-        service_desc: ServiceName,
+            self,
+            hostname: HostName,
+            service_desc: ServiceName,
     ) -> Labels:
         return self._autochecks_manager.discovered_labels_of(
             hostname,
@@ -3464,11 +3471,11 @@ class ConfigCache:
         return attrs
 
     def icons_and_actions_of_service(
-        self,
-        hostname: HostName,
-        description: ServiceName,
-        check_plugin_name: Optional[CheckPluginName],
-        params: LegacyCheckParameters,
+            self,
+            hostname: HostName,
+            description: ServiceName,
+            check_plugin_name: Optional[CheckPluginName],
+            params: LegacyCheckParameters,
     ) -> List[str]:
         actions = set(self.service_extra_conf(hostname, description, service_icons_and_actions))
 
@@ -3775,10 +3782,10 @@ class ConfigCache:
         return hostname
 
     def get_clustered_service_node_keys(
-        self,
-        hostname: HostName,
-        source_type: SourceType,
-        service_descr: Optional[ServiceName],
+            self,
+            hostname: HostName,
+            source_type: SourceType,
+            service_descr: Optional[ServiceName],
     ) -> Optional[List[HostKey]]:
         """Returns the node keys if a service is clustered, otherwise 'None' in order to
         decide whether we collect section content of the host or the nodes.
@@ -3810,8 +3817,8 @@ class ConfigCache:
         ]
 
     def get_piggybacked_hosts_time_settings(
-            self,
-            piggybacked_hostname: Optional[HostName] = None
+        self,
+        piggybacked_hostname: Optional[HostName] = None
     ) -> List[Tuple[Optional[str], str, int]]:
         time_settings: List[Tuple[Optional[str], str, int]] = []
         for source_hostname in sorted(piggyback.get_source_hostnames(piggybacked_hostname)):

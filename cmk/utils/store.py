@@ -9,6 +9,7 @@ manager."""
 
 import ast
 import enum
+import pickle
 from contextlib import contextmanager
 import errno
 import fcntl
@@ -486,6 +487,32 @@ def cleanup_locks() -> Iterator[None]:
             raise
 
 
+#        "FOLDER_PATH": "",
+#        "ALL_HOSTS": ALL_HOSTS,
+#        "ALL_SERVICES": ALL_SERVICES,
+#        "all_hosts": [],
+#        "host_labels": {},
+#        "host_tags": {},
+#        "clusters": {},
+#        "ipaddresses": {},
+#        "ipv6addresses": {},
+#        "explicit_snmp_communities": {},
+#        "management_snmp_credentials": {},
+#        "management_ipmi_credentials": {},
+#        "management_protocol": {},
+#        "explicit_host_conf": {},
+#        "extra_host_conf": {
+#            "alias": []
+#        },
+#        "extra_service_conf": {
+#            "_WATO": []
+#        },
+#        "host_attributes": {},
+#        "host_contactgroups": [],
+#        "service_contactgroups": [],
+#        "_lock": False,
+
+
 class RawStorageLoader:
     """This is POC class: minimal working functionality. OOP and more clear API is planned"""
     __slots__ = ['_data', '_loaded']
@@ -500,16 +527,39 @@ class RawStorageLoader:
 
     def parse(self) -> None:
         to_run = "loaded.update(" + self._data + ")"
-
         exec(to_run, {'__builtins__': None}, {"loaded": self._loaded})
 
     def apply(self, variables: Dict[str, Any]) -> bool:
-        """Stub"""
-        isinstance(variables, dict)
+        # List based settings
+        variables["all_hosts"].extend(self._all_hosts())
+
+        # Dict based settings
+        # Note: host_attributes is not loaded / not required by cmk.base
+        for what, value_func in [("clusters", self._clusters), ("host_tags", self._host_tags),
+                                 ("host_labels", self._host_labels),
+                                 ("ipaddresses", self._ipaddresses),
+                                 ("ipv6addresses", self._ipv6addresses),
+                                 ("explicit_snmp_communities", self._explicit_snmp_communities),
+                                 ("management_ipmi_credentials", self._management_ipmi_credentials),
+                                 ("management_snmp_credentials", self._management_snmp_credentials),
+                                 ("management_protocol", self._management_protocol),
+                                 ("explicit_host_conf", self._explicit_host_conf)]:
+            value = value_func()
+            variables[what].update(value)
+
         return True
 
     def _all_hosts(self) -> List[str]:
         return self._loaded.get("all_hosts", [])
+
+    def _clusters(self) -> Dict[str, Any]:
+        return self._loaded.get("clusters", {})
+
+    def _ipaddresses(self) -> Dict[str, Any]:
+        return self._loaded.get("ipaddresses", {})
+
+    def _ipv6addresses(self) -> Dict[str, Any]:
+        return self._loaded.get("ipv6addresses", {})
 
     def _host_tags(self) -> Dict[str, Any]:
         return self._loaded.get("host_tags", {})
@@ -529,10 +579,40 @@ class RawStorageLoader:
     def _extra_host_conf(self) -> Dict[str, List[Tuple[str, List[str]]]]:
         return self._loaded.get("extra_host_conf", {})
 
+    def _explicit_snmp_communities(self):
+        return self._loaded.get("explicit_snmp_communities", {})
+
+    def _management_ipmi_credentials(self):
+        return self._loaded.get("management_ipmi_credentials", {})
+
+    def _management_snmp_credentials(self):
+        return self._loaded.get("management_snmp_credentials", {})
+
+    def _management_protocol(self):
+        return self._loaded.get("management_protocol", {})
+
+
+class PickleStorageLoader(RawStorageLoader):
+    """This is POC class: minimal working functionality. OOP and more clear API is planned"""
+    __slots__ = ['_data', '_loaded']
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._data: str = ""
+        self._loaded: Dict[str, Any] = {}
+
+    def read(self, filename: Path) -> None:
+        with filename.open("rb") as f:
+            self._data = f.read()
+
+    def parse(self) -> None:
+        self._loaded = pickle.loads(self._data)
+
 
 class StorageFormat(enum.Enum):
     STANDARD = "standard"
     RAW = "raw"
+    PKL = "pkl"
 
     def __str__(self) -> str:
         return str(self.value)
@@ -546,6 +626,7 @@ class StorageFormat(enum.Enum):
         return {  # type: ignore[return-value]
             StorageFormat.STANDARD: ".mk",
             StorageFormat.RAW: ".cfg",
+            StorageFormat.PKL: ".pkl",
         }[self]
 
     def hosts_file(self) -> str:
