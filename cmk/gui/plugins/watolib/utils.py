@@ -14,6 +14,7 @@ from six import ensure_str
 
 import cmk.utils.store as store
 import cmk.utils.plugin_registry
+from cmk.utils.config_storage import WATO_FILE_HEADER
 
 from cmk.gui.type_defs import ConfigDomainName
 from cmk.gui.i18n import _
@@ -23,7 +24,7 @@ from cmk.gui.utils.html import HTML
 
 
 def wato_fileheader() -> str:
-    return "# Created by WATO\n# encoding: utf-8\n\n"
+    return WATO_FILE_HEADER
 
 
 class ABCConfigDomain(abc.ABC):

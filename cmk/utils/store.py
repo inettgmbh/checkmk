@@ -7,6 +7,7 @@
 functionality is the locked file opening realized with the File() context
 manager."""
 
+import abc
 import ast
 import enum
 import pickle
@@ -513,21 +514,21 @@ def cleanup_locks() -> Iterator[None]:
 #        "_lock": False,
 
 
-class RawStorageLoader:
-    """This is POC class: minimal working functionality. OOP and more clear API is planned"""
-    __slots__ = ['_data', '_loaded']
+class AbstractStorageLoader(abc.ABC):
+    """Config Loader Interface class. Currently supports only two virtual methods: read and parse."""
+    __slots__ = ['_loaded', '_data']
 
     def __init__(self) -> None:
-        self._data: str = ""
         self._loaded: Dict[str, Any] = {}
+        self._data: Union[str, bytes, None] = None
 
+    @abc.abstractmethod
     def read(self, filename: Path) -> None:
-        with filename.open() as f:
-            self._data = f.read()
+        raise NotImplementedError()
 
+    @abc.abstractmethod
     def parse(self) -> None:
-        to_run = "loaded.update(" + self._data + ")"
-        exec(to_run, {'__builtins__': None}, {"loaded": self._loaded})
+        raise NotImplementedError()
 
     def apply(self, variables: Dict[str, Any]) -> bool:
         # List based settings
@@ -592,13 +593,28 @@ class RawStorageLoader:
         return self._loaded.get("management_protocol", {})
 
 
-class PickleStorageLoader(RawStorageLoader):
-    """This is POC class: minimal working functionality. OOP and more clear API is planned"""
-    __slots__ = ['_data', '_loaded']
+class RawStorageLoader(AbstractStorageLoader):
+    """Supports so-called raw format which is temporary by nature: used as stub to plan API
+    Will be removed in release. During development may be used as an base.
+    """
+    def __init__(self) -> None:
+        super(RawStorageLoader, self).__init__()
+        self._loaded: Dict[str, Any] = {}
 
+    def read(self, filename: Path) -> None:
+        with filename.open() as f:
+            self._data = f.read()
+
+    def parse(self) -> None:
+        assert isinstance(self._data, str)
+        to_run = "loaded.update(" + self._data + ")"
+        exec(to_run, {'__builtins__': None}, {"loaded": self._loaded})
+
+
+class PickleStorageLoader(RawStorageLoader):
+    """Supports pickled config files."""
     def __init__(self) -> None:
         super().__init__()
-        self._data: str = ""
         self._loaded: Dict[str, Any] = {}
 
     def read(self, filename: Path) -> None:
@@ -606,6 +622,7 @@ class PickleStorageLoader(RawStorageLoader):
             self._data = f.read()
 
     def parse(self) -> None:
+        assert isinstance(self._data, bytes)
         self._loaded = pickle.loads(self._data)
 
 

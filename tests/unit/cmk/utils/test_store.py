@@ -3,6 +3,7 @@
 # Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# pylint: disable=redefined-outer-name
 
 import enum
 import threading
@@ -18,6 +19,7 @@ from testlib import import_module, wait_until
 
 import cmk.utils.store as store
 from cmk.utils.exceptions import MKGeneralException
+from cmk.utils.config_storage import configurable_variables
 
 
 @pytest.mark.parametrize("path_type", [str, Path])
@@ -699,13 +701,13 @@ _raw_storage_loader_test_data = """{
 """
 
 
-@pytest.fixture
+@pytest.fixture()
 def loader():
-    loader = store.RawStorageLoader()
-    loader._data = _raw_storage_loader_test_data
-    loader.parse()
-    loader.apply({})
-    return loader
+    _loader = store.RawStorageLoader()
+    _loader._data = _raw_storage_loader_test_data
+    _loader.parse()
+    _loader.apply(configurable_variables())
+    return _loader
 
 
 def test_raw_storage_loader(loader):

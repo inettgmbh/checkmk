@@ -121,7 +121,9 @@ class DT_AGGR_WARN:
     pass
 
 
-config_storage_format = "standard"  # new in 2.1. Possible also: "raw"
+# Configuration variables for Experimental Config files
+# At the moment should be controlled using default_config_dir/experimental.mk
+config_storage_format = "standard"  # new in 2.1. Possible also: "raw" and "pkl"
 config_load_hosts_in_page_menu = False
 
 
@@ -129,7 +131,7 @@ def get_storage_format() -> 'store.StorageFormat':
     return store.StorageFormat.from_str(config_storage_format)
 
 
-def load_hosts_in_page_menu() -> 'store.StorageFormat':
+def load_hosts_in_page_menu() -> bool:
     return config_load_hosts_in_page_menu
 
 
