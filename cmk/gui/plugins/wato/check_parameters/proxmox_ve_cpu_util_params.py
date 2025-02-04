@@ -30,14 +30,14 @@ def _parameter_valuespec_proxmox_ve_cpu_util():
                                     maxvalue=100.0,
                                     unit="%",
                                     default_value=90.0,
-                                    title=_("Warning at")
+                                    title=_("Warning at"),
                                 ),
                                 Float(
                                     minvalue=0.0,
                                     maxvalue=100.0,
                                     unit="%",
                                     default_value=95.0,
-                                    title=_("Critical at")
+                                    title=_("Critical at"),
                                 ),
                             ],
                         ),
