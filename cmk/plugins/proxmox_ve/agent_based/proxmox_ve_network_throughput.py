@@ -54,8 +54,8 @@ def check_proxmox_ve_network_throughput(params: Mapping[str, Any], section: Sect
     last_uptime = value_store.get("last_uptime", 0)
 
     if uptime == 0:
-        in_throughput = net_in
-        out_throughput = net_out
+        in_throughput: float = net_in
+        out_throughput: float = net_out
     elif uptime > last_uptime:
         in_throughput = (net_in - last_in) / (uptime - last_uptime)
         out_throughput = (net_out - last_out) / (uptime - last_uptime)

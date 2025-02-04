@@ -54,8 +54,8 @@ def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section
     last_uptime = value_store.get("last_uptime", 0)
 
     if uptime == 0:
-        read_throughput = disk_read
-        write_throughput = disk_write
+        read_throughput: float = disk_read
+        write_throughput: float = disk_write
     elif uptime > last_uptime:
         read_throughput = (disk_read - last_read) / (uptime - last_uptime)
         write_throughput = (disk_write - last_write) / (uptime - last_uptime)
