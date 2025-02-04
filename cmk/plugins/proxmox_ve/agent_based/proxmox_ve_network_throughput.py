@@ -14,7 +14,9 @@ from cmk.agent_based.v2 import (
     DiscoveryResult,
     get_value_store,
     render,
+    Result,
     Service,
+    State,
     StringTable,
 )
 
@@ -47,50 +49,56 @@ def check_proxmox_ve_network_throughput(params: Mapping[str, Any], section: Sect
     net_out = section.get("net_out", 0)
     uptime = section.get("uptime", 0)
 
-    value_store = get_value_store()
+    try:
+        value_store = get_value_store()
 
-    last_in = value_store.get("last_in", 0)
-    last_out = value_store.get("last_out", 0)
-    last_uptime = value_store.get("last_uptime", 0)
+        last_in = value_store.get("last_in", 0)
+        last_out = value_store.get("last_out", 0)
+        last_uptime = value_store.get("last_uptime", 0)
 
-    if uptime == 0:
-        in_throughput: float = net_in
-        out_throughput: float = net_out
-    elif uptime > last_uptime:
-        in_throughput = (net_in - last_in) / (uptime - last_uptime)
-        out_throughput = (net_out - last_out) / (uptime - last_uptime)
-    else:
-        in_throughput = net_in / uptime
-        out_throughput = net_out / uptime
+        if uptime == 0:
+            in_throughput: float = net_in
+            out_throughput: float = net_out
+        elif uptime > last_uptime:
+            in_throughput = (net_in - last_in) / (uptime - last_uptime)
+            out_throughput = (net_out - last_out) / (uptime - last_uptime)
+        else:
+            in_throughput = net_in / uptime
+            out_throughput = net_out / uptime
 
-    value_store["last_in"] = net_in
-    value_store["last_out"] = net_out
-    value_store["last_uptime"] = uptime
+        value_store["last_in"] = net_in
+        value_store["last_out"] = net_out
+        value_store["last_uptime"] = uptime
 
-    in_levels = params["in_levels"]
-    out_levels = params["out_levels"]
-    if in_levels is not None:
-        in_levels = (in_levels[0] * 1024**2, in_levels[1] * 1024**2)
-    if out_levels is not None:
-        out_levels = (out_levels[0] * 1024**2, out_levels[1] * 1024**2)
+        in_levels = params["in_levels"]
+        out_levels = params["out_levels"]
+        if in_levels is not None:
+            in_levels = (in_levels[0] * 1024**2, in_levels[1] * 1024**2)
+        if out_levels is not None:
+            out_levels = (out_levels[0] * 1024**2, out_levels[1] * 1024**2)
 
-    yield from check_levels_v1(
-        value=in_throughput,
-        levels_upper=in_levels,
-        metric_name="net_in_throughput",
-        render_func=render.iobandwidth,
-        label="Inbound",
-        boundaries=(0, None),
-    )
+        yield from check_levels_v1(
+            value=in_throughput,
+            levels_upper=in_levels,
+            metric_name="net_in_throughput",
+            render_func=render.iobandwidth,
+            label="Inbound",
+            boundaries=(0, None),
+        )
 
-    yield from check_levels_v1(
-        value=out_throughput,
-        levels_upper=out_levels,
-        metric_name="net_out_throughput",
-        render_func=render.iobandwidth,
-        label="Outbound",
-        boundaries=(0, None),
-    )
+        yield from check_levels_v1(
+            value=out_throughput,
+            levels_upper=out_levels,
+            metric_name="net_out_throughput",
+            render_func=render.iobandwidth,
+            label="Outbound",
+            boundaries=(0, None),
+        )
+    except:
+        yield Result(
+            state=State.UNKNOWN,
+            summary=f"error checking datastore status"
+        )
 
 
 agent_section_proxmox_ve_network_throughput = AgentSection(

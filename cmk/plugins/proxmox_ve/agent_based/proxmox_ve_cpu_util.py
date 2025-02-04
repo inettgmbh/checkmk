@@ -48,31 +48,36 @@ def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> Ch
     max_cpu = int(section.get("max_cpu", 0))
     cpu_util = float(section.get("cpu", 0))
     uptime = int(section.get("uptime", 0))
+    try:
+        value_store = get_value_store()
 
-    value_store = get_value_store()
+        yield from check_cpu_util(
+            util=cpu_util * 100,
+            params=params,
+            value_store=value_store,
+            this_time=uptime,
+        )
 
-    yield from check_cpu_util(
-        util=cpu_util * 100,
-        params=params,
-        value_store=value_store,
-        this_time=uptime,
-    )
+        yield Result(state=State.OK, summary=f"CPU cores assigned: {max_cpu}")
 
-    yield Result(state=State.OK, summary=f"CPU cores assigned: {max_cpu}")
+        if params["util"] is not None:
+            (warn, crit) = params["util"]
+            cores_levels = (warn * max_cpu / 100, crit * max_cpu / 100)
+        else:
+            cores_levels = None
 
-    if params["util"] is not None:
-        (warn, crit) = params["util"]
-        cores_levels = (warn * max_cpu / 100, crit * max_cpu / 100)
-    else:
-        cores_levels = None
-
-    yield from check_levels_v1(
-        value=round(max_cpu * cpu_util, 2),
-        levels_upper=cores_levels,
-        metric_name="cpu_core_usage",
-        label="CPU Core usage",
-        boundaries=(0.0, max_cpu),
-    )
+        yield from check_levels_v1(
+            value=round(max_cpu * cpu_util, 2),
+            levels_upper=cores_levels,
+            metric_name="cpu_core_usage",
+            label="CPU Core usage",
+            boundaries=(0.0, max_cpu),
+        )
+    except:
+        yield Result(
+            state=State.UNKNOWN,
+            summary=f"error checking datastore status"
+        )
 
 
 agent_section_proxmox_ve_cpu_util = AgentSection(

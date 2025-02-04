@@ -7,21 +7,21 @@ from cmk.graphing.v1 import graphs, metrics, perfometers, Title
 
 UNIT_BYTES_PER_SECOND = metrics.Unit(metrics.IECNotation("B/s"))
 
-metric_disk_read_throughput = metrics.Metric(
+metric_proxmox_ve_disk_read_throughput = metrics.Metric(
     name="disk_read_throughput",
     title=Title("Disk read"),
     unit=UNIT_BYTES_PER_SECOND,
     color=metrics.Color.BLUE,
 )
 
-metric_disk_write_throughput = metrics.Metric(
+metric_proxmox_ve_disk_write_throughput = metrics.Metric(
     name="disk_write_throughput",
     title=Title("Disk write"),
     unit=UNIT_BYTES_PER_SECOND,
     color=metrics.Color.GREEN,
 )
 
-perfometer_disk_throughput = perfometers.Bidirectional(
+perfometer_proxmox_ve_disk_throughput = perfometers.Bidirectional(
     name="disk_throughput",
     left=perfometers.Perfometer(
         name="disk_read_throughput",
@@ -35,7 +35,7 @@ perfometer_disk_throughput = perfometers.Bidirectional(
     ),
 )
 
-graph_disk_throughput = graphs.Bidirectional(
+graph_proxmox_ve_disk_throughput = graphs.Bidirectional(
     name="disk_throughput",
     title=Title("Disk Throughput"),
     lower=graphs.Graph(

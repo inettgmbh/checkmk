@@ -7,21 +7,21 @@ from cmk.graphing.v1 import graphs, metrics, perfometers, Title
 
 UNIT_BYTES_PER_SECOND = metrics.Unit(metrics.IECNotation("B/s"))
 
-metric_net_in_throughput = metrics.Metric(
+metric_proxmox_ve_net_in_throughput = metrics.Metric(
     name="net_in_throughput",
     title=Title("Network Inbound"),
     unit=UNIT_BYTES_PER_SECOND,
     color=metrics.Color.BLUE,
 )
 
-metric_net_out_throughput = metrics.Metric(
+metric_proxmox_ve_net_out_throughput = metrics.Metric(
     name="net_out_throughput",
     title=Title("Network Outbound"),
     unit=UNIT_BYTES_PER_SECOND,
     color=metrics.Color.GREEN,
 )
 
-perfometer_network_throughput = perfometers.Bidirectional(
+perfometer_proxmox_ve_network_throughput = perfometers.Bidirectional(
     name="network_throughput",
     left=perfometers.Perfometer(
         name="net_in_throughput",
@@ -35,7 +35,7 @@ perfometer_network_throughput = perfometers.Bidirectional(
     ),
 )
 
-graph_network_throughput = graphs.Bidirectional(
+graph_proxmox_ve_network_throughput = graphs.Bidirectional(
     name="network_throughput",
     title=Title("Network Throughput"),
     lower=graphs.Graph(

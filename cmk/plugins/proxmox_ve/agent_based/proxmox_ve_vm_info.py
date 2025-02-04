@@ -40,7 +40,7 @@ def check_proxmox_ve_vm_info(params: Mapping[str, Any], section: Section) -> Che
     ...         ' "status": "running",'
     ...         ' "type": "qemu",'
     ...         ' "vmid": "109",'
-    ...         ' "uptime": "265421"}'
+    ...         ' "uptime": 265421}'
     ...     ]])):
     ...   print(result)
     Result(state=<State.OK: 0>, summary='VM ID: 109')

@@ -5,14 +5,14 @@
 
 from cmk.graphing.v1 import graphs, metrics, Title
 
-metric_disk_read_throughput = metrics.Metric(
+metric_proxmox_ve_cpu_usage = metrics.Metric(
     name="cpu_core_usage",
     title=Title("CPU Core Usage"),
     unit=metrics.Unit(metrics.DecimalNotation(""), metrics.StrictPrecision(digits=2)),
     color=metrics.Color.BLUE,
 )
 
-graph_cpu_usage = graphs.Graph(
+graph_proxmox_ve_cpu_usage = graphs.Graph(
     name="cpu_core_usage",
     title=Title("CPU Cores"),
     compound_lines=["cpu_core_usage"],

@@ -14,7 +14,9 @@ from cmk.agent_based.v2 import (
     DiscoveryResult,
     get_value_store,
     render,
+    Result,
     Service,
+    State,
     StringTable,
 )
 
@@ -47,50 +49,56 @@ def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section
     disk_write = section.get("disk_write", 0)
     uptime = section.get("uptime", 0)
 
-    value_store = get_value_store()
+    try:
+        value_store = get_value_store()
 
-    last_read = value_store.get("last_read", 0)
-    last_write = value_store.get("last_write", 0)
-    last_uptime = value_store.get("last_uptime", 0)
+        last_read = value_store.get("last_read", 0)
+        last_write = value_store.get("last_write", 0)
+        last_uptime = value_store.get("last_uptime", 0)
 
-    if uptime == 0:
-        read_throughput: float = disk_read
-        write_throughput: float = disk_write
-    elif uptime > last_uptime:
-        read_throughput = (disk_read - last_read) / (uptime - last_uptime)
-        write_throughput = (disk_write - last_write) / (uptime - last_uptime)
-    else:
-        read_throughput = disk_read / uptime
-        write_throughput = disk_write / uptime
+        if uptime == 0:
+            read_throughput: float = disk_read
+            write_throughput: float = disk_write
+        elif uptime > last_uptime:
+            read_throughput = (disk_read - last_read) / (uptime - last_uptime)
+            write_throughput = (disk_write - last_write) / (uptime - last_uptime)
+        else:
+            read_throughput = disk_read / uptime
+            write_throughput = disk_write / uptime
 
-    value_store["last_read"] = disk_read
-    value_store["last_write"] = disk_write
-    value_store["last_uptime"] = uptime
+        value_store["last_read"] = disk_read
+        value_store["last_write"] = disk_write
+        value_store["last_uptime"] = uptime
 
-    read_levels = params["read_levels"]
-    write_levels = params["write_levels"]
-    if read_levels is not None:
-        read_levels = (read_levels[0] * 1024**2, read_levels[1] * 1024**2)
-    if write_levels is not None:
-        write_levels = (write_levels[0] * 1024**2, write_levels[1] * 1024**2)
+        read_levels = params["read_levels"]
+        write_levels = params["write_levels"]
+        if read_levels is not None:
+            read_levels = (read_levels[0] * 1024**2, read_levels[1] * 1024**2)
+        if write_levels is not None:
+            write_levels = (write_levels[0] * 1024**2, write_levels[1] * 1024**2)
 
-    yield from check_levels_v1(
-        value=read_throughput,
-        levels_upper=read_levels,
-        metric_name="disk_read_throughput",
-        render_func=render.iobandwidth,
-        label="Read",
-        boundaries=(0, None),
-    )
+        yield from check_levels_v1(
+            value=read_throughput,
+            levels_upper=read_levels,
+            metric_name="disk_read_throughput",
+            render_func=render.iobandwidth,
+            label="Read",
+            boundaries=(0, None),
+        )
 
-    yield from check_levels_v1(
-        value=write_throughput,
-        levels_upper=write_levels,
-        metric_name="disk_write_throughput",
-        render_func=render.iobandwidth,
-        label="Write",
-        boundaries=(0, None),
-    )
+        yield from check_levels_v1(
+            value=write_throughput,
+            levels_upper=write_levels,
+            metric_name="disk_write_throughput",
+            render_func=render.iobandwidth,
+            label="Write",
+            boundaries=(0, None),
+        )
+    except:
+        yield Result(
+            state=State.UNKNOWN,
+            summary=f"error checking datastore status"
+        )
 
 
 agent_section_proxmox_ve_disk_throughput = AgentSection(
