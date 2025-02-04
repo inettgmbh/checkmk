@@ -18,7 +18,6 @@ from cmk.agent_based.v2 import (
     State,
     StringTable,
 )
-
 from cmk.plugins.lib.cpu_util import check_cpu_util
 
 Section = Mapping[str, float]

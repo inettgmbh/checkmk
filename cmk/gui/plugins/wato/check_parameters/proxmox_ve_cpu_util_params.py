@@ -9,7 +9,7 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersOperatingSystem,
 )
-from cmk.gui.valuespec import Alternative, Dictionary, Integer, FixedValue, Float, Tuple
+from cmk.gui.valuespec import Alternative, Dictionary, FixedValue, Float, Integer, Tuple
 
 
 def _parameter_valuespec_proxmox_ve_cpu_util():
