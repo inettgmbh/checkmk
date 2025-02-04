@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from cmk.agent_based.v1 import check_levels as check_levels_v1
-
 from cmk.agent_based.v2 import (
     AgentSection,
     CheckPlugin,
