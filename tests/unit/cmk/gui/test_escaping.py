@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -8,13 +8,6 @@ import pytest
 from cmk.gui.utils import escaping
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.speaklater import LazyString
-
-
-def test_escape_to_html() -> None:
-    assert isinstance(escaping.escape_to_html(""), HTML)
-    assert str(escaping.escape_to_html("")) == ""
-    assert str(escaping.escape_to_html("<script>")) == "&lt;script&gt;"
-    assert str(escaping.escape_to_html("<b>")) == "&lt;b&gt;"
 
 
 def test_escape_to_html_permissive() -> None:
@@ -35,14 +28,14 @@ def test_htmllib_integration() -> None:
         ('">alert(1)', "&quot;&gt;alert(1)"),
         (None, ""),
         (1, "1"),
-        (HTML('">alert(1)'), '">alert(1)'),
+        (HTML.without_escaping('">alert(1)'), '">alert(1)'),
         (1.1, "1.1"),
         ("<", "&lt;"),
         ("'", "&#x27;"),
         (LazyString(str, "'"), "&#x27;"),
     ],
 )
-def test_escape_attribute(inp, out) -> None:  # type:ignore[no-untyped-def]
+def test_escape_attribute(inp: escaping.EscapableEntity, out: str) -> None:
     assert escaping.escape_attribute(inp) == out
 
 
@@ -109,10 +102,11 @@ def test_escape_attribute(inp, out) -> None:  # type:ignore[no-untyped-def]
         ),
     ],
 )
-def test_escape_text(inp, out) -> None:  # type:ignore[no-untyped-def]
+def test_escape_text(inp: escaping.EscapableEntity, out: str | None) -> None:
     if out is None:
-        out = inp
-    assert escaping.escape_text(inp) == out
+        assert escaping.escape_text(inp) == inp
+    else:
+        assert escaping.escape_text(inp) == out
 
 
 @pytest.mark.parametrize(
@@ -120,9 +114,9 @@ def test_escape_text(inp, out) -> None:  # type:ignore[no-untyped-def]
     [
         ("foo bar", "foo bar"),
         ("some <a>link</a> in text", "some link in text"),
-        (HTML("some <a>link</a> in html text"), "some link in html text"),
+        (HTML.without_escaping("some <a>link</a> in html text"), "some link in html text"),
         (LazyString(str, "some <a>link</a> in lazy text"), "some link in lazy text"),
     ],
 )
-def test_strip_tags(inp, out) -> None:  # type:ignore[no-untyped-def]
+def test_strip_tags(inp: escaping.EscapableEntity, out: str) -> None:
     assert escaping.strip_tags(inp) == out

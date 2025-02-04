@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,20 +9,13 @@ import os
 import socket
 import sys
 from itertools import groupby
-from typing import Optional, Tuple, Union
 
-import snap7  # type: ignore[import]
-from snap7.common import Snap7Exception, Snap7Library  # type: ignore[import]
-from snap7.snap7types import (  # type: ignore[import]
-    S7AreaCT,
-    S7AreaDB,
-    S7AreaMK,
-    S7AreaPA,
-    S7AreaPE,
-    S7AreaTM,
-)
+import snap7
+from snap7.common import Snap7Library
+from snap7.exceptions import Snap7Exception
+from snap7.types import Areas
 
-from cmk.special_agents.utils.agent_common import SectionWriter
+from cmk.special_agents.v0_unstable.agent_common import SectionWriter
 
 # prevent snap7 logger to log errors directly to console
 snap7.common.logger.setLevel(logging.CRITICAL + 10)
@@ -91,7 +84,7 @@ def parse_spec(hostspec):
     for spec in parts[5:]:
         p = spec.split(",")
         if len(p) != 5:
-            print("ERROR: Invalid value specified: %s" % spec, file=sys.stderr)
+            sys.stderr.write("ERROR: Invalid value specified: %s\n" % spec)
             return 1
 
         if ":" in p[0]:
@@ -116,7 +109,7 @@ def parse_spec(hostspec):
 
         if ":" in p[2]:
             typename, size_str = p[2].split(":")
-            datatype: Union[Tuple[str, int], str] = (typename, int(size_str))
+            datatype: tuple[str, int] | str = (typename, int(size_str))
         else:
             datatype = p[2]
         value.update(
@@ -190,14 +183,14 @@ def _get_dint(_bytearray, byte_index):
     return byte3 + (byte2 << 8) + (byte1 << 16) + (byte0 << 32)
 
 
-def _area_name_to_area_id(area_name):
+def _area_name_to_area_id(area_name: str) -> Areas:
     return {
-        "db": S7AreaDB,
-        "input": S7AreaPE,
-        "output": S7AreaPA,
-        "merker": S7AreaMK,
-        "timer": S7AreaTM,
-        "counter": S7AreaCT,
+        "db": Areas.DB,
+        "input": Areas.PE,
+        "output": Areas.PA,
+        "merker": Areas.MK,
+        "timer": Areas.TM,
+        "counter": Areas.CT,
     }[area_name]
 
 
@@ -214,7 +207,7 @@ def _addresses_from_area_values(values):
 
         datatype = device_value["datatype"]
         if isinstance(datatype, tuple):
-            size: Optional[int] = datatype[1]
+            size: int | None = datatype[1]
         else:
             size = DATATYPES[datatype][0]
 
@@ -284,7 +277,6 @@ def _snap7error(hostname, custom_text, raw_error_message):
 
 
 def main(sys_argv=None):
-
     args = parse_arguments(sys_argv or sys.argv[1:])
 
     socket.setdefaulttimeout(args.timeout)
@@ -296,20 +288,19 @@ def main(sys_argv=None):
     client = snap7.client.Client()
 
     for device in args.hostspec:
-
         hostname = device["host_name"]
 
         try:
             client.connect(device["host_address"], device["rack"], device["slot"], device["port"])
         except Snap7Exception as e:
-            print(_snap7error(hostname, "Error connecting to device", e), file=sys.stderr)
+            sys.stderr.write(_snap7error(hostname, "Error connecting to device", e) + "\n")
             continue
 
         try:
             cpu_state = client.get_cpu_state()
         except Snap7Exception as e:
             cpu_state = None
-            print(_snap7error(hostname, "Error reading device CPU state", e), file=sys.stderr)
+            sys.stderr.write(_snap7error(hostname, "Error reading device CPU state", e) + "\n")
 
         parsed_area_values = []
         for (area_name, db_number), iter_values in _group_device_values(device):
@@ -323,7 +314,7 @@ def main(sys_argv=None):
                     size=end_address - start_address,
                 )
             except Snap7Exception as e:
-                print(_snap7error(hostname, "Error reading data area", e), file=sys.stderr)
+                sys.stderr.write(_snap7error(hostname, "Error reading data area", e) + "\n")
                 continue
 
             parsed_area_values.extend(_cast_values(values, start_address, area_value))
@@ -334,7 +325,7 @@ def main(sys_argv=None):
 
         with SectionWriter("siemens_plc", None) as writer:
             for values in parsed_area_values:
-                writer.append("%s %s %s %s" % (hostname, *values))
+                writer.append("{} {} {} {}".format(hostname, *values))
 
 
 if __name__ == "__main__":

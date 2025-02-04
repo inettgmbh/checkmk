@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -11,21 +11,19 @@ from cmk.gui.plugins.wato.utils import (
     RulespecGroupCheckParametersApplications,
     RulespecGroupEnforcedServicesApplications,
 )
-from cmk.gui.valuespec import Dictionary, DropdownChoice, TextInput, Transform
+from cmk.gui.valuespec import Dictionary, DropdownChoice, TextInput
 
 rulespec_registry.register(
     ManualCheckParameterRulespec(
         check_group_name="local",
         group=RulespecGroupEnforcedServicesApplications,
         item_spec=lambda: TextInput(title=_("Name of local item")),
-        parameter_valuespec=lambda: Transform(
-            valuespec=Dictionary(elements=[]), forth=lambda p: {}
-        ),
+        parameter_valuespec=lambda: Dictionary(elements=[]),
         title=lambda: _("Local checks"),
     )
 )
 
-# We only need the above, there are no "true" parameters to this check plugin.
+# We only need the above, there are no "true" parameters to this check plug-in.
 
 
 def _deprecation_message() -> str:
@@ -64,7 +62,7 @@ rulespec_registry.register(
         item_spec=lambda: TextInput(title=_("Name of local item")),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_local,
-        title=lambda: _("Local checks in Checkmk clusters") + " - " + _("Deprecated"),
+        title=lambda: _("Local checks in Checkmk clusters"),
         is_deprecated=True,
     )
 )

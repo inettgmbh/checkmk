@@ -1,23 +1,36 @@
 #!/bin/sh
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+: "${MK_INSTALLDIR:=""}"
+: "${MK_CONFDIR:="/etc/check_mk"}"
+
 MYSELF="$(realpath -- "$0" || printf "%s" "$0")"
-TEMPLATE="/etc/check_mk/xinetd-service-template.cfg"
 DESTINATION="/etc/xinetd.d"
 SERVICE_FILE="check-mk-agent"
 
+if [ -n "${MK_INSTALLDIR}" ]; then
+    TEMPLATE="${MK_INSTALLDIR}/package/config/xinetd-service-template.cfg"
+    # In a CCE you can configure auto registration, that cannot be achieved with xinetd
+    # if this file exists we assume that was configured. (See CMK-12997)
+    PREDEFINED_CONNECTIONS_PATH="${MK_INSTALLDIR}/package/config/pre_configured_connections.json"
+else
+    TEMPLATE="${MK_CONFDIR}/xinetd-service-template.cfg"
+    PREDEFINED_CONNECTIONS_PATH="/var/lib/cmk-agent/pre_configured_connections.json"
+fi
+
 usage() {
     cat >&2 <<HERE
-$0 deploy|cleanup|trigger|isdeployed
+$0 deploy|cleanup|purge|trigger|isdeployed
 
 Manage the xinetd unit required for Checkmk agent setup.
 
 Commands:
   deploy      Deploy the service file to ${DESTINATION},
               using the template ${TEMPLATE}
-  cleanup     Remove the service file
+  cleanup     Remove the deployed service file
+  purge       cleanup and additionally remove leftover (CRE) service files
   trigger     Reload or start xinetd
   isdeployed  Exit successfully if and only if files are deployed
 HERE
@@ -28,6 +41,16 @@ _xinetd_present() {
     command -v xinetd >/dev/null 2>&1 && return 0
     printf "xinetd not found on system" >&2
     return 1
+}
+
+_predefined_connection_not_present() {
+    if [ -e "${PREDEFINED_CONNECTIONS_PATH}" ]; then
+        printf "A auto-registration rule was configured for this host!\n" >&2
+        printf "The agent controller does not support the xinetd setup and therefore transport encryption and auto-registration are not available!\n" >&2
+        printf "Since this might be expected we abort here. If xinetd should really be used exclude this host from the rule that configures the auto-registration\n" >&2
+        return 1
+    fi
+    return 0
 }
 
 _xinetd_running() {
@@ -50,6 +73,8 @@ deploy() {
 
     _xinetd_present || return 1
 
+    _predefined_connection_not_present || return 1
+
     mkdir -p "${DESTINATION}" || return 1
 
     {
@@ -67,12 +92,21 @@ deploy() {
 cleanup() {
 
     # migrate CRE pre 2.1 xinetd service
-    if [ ! -e "${TEMPLATE}" ] && [ -e "/etc/xinetd.d/check_mk" ]; then
+    if [ -e "/etc/xinetd.d/check_mk" ]; then
         printf "migrating old /etc/xinetd.d/check_mk ... "
         sed 's/service check_mk/service check-mk-agent/' "/etc/xinetd.d/check_mk" >"${TEMPLATE}" && rm "/etc/xinetd.d/check_mk" && printf "OK\n"
     fi
 
     rm -f "${DESTINATION}/${SERVICE_FILE}" 2>/dev/null
+}
+
+purge() {
+    path="/etc/xinetd.d/check_mk"
+    [ -e "${path}" ] || return 0
+    printf "Removing leftover xinetd service: %s\n" "${path}"
+    rm -f "${path}"
+
+    cleanup
 }
 
 trigger() {
@@ -108,6 +142,9 @@ main() {
             ;;
         cleanup)
             cleanup
+            ;;
+        purge)
+            purge
             ;;
         trigger)
             trigger

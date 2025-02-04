@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
-import responses  # type: ignore[import]
+import responses
 
 from cmk.special_agents.agent_cisco_prime import main
 
@@ -23,21 +23,22 @@ def fixture_accept_requests(return_code):
     for req in REQUESTS:
         responses.add(
             responses.GET,
-            "https://%s/%s/%s" % (HOST, API_PATH, req),
+            f"https://{HOST}/{API_PATH}/{req}",
             json={"authenticated": True, "user": "user"},
             status=return_code,
         )
 
 
-def test_wrong_arguments(capsys) -> None:  # type:ignore[no-untyped-def]
+def test_wrong_arguments(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main([])
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.usefixtures("accept_requests")
 @responses.activate
 @pytest.mark.parametrize("return_code", [200])
-def test_agent_output(capsys, accept_requests) -> None:  # type:ignore[no-untyped-def]
+def test_agent_output(capsys: pytest.CaptureFixture[str]) -> None:
     main(["--debug", "--hostname", HOST, "-u", "%s:%s" % AUTH])
     assert capsys.readouterr() == (
         "<<<cisco_prime_wifi_access_points:sep(0)>>>\n"
@@ -50,9 +51,10 @@ def test_agent_output(capsys, accept_requests) -> None:  # type:ignore[no-untype
     )
 
 
+@pytest.mark.usefixtures("accept_requests")
 @responses.activate
 @pytest.mark.parametrize("return_code", [401])
-def test_missing_credentials(capsys, accept_requests) -> None:  # type:ignore[no-untyped-def]
+def test_missing_credentials(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main(["--hostname", HOST])
     assert capsys.readouterr() == (

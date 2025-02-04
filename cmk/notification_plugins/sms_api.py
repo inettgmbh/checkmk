@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
+from collections.abc import MutableMapping
 from dataclasses import dataclass
-from typing import NoReturn, Optional, Union
+from typing import NoReturn
 
 import requests
 
-from cmk.notification_plugins.utils import (  # pylint: disable=cmk-module-layer-violation
+from cmk.utils.http_proxy_config import deserialize_http_proxy_config
+from cmk.utils.notify_types import PluginNotificationContext
+
+from cmk.notification_plugins.utils import (
     collect_context,
+    get_password_from_env_or_context,
     get_sms_message_from_context,
     quote_message,
-    retrieve_from_passwordstore,
 )
 
 #   .--Classes-------------------------------------------------------------.
@@ -33,7 +37,6 @@ class Errors(list[str]):
 
 
 Message = str
-RawContext = dict[str, str]
 
 
 @dataclass
@@ -43,7 +46,7 @@ class RequestParameter:
     recipient: str
     url: str
     verify: bool
-    proxies: Optional[dict[str, str]]
+    proxies: MutableMapping[str, str] | None
     user: str
     pwd: str
     timeout: float
@@ -74,7 +77,7 @@ class Context:
 #   +----------------------------------------------------------------------+
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-def _get_context_parameter(raw_context: RawContext) -> Union[Errors, Context]:
+def _get_context_parameter(raw_context: PluginNotificationContext) -> Errors | Context:
     """First, get the request parameters for sendind the sms. Then construct
     the sms message and get the endpoint specific parameters to return the
     context for notification processing.
@@ -84,7 +87,7 @@ def _get_context_parameter(raw_context: RawContext) -> Union[Errors, Context]:
         "PARAMETER_MODEM_TYPE",
         "PARAMETER_URL",
         "PARAMETER_USERNAME",
-        "PARAMETER_PASSWORD",
+        "PARAMETER_PASSWORD_1",
     ]:
         if mandatory not in raw_context:
             missing_params.append(mandatory)
@@ -121,21 +124,25 @@ def _get_context_parameter(raw_context: RawContext) -> Union[Errors, Context]:
     return Errors(["Unknown unsupported modem: %s" % endpoint])
 
 
-def _get_request_params_from_context(raw_context: RawContext) -> Union[Errors, RequestParameter]:
+def _get_request_params_from_context(
+    raw_context: PluginNotificationContext,
+) -> Errors | RequestParameter:
     recipient = raw_context["CONTACTPAGER"].replace(" ", "")
     if not recipient:
         return Errors(["Error: Pager Number of %s not set\n" % raw_context["CONTACTNAME"]])
-
-    proxy_url = raw_context.get("PARAMETER_PROXY_URL", "")
-    proxies = {"https": proxy_url} if proxy_url else None
 
     return RequestParameter(
         recipient=recipient,
         url=raw_context["PARAMETER_URL"],
         verify="PARAMETER_IGNORE_SSL" in raw_context,
-        proxies=proxies,
+        proxies=deserialize_http_proxy_config(
+            raw_context.get("PARAMETER_PROXY_URL")
+        ).to_requests_proxies(),
         user=raw_context["PARAMETER_USERNAME"],
-        pwd=retrieve_from_passwordstore(raw_context["PARAMETER_PASSWORD"]),
+        pwd=get_password_from_env_or_context(
+            key="PARAMETER_PASSWORD",
+            context=raw_context,
+        ),
         timeout=float(raw_context.get("PARAMETER_TIMEOUT", 10.0)),
     )
 
@@ -164,9 +171,7 @@ def process_notifications(context: Context) -> int:
     )
 
     if response.status_code != 200 or response.content != b"OK\n":
-        sys.stderr.write(
-            "Error Status: %s Details: %r\n" % (response.status_code, response.content)
-        )
+        sys.stderr.write(f"Error Status: {response.status_code} Details: {response.content!r}\n")
         return 2
 
     sys.stdout.write("Notification successfully send via sms.\n")
@@ -176,7 +181,7 @@ def process_notifications(context: Context) -> int:
 
 def main() -> NoReturn:
     """Construct needed context and call the related class."""
-    raw_context: RawContext = collect_context()
+    raw_context: PluginNotificationContext = collect_context()
 
     context = _get_context_parameter(raw_context)
 

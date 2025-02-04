@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from cmk.notification_plugins.victorops import victorops_msg
+from cmk.notification_plugins.victorops import _victorops_msg
 
 
 @pytest.mark.parametrize(
@@ -61,6 +61,6 @@ from cmk.notification_plugins.victorops import victorops_msg
         ),
     ],
 )
-def test_victorops_message(context, result) -> None:  # type:ignore[no-untyped-def]
-    msg = victorops_msg(context)
+def test_victorops_message(context: dict[str, str], result: dict[str, str]) -> None:
+    msg = _victorops_msg(context)
     assert msg == result

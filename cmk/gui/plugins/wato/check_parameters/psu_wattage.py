@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,12 +9,12 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersNetworking,
 )
-from cmk.gui.valuespec import Dictionary, Float, Percentage, Tuple
+from cmk.gui.valuespec import Dictionary, Float, Percentage, TextInput, Tuple, ValueSpec
 
 
 def _parameter_valuespec_psu_wattage() -> Dictionary:
     return Dictionary(
-        title=_("Levels for Power Supply Wattage"),
+        title=_("Levels for power supply wattage"),
         elements=[
             (
                 "levels_abs_upper",
@@ -44,12 +44,10 @@ def _parameter_valuespec_psu_wattage() -> Dictionary:
                         Percentage(
                             label=_("Warning at"),
                             default_value=80.0,
-                            display_format="%.3f",
                         ),
                         Percentage(
                             label=_("Critical at"),
                             default_value=90.0,
-                            display_format="%.3f",
                         ),
                     ],
                 ),
@@ -62,12 +60,10 @@ def _parameter_valuespec_psu_wattage() -> Dictionary:
                         Percentage(
                             label=_("Warning below"),
                             default_value=1.0,
-                            display_format="%.3f",
                         ),
                         Percentage(
                             label=_("Critical below"),
                             default_value=0.1,
-                            display_format="%.3f",
                         ),
                     ],
                 ),
@@ -76,12 +72,17 @@ def _parameter_valuespec_psu_wattage() -> Dictionary:
     )
 
 
+def _item_spec() -> ValueSpec:
+    return TextInput(title=_("PSU"))
+
+
 rulespec_registry.register(
     CheckParameterRulespecWithItem(
         check_group_name="psu_wattage",
         group=RulespecGroupCheckParametersNetworking,
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_psu_wattage,
-        title=lambda: _("Power Supply Wattage"),
+        title=lambda: _("Power supply wattage"),
+        item_spec=_item_spec,
     )
 )

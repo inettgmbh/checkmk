@@ -6,59 +6,10 @@
 #include <Ntsecapi.h>
 
 #include "common/wtools_user_control.h"
-#include "logger.h"
+#include "wnx/logger.h"
 #include "tools/_raii.h"
 
 namespace wtools::uc {  // to become friendly for cma::cfg classes
-
-//
-//
-static const int counter = 0;
-
-// List of all domains!!!
-// This is #REFERENCE
-NTSTATUS PrintDomainName() {
-    LSA_HANDLE policy;
-
-    static LSA_OBJECT_ATTRIBUTES oa = {sizeof(oa)};
-
-    auto status = LsaOpenPolicy(0, &oa, POLICY_VIEW_LOCAL_INFORMATION, &policy);
-
-    if (!LSA_SUCCESS(status)) return status;
-    ON_OUT_OF_SCOPE(LsaClose(policy));
-
-    // I do not know why we use union
-    union {
-        PPOLICY_DNS_DOMAIN_INFO ppddi;
-        PPOLICY_ACCOUNT_DOMAIN_INFO ppadi;
-    };
-
-    status = LsaQueryInformationPolicy(policy, PolicyDnsDomainInformation,
-                                       (void **)&ppddi);
-
-    if (!LSA_SUCCESS(status)) return status;
-
-    if (ppddi->Sid) {
-        XLOG::l("DnsDomainName: '{}'",
-                wtools::ToUtf8(ppddi->DnsDomainName.Buffer));
-    } else {
-        XLOG::l("'{}': not domain controller !!",
-                wtools::ToUtf8(ppddi->Name.Buffer));
-        status = -1;
-    }
-
-    LsaFreeMemory(ppddi);
-    if (0 <= status) return status;
-
-    if (LSA_SUCCESS(
-            status = LsaQueryInformationPolicy(
-                policy, PolicyAccountDomainInformation, (void **)&ppadi))) {
-        XLOG::l("DomainName: '{}'", wtools::ToUtf8(ppadi->DomainName.Buffer));
-        LsaFreeMemory(ppadi);
-    }
-
-    return status;
-}
 
 TEST(WtoolsUserControl, Base) {
     LdapControl lc;
@@ -110,7 +61,8 @@ TEST(WtoolsUserControl, AddDeleteUserToUsers) {
 TEST(WtoolsUserControl, AddDeleteCheckGroup) {
     LdapControl lc;
     std::wstring_view g = L"x_test_group";
-    std::wstring_view c = L"Check MK Testing Group";
+    std::wstring_view c = L"Checkmk Testing Group";
+
     lc.localGroupDel(g);
     ON_OUT_OF_SCOPE(lc.localGroupDel(g));
     EXPECT_EQ(Status::absent, lc.localGroupDel(g));
@@ -120,12 +72,11 @@ TEST(WtoolsUserControl, AddDeleteCheckGroup) {
     EXPECT_EQ(Status::absent, lc.localGroupDel(g));
 }
 
-TEST(WtoolsUserControl, AddDeleteCheckForbiddenGroupIntegration) {
+TEST(WtoolsUserControl, AddDeleteCheckForbiddenGroupComponent) {
     using namespace std::literals::string_literals;
     LdapControl lc;
-    if (wtools::SidToName(L"S-1-5-32-545", SidTypeGroup) != L"Users") {
+    if (SidToName(L"S-1-5-32-545", SidTypeGroup) != L"Users") {
         GTEST_SKIP() << "This test is only suitable for English Windows";
-        return;
     }
     static const std::wstring groups[] = {
         L"Access Control Assistance Operators"s,
@@ -158,8 +109,8 @@ TEST(WtoolsUserControl, AddDeleteMembers) {
     LdapControl lc;
     std::wstring_view g = L"x_test_group";
     std::wstring_view u = L"x_user_name";
-    std::wstring_view c = L"Check MK Testing Group";
-    lc.localGroupDel(g);
+    std::wstring_view c = L"Checkmk Testing Group";
+    EXPECT_NE(lc.localGroupDel(g), Status::error);
     ON_OUT_OF_SCOPE({
         lc.userDel(u);
         lc.localGroupDel(g);

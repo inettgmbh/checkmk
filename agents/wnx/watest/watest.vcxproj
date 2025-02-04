@@ -24,6 +24,10 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>watest</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <AsioVersion>asio-1.24.0-patched</AsioVersion>
+    <FmtVersion>fmt-10.2.1</FmtVersion>
+    <GoogleTest>googletest-71140c3ca7-patched</GoogleTest>
+    <YamlCpp>yaml-cpp.9a362420</YamlCpp>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -87,8 +91,8 @@
     <CustomBuildAfterTargets>
     </CustomBuildAfterTargets>
     <TargetName>$(ProjectName)$(PlatformArchitecture)</TargetName>
-    <EnableMicrosoftCodeAnalysis>true</EnableMicrosoftCodeAnalysis>
-    <EnableClangTidyCodeAnalysis>true</EnableClangTidyCodeAnalysis>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <EnableClangTidyCodeAnalysis>false</EnableClangTidyCodeAnalysis>
     <ClangTidyChecks>-cppcoreguidelines-avoid-non-const-global-variables;-hicpp-signed-bitwise;-google-readability-braces-around-statements,-readability-braces-around-statements,-hicpp-braces-around-statements,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-hicpp-no-array-decay,-cppcoreguidelines-pro-bounds-pointer-arithmetic</ClangTidyChecks>
     <CodeAnalysisRuleSet>..\src\engine\all.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -101,8 +105,8 @@
     <CustomBuildAfterTargets>
     </CustomBuildAfterTargets>
     <TargetName>$(ProjectName)$(PlatformArchitecture)</TargetName>
-    <EnableMicrosoftCodeAnalysis>true</EnableMicrosoftCodeAnalysis>
-    <EnableClangTidyCodeAnalysis>true</EnableClangTidyCodeAnalysis>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <EnableClangTidyCodeAnalysis>false</EnableClangTidyCodeAnalysis>
     <ClangTidyChecks>-cppcoreguidelines-avoid-non-const-global-variables;-hicpp-signed-bitwise;-google-readability-braces-around-statements,-readability-braces-around-statements,-hicpp-braces-around-statements,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-hicpp-no-array-decay,-cppcoreguidelines-pro-bounds-pointer-arithmetic</ClangTidyChecks>
     <CodeAnalysisRuleSet>..\src\engine\all.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -115,8 +119,8 @@
     <CustomBuildAfterTargets>
     </CustomBuildAfterTargets>
     <TargetName>$(ProjectName)$(PlatformArchitecture)</TargetName>
-    <EnableMicrosoftCodeAnalysis>true</EnableMicrosoftCodeAnalysis>
-    <EnableClangTidyCodeAnalysis>true</EnableClangTidyCodeAnalysis>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <EnableClangTidyCodeAnalysis>false</EnableClangTidyCodeAnalysis>
     <ClangTidyChecks>-cppcoreguidelines-avoid-non-const-global-variables;-hicpp-signed-bitwise;-google-readability-braces-around-statements,-readability-braces-around-statements,-hicpp-braces-around-statements,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-hicpp-no-array-decay,-cppcoreguidelines-pro-bounds-pointer-arithmetic</ClangTidyChecks>
     <CodeAnalysisRuleSet>..\src\engine\all.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -129,8 +133,8 @@
     <CustomBuildAfterTargets>
     </CustomBuildAfterTargets>
     <TargetName>$(ProjectName)$(PlatformArchitecture)</TargetName>
-    <EnableMicrosoftCodeAnalysis>true</EnableMicrosoftCodeAnalysis>
-    <EnableClangTidyCodeAnalysis>true</EnableClangTidyCodeAnalysis>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <EnableClangTidyCodeAnalysis>false</EnableClangTidyCodeAnalysis>
     <ClangTidyChecks>-cppcoreguidelines-avoid-non-const-global-variables;-hicpp-signed-bitwise;-google-readability-braces-around-statements,-readability-braces-around-statements,-hicpp-braces-around-statements,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-hicpp-no-array-decay,-cppcoreguidelines-pro-bounds-pointer-arithmetic</ClangTidyChecks>
     <CodeAnalysisRuleSet>..\src\engine\all.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -144,7 +148,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/googletest/googletest;$(ProjectDir)/../extlibs/googletest/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/asio/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/yaml-cpp/include;$(ProjectDir)/../extlibs/fmt/include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/$(AsioVersion)/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/$(YamlCpp)/include;$(ProjectDir)/../extlibs/$(FmtVersion)/include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -153,6 +157,7 @@
       <SupportJustMyCode>false</SupportJustMyCode>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalOptions>/Zc:char8_t- $(ExternalCompilerOptions)  /Zi %(AdditionalOptions)</AdditionalOptions>
+      <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -168,10 +173,8 @@
       </Command>
     </CustomBuildStep>
     <PostBuildEvent>
-      <Command>@echo Installing test in "$(OutDirFullPath)"
-@cd $(SolutionDir) 
-@prepare_to_tests.cmd $(TargetDir)test
-</Command>
+      <Command>
+      </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -184,7 +187,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/googletest/googletest;$(ProjectDir)/../extlibs/googletest/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/asio/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/yaml-cpp/include;$(ProjectDir)/../extlibs/fmt/include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/$(AsioVersion)/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/$(YamlCpp)/include;$(ProjectDir)/../extlibs/$(FmtVersion)/include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -193,6 +196,7 @@
       <SupportJustMyCode>false</SupportJustMyCode>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalOptions>/Zc:char8_t- $(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+      <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -208,10 +212,8 @@
       </Command>
     </CustomBuildStep>
     <PostBuildEvent>
-      <Command>@echo Installing test in "$(OutDirFullPath)"
-@cd $(SolutionDir) 
-@prepare_to_tests.cmd $(TargetDir)test
-</Command>
+      <Command>
+      </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -226,13 +228,14 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/googletest/googletest;$(ProjectDir)/../extlibs/googletest/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/asio/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/yaml-cpp/include;$(ProjectDir)/../extlibs/fmt/include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/$(AsioVersion)/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/$(YamlCpp)/include;$(ProjectDir)/../extlibs/$(FmtVersion)/include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <DisableSpecificWarnings>%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalOptions>/Zc:char8_t- $(ExternalCompilerOptions) /Zi %(AdditionalOptions)</AdditionalOptions>
+      <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -250,10 +253,8 @@
       </Command>
     </CustomBuildStep>
     <PostBuildEvent>
-      <Command>@echo Installing test in "$(OutDirFullPath)"
-@cd $(SolutionDir) 
-@prepare_to_tests.cmd $(TargetDir)test
-</Command>
+      <Command>
+      </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -268,13 +269,14 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/googletest/googletest;$(ProjectDir)/../extlibs/googletest/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/asio/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/yaml-cpp/include;$(ProjectDir)/../extlibs/fmt/include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest;$(ProjectDir)/../extlibs/$(GoogleTest)/googletest/include;$(ProjectDir)/../src/engine;$(ProjectDir)/../include;$(ProjectDir)/../src;$(ProjectDir)/../extlibs/$(AsioVersion)/include;$(ProjectDir)/../src/player;$(ProjectDir)/../extlibs/$(YamlCpp)/include;$(ProjectDir)/../extlibs/$(FmtVersion)/include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <DisableSpecificWarnings>%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalOptions>/Zc:char8_t- $(ExternalCompilerOptions) %(AdditionalOptions)</AdditionalOptions>
+      <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -292,10 +294,8 @@
       </Command>
     </CustomBuildStep>
     <PostBuildEvent>
-      <Command>@echo Installing test in "$(OutDirFullPath)"
-@cd $(SolutionDir) 
-@prepare_to_tests.cmd $(TargetDir)test
-</Command>
+      <Command>
+      </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -303,7 +303,7 @@
     <ClInclude Include="test_tools.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\extlibs\googletest\googletest\src\gtest-all.cc">
+    <ClCompile Include="..\extlibs\$(GoogleTest)\googletest\src\gtest-all.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
@@ -324,10 +324,10 @@
     <ClCompile Include="test-cfg_engine.cpp" />
     <ClCompile Include="test-cma-tools.cpp" />
     <ClCompile Include="test-commander.cpp" />
-    <ClCompile Include="test-common.cpp" />
     <ClCompile Include="test-cvt.cpp" />
     <ClCompile Include="test-encryption.cpp" />
     <ClCompile Include="test-eventlog.cpp" />
+    <ClCompile Include="test-extensions.cpp" />
     <ClCompile Include="test-external-port.cpp" />
     <ClCompile Include="test-firewall.cpp" />
     <ClCompile Include="test-fmt_ext.cpp" />
@@ -339,7 +339,6 @@
     <ClCompile Include="test-object_repo.cpp" />
     <ClCompile Include="test-ohm.cpp" />
     <ClCompile Include="test-onlyfrom.cpp" />
-    <ClCompile Include="test-player-cmdline.cpp" />
     <ClCompile Include="test-player.cpp" />
     <ClCompile Include="test-plugin.cpp" />
     <ClCompile Include="test-realtime.cpp" />

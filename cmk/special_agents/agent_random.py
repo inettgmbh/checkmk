@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -32,7 +32,7 @@ def main(sys_argv=None):
     state_file = state_dir / hostname
     try:
         history = ast.literal_eval(state_file.read_text())
-    except (OSError, SyntaxError, IOError):
+    except (OSError, SyntaxError):
         history = {}
 
     services = [
@@ -47,7 +47,7 @@ def main(sys_argv=None):
         "Gnogomatic Garglebox",
     ]
 
-    print("<<<local:sep(0)>>>")
+    sys.stdout.write("<<<local:sep(0)>>>\n")
     state_names = ["OK", "WARN", "CRIT", "UNKNOWN"]
     state_texts = [
         "Everying is OK now",
@@ -71,8 +71,8 @@ def main(sys_argv=None):
                 history[service] = (now, new_state)
         else:
             new_state = last_state
-        print(
-            "%d %s - %s - %s"
+        sys.stdout.write(
+            "%d %s - %s - %s\n"
             % (new_state, service.replace(" ", "_"), state_names[new_state], state_texts[new_state])
         )
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -50,9 +50,9 @@ def _parameter_valuespec_drbd():
                                     ),
                                     MonitoringState(
                                         title=_("Resulting state"),
+                                        default_value=0,
                                     ),
                                 ],
-                                default_value=("ignore", 0),
                             ),
                             title=_("Set roles"),
                             add_label=_("Add role rule"),
@@ -93,6 +93,7 @@ def _parameter_valuespec_drbd():
                                             ("secondary_DUnknown", _("Secondary - DUnknown")),
                                             ("secondary_Consistent", _("Secondary - Consistent")),
                                             ("secondary_UpToDate", _("Secondary - UpToDate")),
+                                            ("unknown_DUnknown", _("Unknown - DUnknown")),
                                         ],
                                     ),
                                     MonitoringState(title=_("Resulting state")),

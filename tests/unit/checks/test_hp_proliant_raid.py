@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+
 import pytest
 
-from tests.unit.conftest import FixRegister
+from cmk.utils.sectionname import SectionName
 
-from cmk.utils.type_defs import CheckPluginName, SectionName
+from cmk.checkengine.checking import CheckPluginName
 
-from cmk.base.api.agent_based.checking_classes import CheckPlugin
-from cmk.base.api.agent_based.type_defs import SNMPSectionPlugin
-from cmk.base.plugins.agent_based.agent_based_api.v1 import Result, Service, State
+from cmk.base.api.agent_based.plugin_classes import CheckPlugin, SNMPSectionPlugin
+from cmk.base.api.agent_based.register import AgentBasedPlugins
+
+from cmk.agent_based.v2 import Result, Service, State
 
 
 @pytest.fixture(name="check_plugin")
-def check_plugin_from_fix_register(fix_register: FixRegister) -> CheckPlugin:
-    return fix_register.check_plugins[CheckPluginName("hp_proliant_raid")]
+def check_plugin_from_fix_register(agent_based_plugins: AgentBasedPlugins) -> CheckPlugin:
+    return agent_based_plugins.check_plugins[CheckPluginName("hp_proliant_raid")]
 
 
 @pytest.fixture(name="section_plugin")
-def section_plugin_from_fix_register(fix_register: FixRegister) -> SNMPSectionPlugin:
-    return fix_register.snmp_sections[SectionName("hp_proliant_raid")]
+def section_plugin_from_fix_register(agent_based_plugins: AgentBasedPlugins) -> SNMPSectionPlugin:
+    return agent_based_plugins.snmp_sections[SectionName("hp_proliant_raid")]
 
 
 @pytest.fixture(name="string_table")
@@ -42,10 +44,10 @@ def test_discover_hp_proliant_raid_no_snmp_data(
     check_plugin: CheckPlugin,
     section_plugin: SNMPSectionPlugin,
 ) -> None:
-    assert list(check_plugin.discovery_function({})) == []
+    assert not list(check_plugin.discovery_function({}))
 
 
-def test_discover_hp_proliant_raid_aa(  # type:ignore[no-untyped-def]
+def test_discover_hp_proliant_raid_aa(  # type: ignore[no-untyped-def]
     check_plugin: CheckPlugin,
     section_plugin: SNMPSectionPlugin,
     string_table,
@@ -63,24 +65,21 @@ def test_discover_hp_proliant_raid_aa(  # type:ignore[no-untyped-def]
     ]
 
 
-def test_check_hp_proliant_raid_item_not_found(  # type:ignore[no-untyped-def]
+def test_check_hp_proliant_raid_item_not_found(  # type: ignore[no-untyped-def]
     check_plugin: CheckPlugin,
     section_plugin: SNMPSectionPlugin,
     string_table,
 ) -> None:
-    assert (
-        list(
-            check_plugin.check_function(
-                item="!111elf",
-                params={},
-                section=section_plugin.parse_function(string_table),
-            )
+    assert not list(
+        check_plugin.check_function(
+            item="!111elf",
+            params={},
+            section=section_plugin.parse_function(string_table),
         )
-        == []
     )
 
 
-def test_check_hp_proliant_raid(  # type:ignore[no-untyped-def]
+def test_check_hp_proliant_raid(  # type: ignore[no-untyped-def]
     check_plugin: CheckPlugin,
     section_plugin: SNMPSectionPlugin,
     string_table,

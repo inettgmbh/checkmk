@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -13,13 +13,13 @@
 #include <string>
 #include <tuple>
 
-#include "cfg.h"
 #include "common/wtools.h"
-#include "logger.h"
 #include "providers/ps.h"
 #include "providers/wmi.h"
 #include "tools/_raii.h"
 #include "tools/_win.h"
+#include "wnx/cfg.h"
+#include "wnx/logger.h"
 namespace rs = std::ranges;
 
 namespace cma::provider {
@@ -75,8 +75,8 @@ std::wstring GetProcessListFromWmi(std::wstring_view separator) {
 
     // status will be ignored, ps doesn't support correct error processing
     // like other wmi sections
-    auto [table, ignored] = wmi.queryTable({}, L"Win32_Process", separator,
-                                           cfg::groups::global.getWmiTimeout());
+    auto [table, ignored] = wmi.queryTable(
+        {}, L"Win32_Process", separator, cfg::groups::g_global.getWmiTimeout());
     return table;
 }
 
@@ -137,14 +137,13 @@ std::string ExtractProcessOwner(HANDLE process) {
 
 namespace {
 std::wstring GetFullPath(IWbemClassObject *wbem_object) {
-    std::wstring process_name;
     auto executable_path =
         wtools::WmiTryGetString(wbem_object, L"ExecutablePath");
 
-    process_name = executable_path.value_or(
+    std::wstring process_name = executable_path.value_or(
         wtools::WmiStringFromObject(wbem_object, L"Caption"));
 
-    auto cmd_line = wtools::WmiTryGetString(wbem_object, L"CommandLine");
+    const auto cmd_line = wtools::WmiTryGetString(wbem_object, L"CommandLine");
     if (!cmd_line) {
         return process_name;
     }
@@ -192,7 +191,7 @@ time_t ConvertWmiTimeToHumanTime(const std::string &creation_date) {
 
     // fill default fields(time-day-saving!)
     time_t current_time = std::time(nullptr);
-    auto creation_tm = *std::localtime(&current_time);
+    auto creation_tm = *std::localtime(&current_time);  // NOLINT
 
     // fill variable fields data
     creation_tm.tm_year = std::strtol(year.c_str(), nullptr, 10) - 1900;
@@ -222,7 +221,7 @@ time_t GetWmiObjectCreationTime(IWbemClassObject *wbem_object) {
 unsigned long long CreationTimeToUptime(time_t creation_time,
                                         IWbemClassObject *wbem_object) {
     // lambda for logging
-    auto obj_name = [wbem_object]() {
+    auto obj_name = [wbem_object] {
         auto process_name = BuildProcessName(wbem_object, true);
         return wtools::ToUtf8(process_name);
     };
@@ -265,9 +264,10 @@ unsigned long long CalculateUptime(IWbemClassObject *wbem_object) {
 // idiotic functions required for idiotic method we are using in legacy software
 int64_t GetUint32AsInt64(IWbemClassObject *wbem_object,
                          const std::wstring &name) {
-    VARIANT value{0};
-    auto hres = wbem_object->Get(name.c_str(), 0, &value, nullptr, nullptr);
-    if (SUCCEEDED(hres)) {
+    VARIANT value = {};
+    const auto res =
+        wbem_object->Get(name.c_str(), 0, &value, nullptr, nullptr);
+    if (SUCCEEDED(res)) {
         ON_OUT_OF_SCOPE(::VariantClear(&value));
         return static_cast<int64_t>(
             wtools::WmiGetUint32(value));  // read 32bit unsigned and convert
@@ -275,9 +275,9 @@ int64_t GetUint32AsInt64(IWbemClassObject *wbem_object,
     }
 
     XLOG::l.e("Fail to get '{}' {:#X}", wtools::ToUtf8(name),
-              static_cast<unsigned int>(hres));
+              static_cast<unsigned int>(res));
     return 0;
-};
+}
 
 std::string GetProcessOwner(uint64_t pid) {
     auto process_id = static_cast<DWORD>(pid);
@@ -330,9 +330,9 @@ std::string ProducePsWmi(bool use_full_path) {
     std::string out;
     while (true) {
         IWbemClassObject *object{nullptr};
-        wtools::WmiStatus status{wtools::WmiStatus::ok};
+        auto status{wtools::WmiStatus::ok};
         std::tie(object, status) = wtools::WmiGetNextObject(
-            processes, cfg::groups::global.getWmiTimeout());
+            processes, cfg::groups::g_global.getWmiTimeout());
         if (object == nullptr) {
             break;
         }
@@ -382,4 +382,4 @@ std::string Ps::makeBody() {
     return ProducePsWmi(full_path_);
 }
 
-};  // namespace cma::provider
+}  // namespace cma::provider

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from pathlib import Path
 
+from cmk.ccc.version import __version__ as cmk_version
+from cmk.ccc.version import Version
+
 import cmk.utils.paths
-from cmk.utils.version import __version__ as cmk_version
 
 
 def packed_agent_path_windows_msi() -> Path:
@@ -14,8 +16,14 @@ def packed_agent_path_windows_msi() -> Path:
 
 
 def packed_agent_path_linux_deb() -> Path:
-    return Path(cmk.utils.paths.agents_dir) / f"check-mk-agent_{cmk_version}-1_all.deb"
+    return (
+        Path(cmk.utils.paths.agents_dir)
+        / f"check-mk-agent_{Version.from_str(cmk_version).version_without_rc}-1_all.deb"
+    )
 
 
 def packed_agent_path_linux_rpm() -> Path:
-    return Path(cmk.utils.paths.agents_dir) / f"check-mk-agent-{cmk_version}-1.noarch.rpm"
+    return (
+        Path(cmk.utils.paths.agents_dir)
+        / f"check-mk-agent-{Version.from_str(cmk_version).version_without_rc}-1.noarch.rpm"
+    )

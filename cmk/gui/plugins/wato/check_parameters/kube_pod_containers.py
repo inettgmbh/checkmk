@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -19,10 +19,8 @@ def _parameter_valuespec():
                 "failed_state",
                 MonitoringState(
                     title=_(
-                        (
-                            "Monitoring state if a container terminates "
-                            "unsuccessfully (non-zero exit code)"
-                        )
+                        "Monitoring state if a container terminates "
+                        "unsuccessfully (non-zero exit code)"
                     ),
                     default_value=2,
                 ),

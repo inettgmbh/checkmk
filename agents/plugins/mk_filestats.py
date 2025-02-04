@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 r"""Check_MK Agent Plugin: mk_filestats
@@ -87,11 +87,10 @@ You should find an example configuration file at
 '../cfg_examples/filestats.cfg' relative to this file.
 """
 
-__version__ = "2.2.0i1"
+__version__ = "2.5.0b1"
 
-# this file has to work with both Python 2 and 3
-# pylint: disable=super-with-arguments
-
+import collections
+import configparser
 import errno
 import glob
 import logging
@@ -101,39 +100,14 @@ import re
 import shlex
 import sys
 import time
-from stat import S_ISDIR, S_ISREG
-
-# NOTE: The tool 3to2 runs when the agent is configured for python 2.5/2.6
-#       and converts the import automatically to 'ConfigParser'.
-#       It does not run for python 2.7, which is why the try/except block
-#       is needed; python 2.7.17 supports importing 'configparser', but from
-#       2.7.18 this is not supported. The documentation explicitly states
-#       that the module 'configparser' is supported from python 3.
-#       https://docs.python.org/2/library/configparser.html
-
-try:
-    from collections import OrderedDict
-except ImportError:  # Python2
-    from ordereddict import OrderedDict  # type: ignore
-
-try:
-    import configparser
-except ImportError:  # Python2
-    import ConfigParser as configparser  # type: ignore
-
-try:
-    import typing
-except ImportError:
-    pass
 
 
 def ensure_str(s):
     if sys.version_info[0] >= 3:
         if isinstance(s, bytes):
             return s.decode("utf-8")
-    else:
-        if isinstance(s, unicode):  # pylint: disable=undefined-variable
-            return s.encode("utf-8")
+    elif isinstance(s, unicode):  # noqa: F821
+        return s.encode("utf-8")
     return s
 
 
@@ -141,9 +115,8 @@ def ensure_text(s):
     if sys.version_info[0] >= 3:
         if isinstance(s, bytes):
             return s.decode("utf-8")
-    else:
-        if isinstance(s, str):
-            return s.decode("utf-8")
+    elif isinstance(s, str):
+        return s.decode("utf-8")
     return s
 
 
@@ -184,56 +157,49 @@ def parse_arguments(argv=None):
     return parsed_args
 
 
-class FileStat(object):  # pylint: disable=useless-object-inheritance
-    """Wrapper arount os.stat
+class FileStat:
+    """Wrapper around os.stat
 
     Only call os.stat once.
     """
 
-    def __init__(self, path):
-        super(FileStat, self).__init__()
-        LOGGER.debug("Creating FileStat(%r)", path)
-        self.path = ensure_text(path)
-        self.stat_status = "ok"
-        self.size = None
-        self.age = None
-        self._m_time = None
-        # report on errors, regard failure as 'file'
-        self.isfile = True
-        self.isdir = False
-
-        LOGGER.debug("os.stat(%r)", self.path)
-        path = self.path.encode("utf8")
+    @classmethod
+    def from_path(cls, raw_file_path, file_path):
+        LOGGER.debug("Creating FileStat(%r)", raw_file_path)
         try:
-            stat = os.stat(path)
+            file_stat = os.stat(raw_file_path)
         except OSError as exc:
-            self.stat_status = "file vanished" if exc.errno == errno.ENOENT else str(exc)
-            return
+            # report on errors, regard failure as 'file'
+            stat_status = "file vanished" if exc.errno == errno.ENOENT else str(exc)
+            return cls(file_path, stat_status)
 
         try:
-            self.size = int(stat.st_size)
+            size = int(file_stat.st_size)
         except ValueError as exc:
-            self.stat_status = str(exc)
-            return
+            stat_status = str(exc)
+            return cls(file_path, stat_status)
 
         try:
-            self._m_time = int(stat.st_mtime)
-            self.age = int(time.time()) - self._m_time
+            m_time = int(file_stat.st_mtime)
+            age = int(time.time()) - m_time
         except ValueError as exc:
-            self.stat_status = str(exc)
-            return
+            stat_status = str(exc)
+            return cls(file_path, stat_status, size)
 
-        self.isfile = S_ISREG(stat.st_mode)
-        self.isdir = S_ISDIR(stat.st_mode)
+        return cls(file_path, "ok", size, age, m_time)
 
-    def __repr__(self):
-        # type: () -> str
-        return "FileStat(%r)" % self.path
+    def __init__(self, file_path, stat_status, size=None, age=None, m_time=None):
+        super().__init__()
+        self.file_path = file_path
+        self.stat_status = stat_status
+        self.size = size
+        self.age = age
+        self._m_time = m_time
 
     def dumps(self):
         data = {
             "type": "file",
-            "path": self.path,
+            "path": self.file_path,
             "stat_status": self.stat_status,
             "size": self.size,
             "age": self.age,
@@ -255,27 +221,60 @@ class FileStat(object):  # pylint: disable=useless-object-inheritance
 #   '----------------------------------------------------------------------'
 
 
-class PatternIterator(object):  # pylint: disable=useless-object-inheritance
+def _sanitize_path(raw_file_path):
+    # raw_file_path is the value returned by iglob. This value cannot typed meaningfully:
+    # * if the path is utf-8 decodable, python2: unicode
+    # * if the path is not utf-8 decodable, python2: str
+    # * python3: str, possibly with surrogates aka it can only be encoded again like so:
+    #   str_with_surrogates.encode('utf-8', 'surrogateescape')
+    if sys.version_info[0] >= 3:
+        return raw_file_path.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    if isinstance(raw_file_path, unicode):  # type: ignore[name-defined] # noqa: F821
+        return raw_file_path
+    return raw_file_path.decode("utf-8", "replace")
+
+
+class PatternIterator:
     """Recursively iterate over all files"""
 
-    def __init__(self, pattern_list):
-        super(PatternIterator, self).__init__()
+    def __init__(self, pattern_list, filters):
+        super().__init__()
         self._patterns = [os.path.abspath(os.path.expanduser(p)) for p in pattern_list]
+        self._regex_filters = [f for f in filters if isinstance(f, RegexFilter)]
+        self._numerical_filters = [f for f in filters if isinstance(f, AbstractNumericFilter)]
 
-    def _iter_files(self, pattern):
-        for item in glob.iglob(pattern):
-            filestat = FileStat(item)
-            if filestat.isfile:
-                yield filestat
-            elif filestat.isdir:
-                for filestat in self._iter_files(os.path.join(item, "*")):
-                    yield filestat
+    def _file_stats(self, raw_file_paths):
+        for raw_file_path in raw_file_paths:
+            file_path = _sanitize_path(raw_file_path)
+            if not all(f.matches(file_path) for f in self._regex_filters):
+                LOGGER.debug("File %r does not match any regex filter", raw_file_path)
+                continue
+
+            file_stat = FileStat.from_path(raw_file_path, file_path)
+            if not all(f.matches(file_stat) for f in self._numerical_filters):
+                LOGGER.debug("File %r does not match any numerical filter", raw_file_path)
+                continue
+
+            LOGGER.debug("File %s matches all regex and numerical filters", raw_file_path)
+            yield file_stat
 
     def __iter__(self):
-        for pat in self._patterns:
-            LOGGER.info("processing pattern: %r", pat)
-            for filestat in self._iter_files(pat):
-                yield filestat
+        for pattern in self._patterns:
+            LOGGER.info("processing pattern: %r", pattern)
+            # pattern needs to be a unicode/python3 str. Otherwise things might go sour, for instance:
+            # If we pass "*".encode("utf-8"), then a non-UTF-8 filesystem may no longer realize that
+            # b'\x2A' refers to a wildcard. Instead iglob is responsible for conversion.
+            for item in glob.iglob(pattern):
+                if os.path.isdir(item):
+                    # equivalent to `find -type f`
+                    for currentpath, _folders, file_names in os.walk(item):
+                        for file_stat in self._file_stats(
+                            [os.path.join(currentpath, fn) for fn in file_names]
+                        ):
+                            yield file_stat
+                else:
+                    for file_stat in self._file_stats([item]):
+                        yield file_stat
 
 
 def get_file_iterator(config):
@@ -289,7 +288,7 @@ def get_file_iterator(config):
     if variety != "patterns":
         raise ValueError("unknown input type: %r" % variety)
     patterns = shlex.split(spec_string)
-    return PatternIterator(patterns)
+    return PatternIterator(patterns, get_file_filters(config))
 
 
 # .
@@ -305,14 +304,6 @@ def get_file_iterator(config):
 #   '----------------------------------------------------------------------'
 
 
-class AbstractFilter(object):  # pylint: disable=useless-object-inheritance
-    """Abstract filter interface"""
-
-    def matches(self, filestat):
-        """return a boolean"""
-        raise NotImplementedError()
-
-
 COMPARATORS = {
     "<": operator.lt,
     "<=": operator.le,
@@ -322,11 +313,11 @@ COMPARATORS = {
 }
 
 
-class AbstractNumericFilter(AbstractFilter):
+class AbstractNumericFilter:
     """Common code for filtering by comparing integers"""
 
     def __init__(self, spec_string):
-        super(AbstractNumericFilter, self).__init__()
+        super().__init__()
         match = FILTER_SPEC_PATTERN.match(spec_string)
         if match is None:
             raise ValueError("unable to parse filter spec: %r" % spec_string)
@@ -345,7 +336,7 @@ class SizeFilter(AbstractNumericFilter):
     def matches(self, filestat):
         """apply AbstractNumericFilter ti file size"""
         size = filestat.size
-        if size is not None:
+        if size is not None and size != "null":
             return self._matches_value(size)
         # Don't return vanished files.
         # Other cases are a problem, and should be included
@@ -356,26 +347,26 @@ class AgeFilter(AbstractNumericFilter):
     def matches(self, filestat):
         """apply AbstractNumericFilter ti file age"""
         age = filestat.age
-        if age is not None:
+        if age is not None and age != "null":
             return self._matches_value(age)
         # Don't return vanished files.
         # Other cases are a problem, and should be included
         return filestat.stat_status != "file vanished"
 
 
-class RegexFilter(AbstractFilter):
+class RegexFilter:
     def __init__(self, regex_pattern):
-        super(RegexFilter, self).__init__()
+        super().__init__()
         LOGGER.debug("initializing with pattern: %r", regex_pattern)
         self._regex = re.compile(ensure_text(regex_pattern), re.UNICODE)
 
-    def matches(self, filestat):
-        return bool(self._regex.match(filestat.path))
+    def matches(self, file_path):
+        return bool(self._regex.match(file_path))
 
 
 class InverseRegexFilter(RegexFilter):
-    def matches(self, filestat):
-        return not bool(self._regex.match(filestat.path))
+    def matches(self, file_path):
+        return not self._regex.match(file_path)
 
 
 def get_file_filters(config):
@@ -397,13 +388,6 @@ def get_file_filters(config):
 
     # add regex filters first to save stat calls
     return sorted(filters, key=lambda x: not isinstance(x, RegexFilter))
-
-
-def iter_filtered_files(file_filters, iterator):
-    for filestat in iterator:
-        if all(f.matches(filestat) for f in file_filters):
-            LOGGER.debug("matched all filters: %r", filestat)
-            yield filestat
 
 
 # .
@@ -442,7 +426,7 @@ def parse_grouping_config(
     )
 
 
-def _grouping_construct_group_name(parent_group_name, child_group_name):
+def _grouping_construct_group_name(parent_group_name, child_group_name=""):
     """allow the user to format the service name using '%s'.
 
     >>> _grouping_construct_group_name('aard %s vark', 'banana')
@@ -452,41 +436,41 @@ def _grouping_construct_group_name(parent_group_name, child_group_name):
     'aard banana vark %s %s'
 
     >>> _grouping_construct_group_name('aard %s vark')
-    'aard  vark'
+    'aard %s vark'
 
     >>> _grouping_construct_group_name('aard %s', '')
-    'aard'
+    'aard %s'
     """
 
     format_specifiers_count = parent_group_name.count("%s")
     if not format_specifiers_count:
         return ("%s %s" % (parent_group_name, child_group_name)).strip()
+
+    if not child_group_name:
+        return parent_group_name
+
     return (
         parent_group_name % ((child_group_name,) + ("%s",) * (format_specifiers_count - 1))
     ).strip()
 
 
-def _matches_regex(single_file, regex_pattern):
-    return bool(re.match(regex_pattern, single_file.path))
-
-
 def _get_matching_child_group(single_file, grouping_conditions):
     for child_group_name, grouping_condition in grouping_conditions:
-        if _matches_regex(single_file, grouping_condition["rule"]):
+        if re.match(grouping_condition["rule"], single_file.file_path):
             return child_group_name
     return ""
 
 
 def grouping_multiple_groups(config_section_name, files_iter, grouping_conditions):
     """create multiple groups per section if the agent is configured
-    for grouping. each group is shown as a seperate service. if a file
+    for grouping. each group is shown as a separate service. if a file
     does not belong to a group, it is added to the section."""
     parent_group_name = config_section_name
     # Initalise dict with parent and child group because they should be in the section
     # with 0 count if there are no files for them.
     grouped_files = {
         "": [],  # parent
-    }  # type: typing.Dict[str, typing.List[FileStat]]
+    }  # type: dict[str, list[FileStat]]
     grouped_files.update({g[0]: [] for g in grouping_conditions})
     for single_file in files_iter:
         matching_child_group = _get_matching_child_group(single_file, grouping_conditions)
@@ -538,36 +522,42 @@ def output_aggregator_file_stats(group_name, files_iter):
 def output_aggregator_extremes_only(group_name, files_iter):
     yield "[[[extremes_only %s]]]" % group_name
 
-    count = 0
-    for count, filestat in enumerate(files_iter, 1):
-        if count == 1:  # init
-            min_age = max_age = min_size = max_size = filestat
-        if filestat.age < min_age.age:
+    files = list(files_iter)
+    count = len(files)
+
+    if not count:
+        yield repr({"type": "summary", "count": count})
+        return
+
+    min_age = max_age = min_size = max_size = files[0]
+
+    for filestat in files[1:]:
+        if filestat.age is None:
+            continue
+
+        if min_age.age is None or filestat.age < min_age.age:
             min_age = filestat
-        elif filestat.age > max_age.age:
+        if max_age.age is None or filestat.age > max_age.age:
             max_age = filestat
-        if filestat.size < min_size.size:
+        if min_size.size is None or filestat.size < min_size.size:
             min_size = filestat
-        elif filestat.size > max_size.size:
+        if max_size.size is None or filestat.size > max_size.size:
             max_size = filestat
 
-    extremes = set((min_age, max_age, min_size, max_size)) if count else ()
-    for extreme_file in extremes:
+    for extreme_file in set((min_age, max_age, min_size, max_size)):
         yield extreme_file.dumps()
     yield repr({"type": "summary", "count": count})
 
 
 def output_aggregator_single_file(group_name, files_iter):
-
     for lazy_file in files_iter:
-
         count_format_specifiers = group_name.count("%s")
 
         if count_format_specifiers == 0:
             subsection_name = group_name
         else:
             subsection_name = group_name % (
-                (lazy_file.path,) + (("%s",) * (count_format_specifiers - 1))
+                (lazy_file.file_path,) + (("%s",) * (count_format_specifiers - 1))
             )
         yield "[[[single_file %s]]]" % subsection_name
         yield lazy_file.dumps()
@@ -608,11 +598,11 @@ def write_output(groups, output_aggregator):
 def iter_config_section_dicts(cfg_file=None):
     if cfg_file is None:
         cfg_file = DEFAULT_CFG_FILE
-    # use OrderedDict for Python 2.6 compatibility: default type is a normal dict,
-    # which is unfortunately not insertion-ordered in Python 2.6
+    # FIXME: Python 2.6 has no OrderedDict at all, it is only available in a separate ordereddict
+    # package, but we simply can't assume that this is installed on the client!
     config = configparser.ConfigParser(
         DEFAULT_CFG_SECTION,
-        dict_type=OrderedDict,
+        dict_type=collections.OrderedDict,
     )
     LOGGER.debug("trying to read %r", cfg_file)
     files_read = config.read(cfg_file)
@@ -650,18 +640,13 @@ def iter_config_section_dicts(cfg_file=None):
 
 
 def main():
-
     args = parse_arguments()
 
     sys.stdout.write("<<<filestats:sep(0)>>>\n")
     for config_section_name, config in iter_config_section_dicts(args["cfg_file"]):
-
-        # 1 input
-        files_iter = get_file_iterator(config)
-
+        # 1 input and
         # 2 filtering
-        filters = get_file_filters(config)
-        filtered_files = iter_filtered_files(filters, files_iter)
+        filtered_files = get_file_iterator(config)
 
         # 3 grouping
         grouping_conditions = config.get("grouping")

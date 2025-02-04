@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -34,17 +33,17 @@ def testconfig_engine(request, make_yaml_config):
 
 @pytest.fixture(name="expected_output")
 def expected_output_engine():
-    drive = r"[A-Z]:%s" % re.escape(os.sep)
+    drive = rf"[A-Z]:{re.escape(os.sep)}"
     expected = [
-        re.escape(r"<<<%s:sep(9)>>>" % Globals.section),
-        r"(%s.*|\w+)\t\w*\t\d+\t\d+\t\d+\t\d{1,3}%s\t%s" % (drive, re.escape("%"), drive),
+        re.escape(rf"<<<{Globals.section}:sep(9)>>>"),
+        rf"({drive}.*|\w+)\t\w*\t\d+\t\d+\t\d+\t\d{{1,3}}%\t{drive}",
     ]
     if not Globals.alone:
         expected += [re.escape(r"<<<systemtime>>>"), r"\d+"]
     return expected
 
 
-def test_section_df(  # type:ignore[no-untyped-def]
+def test_section_df(  # type: ignore[no-untyped-def]
     request, testconfig, expected_output, actual_output, testfile
 ) -> None:
     # request.node.name gives test name
@@ -53,8 +52,8 @@ def test_section_df(  # type:ignore[no-untyped-def]
     expected_output_len = len(expected_output)
 
     # if we have length mismatch we have to extend expected output
-    # we will replicate expected strings depeding from length mismatching
-    # the method is not elegant, but absolutelly correct
+    # we will replicate expected strings depending from length mismatching
+    # the method is not elegant, but absolutely correct
     for _ in range(expected_output_len, actual_output_len):
         expected_output.insert(1, expected_output[1])  # [h][1][f] ->[h][1][1][f] -> ...
 

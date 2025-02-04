@@ -1,24 +1,21 @@
 #include "stdafx.h"
 
-#include "logger.h"
+#include "wnx/logger.h"
 
-#include "cfg.h"
-#include "cma_core.h"
 #include "common/cfg_info.h"
+#include "wnx/cma_core.h"
 namespace fs = std::filesystem;
 
 namespace XLOG {
 
-Emitter l(LogType::log);
-Emitter d(LogType::debug);
-Emitter t(LogType::trace);
-Emitter stdio(LogType::stdio);
-Emitter bp(LogType::log, true);
-
-bool Emitter::bp_allowed_ = tgt::IsDebug();
+Emitter l(LogType::log);         // NOLINT
+Emitter d(LogType::debug);       // NOLINT
+Emitter t(LogType::trace);       // NOLINT
+Emitter stdio(LogType::stdio);   // NOLINT
+Emitter bp(LogType::log, true);  // NOLINT
 
 namespace details {
-static bool EventLogEnabled = true;
+static bool g_event_log_enabled = true;
 
 std::string g_log_context;
 
@@ -60,9 +57,9 @@ unsigned short LoggerEventLevelToWindowsEventType(EventLevel level) noexcept {
     return EVENTLOG_ERROR_TYPE;
 }
 
-static std::atomic<bool> g_log_duplicated_on_stdio = false;
-static std::atomic<bool> g_log_colored_on_stdio = false;
-static DWORD g_log_old_mode = -1;
+static std::atomic g_log_duplicated_on_stdio = false;
+static std::atomic g_log_colored_on_stdio = false;
+static DWORD g_log_old_mode = static_cast<DWORD>(-1);
 
 bool IsDuplicatedOnStdio() noexcept {
     return details::g_log_duplicated_on_stdio;
@@ -112,7 +109,7 @@ public:
     GlobalLogSettings &operator=(const GlobalLogSettings &) = delete;
 
 private:
-    constexpr static auto last_ = static_cast<int>(LogType::last);
+    constexpr static auto last_ = static_cast<int>(LogType::stdio);
     mutable std::mutex lock_;
     Info arr_[last_];
 };
@@ -122,12 +119,9 @@ details::GlobalLogSettings G_GlobalLogSettings;
 
 // check that parameters allow to print
 static bool CalcEnabled(int modifications, LogType log_type) {
-    if ((modifications & Mods::kDrop) != 0) return false;  // output is dropped
-
-    if ((modifications & Mods::kForce) == 0 &&              // output not forced
-        !details::G_GlobalLogSettings.isEnabled(log_type))  // output is too low
-        return false;
-    return true;
+    return (modifications & Mods::kDrop) == 0 ||
+           (modifications & Mods::kForce) != 0 ||
+           details::G_GlobalLogSettings.isEnabled(log_type);
 }
 
 namespace internal {
@@ -151,24 +145,24 @@ int Type2Marker(xlog::Type log_type) noexcept {
 // converter from low level log type
 // to some default mark
 uint32_t Mods2Directions(const xlog::LogParam &lp, uint32_t mods) noexcept {
-    int directions = lp.directions_;
+    auto directions = lp.directions_;
 
-    if (mods & Mods::kStdio) {
+    if ((mods & Mods::kStdio) != 0) {
         directions |= xlog::Directions::kStdioPrint;
     }
-    if (mods & Mods::kNoStdio) {
+    if ((mods & Mods::kNoStdio) != 0) {
         directions &= ~xlog::Directions::kStdioPrint;
     }
-    if (mods & Mods::kFile) {
+    if ((mods & Mods::kFile) != 0) {
         directions |= xlog::Directions::kFilePrint;
     }
-    if (mods & Mods::kNoFile) {
+    if ((mods & Mods::kNoFile) != 0) {
         directions &= ~xlog::Directions::kFilePrint;
     }
-    if (mods & Mods::kEvent) {
+    if ((mods & Mods::kEvent) != 0) {
         directions |= xlog::Directions::kEventPrint;
     }
-    if (mods & Mods::kNoEvent) {
+    if ((mods & Mods::kNoEvent) != 0) {
         directions &= ~xlog::Directions::kEventPrint;
     }
 
@@ -180,14 +174,12 @@ uint32_t Mods2Directions(const xlog::LogParam &lp, uint32_t mods) noexcept {
 // modifies it!
 static std::tuple<int, int, std::string, std::string, xlog::internal::Colors>
 CalcLogParam(const xlog::LogParam &lp, int mods) noexcept {
-    using namespace xlog::internal;
-
     auto c = Colors::dflt;
 
     auto directions = internal::Mods2Directions(lp, mods);
 
     auto flags = lp.flags_;
-    if (mods & Mods::kNoPrefix) {
+    if ((mods & Mods::kNoPrefix) != 0) {
         flags |= xlog::Flags::kNoPrefix;
     }
 
@@ -236,16 +228,11 @@ constexpr unsigned int g_file_text_header_size = 24;
 
 std::string MakeBackupLogName(std::string_view filename,
                               unsigned int index) noexcept {
-    std::string name;
-    if (!filename.empty()) {
-        name += filename;
-    }
-
     if (index == 0) {
-        return name;
+        return std::string{filename};
     }
     try {
-        return name + "." + std::to_string(index);
+        return std::string{filename} + "." + std::to_string(index);
     } catch (const std::bad_alloc & /*e*/) {
         return {};
     }
@@ -292,9 +279,40 @@ void WriteToLogFileWithBackup(std::string_view filename, size_t max_size,
 }
 }  // namespace details
 
+XLOG::Emitter Emitter::copyAndModify(ModData data) const noexcept {
+    auto e = *this;
+    switch (data.type) {
+        case ModData::ModType::assign:
+            e.mods_ = data.mods;
+            break;
+        case ModData::ModType::modify:
+            e.mods_ |= data.mods;
+            break;
+    }
+    return e;
+}
+
+std::string Emitter::sendToLogModding(std::optional<ModData> data,
+                                      std::string_view format,
+                                      fmt::format_args args) const noexcept {
+    try {
+        auto s = fmt::vformat(format, args);
+        if (!this->constructed_) {
+            return s;
+        }
+        if (data.has_value()) {
+            copyAndModify(*data).postProcessAndPrint(s);
+        } else {
+            postProcessAndPrint(s);
+        }
+        return s;
+    } catch (const std::exception & /*e*/) {
+        return SafePrintToDebuggerAndEventLog(std::string{format});
+    }
+}
+
 // output string in different directions
 void Emitter::postProcessAndPrint(const std::string &text) const {
-    using namespace cma::cfg;
     if (!CalcEnabled(mods_, type_)) {
         return;
     }
@@ -304,7 +322,7 @@ void Emitter::postProcessAndPrint(const std::string &text) const {
 
     // EVENT
     if (setup::IsEventLogEnabled() &&
-        ((dirs & xlog::Directions::kEventPrint) != 0)) {
+        (dirs & xlog::Directions::kEventPrint) != 0) {
         // we do not need to format string for the event
         const auto windows_event_log_id = cma::GetModus() == cma::Modus::service
                                               ? EventClass::kSrvDefault
@@ -314,23 +332,22 @@ void Emitter::postProcessAndPrint(const std::string &text) const {
 
     // USUAL
     if ((dirs & xlog::Directions::kDebuggerPrint) != 0) {
-        const auto normal = xlog::formatString(
-            flags, (prefix_ascii + marker_ascii).c_str(), text.c_str());
+        const auto normal =
+            xlog::formatString(flags, prefix_ascii + marker_ascii, text);
         xlog::sendStringToDebugger(normal.c_str());
     }
 
     const auto file_print = (dirs & xlog::Directions::kFilePrint) != 0;
     const auto stdio_print = (dirs & xlog::Directions::kStdioPrint) != 0;
 
-    if (stdio_print || (file_print && details::IsDuplicatedOnStdio())) {
-        auto normal = xlog::formatString(flags, nullptr, text.c_str());
+    if (stdio_print || file_print && details::IsDuplicatedOnStdio()) {
+        const auto normal = xlog::formatString(flags, "", text);
         xlog::sendStringToStdio(normal.c_str(), c);
     }
 
     // FILE
     if (file_print && !lp.filename().empty()) {
-        auto for_file =
-            xlog::formatString(flags, marker_ascii.c_str(), text.c_str());
+        auto for_file = xlog::formatString(flags, marker_ascii, text);
 
         details::WriteToLogFileWithBackup(lp.filename(), getBackupLogMaxSize(),
                                           getBackupLogMaxCount(), for_file);
@@ -353,14 +370,12 @@ void ColoredOutputOnStdio(bool on) noexcept {
 
     auto *std_input = ::GetStdHandle(STD_INPUT_HANDLE);
     if (on) {
-        ::GetConsoleMode(std_input,
-                         &details::g_log_old_mode);  // store old mode
+        ::GetConsoleMode(std_input, &details::g_log_old_mode);
 
-        //  set color output
-        const DWORD old_mode =
+        constexpr DWORD old_mode =
             ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         ::SetConsoleMode(std_input, old_mode);
-    } else if (details::g_log_old_mode != -1) {
+    } else if (details::g_log_old_mode != static_cast<DWORD>(-1)) {
         ::SetConsoleMode(std_input, details::g_log_old_mode);
     }
 }
@@ -385,14 +400,13 @@ void SetLogRotation(unsigned int max_count, size_t max_size) {
 }
 
 void ChangeDebugLogLevel(int debug_level) noexcept {
-    using cma::cfg::LogLevel;
     switch (debug_level) {
-        case LogLevel::kLogAll:
+        case static_cast<int>(cma::cfg::LogLevel::kLogAll):
             setup::EnableTraceLog(true);
             setup::EnableDebugLog(true);
             XLOG::t("Enabled All");
             break;
-        case LogLevel::kLogDebug:
+        case static_cast<int>(cma::cfg::LogLevel::kLogDebug):
             setup::EnableTraceLog(false);
             setup::EnableDebugLog(true);
             XLOG::d.t("Enabled Debug");
@@ -426,9 +440,11 @@ void EnableWinDbg(bool enable) noexcept {
     t.enableWinDbg(enable);
 }
 
-bool IsEventLogEnabled() noexcept { return details::EventLogEnabled; }
+bool IsEventLogEnabled() noexcept { return details::g_event_log_enabled; }
 
-void EnableEventLog(bool enable) noexcept { details::EventLogEnabled = enable; }
+void EnableEventLog(bool enable) noexcept {
+    details::g_event_log_enabled = enable;
+}
 
 // all parameters are set in config
 void Configure(const std::string &log_file_name, int debug_level, bool windbg,
@@ -462,11 +478,12 @@ void TimeLog::writeLog(size_t processed_bytes) const noexcept {
     const auto ended = std::chrono::steady_clock::now();
     const auto lost = duration_cast<std::chrono::milliseconds>(ended - start_);
 
-    if (processed_bytes == 0)
+    if (processed_bytes == 0) {
         XLOG::d.w("Object '{}' in {}ms sends NO DATA", id_, lost.count());
-    else
+    } else {
         XLOG::d.i("Object '{}' in {}ms sends [{}] bytes", id_, lost.count(),
                   processed_bytes);
+    }
 }
 
 }  // namespace cma::tools

@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Managing the available automation calls"""
 
-import abc
-from typing import Any, Dict, Type
+from abc import ABC, abstractmethod
 
-import cmk.utils.plugin_registry
-import cmk.utils.version as cmk_version
+import cmk.ccc.plugin_registry
+import cmk.ccc.version as cmk_version
+
+from cmk.utils import paths
+from cmk.utils.licensing.registry import get_license_state
 
 
-class AutomationCommand(abc.ABC):
+class AutomationCommand[T](ABC):
     """Abstract base class for all automation commands"""
 
-    @abc.abstractmethod
+    @abstractmethod
     def command_name(self) -> str:
         raise NotImplementedError()
 
-    @abc.abstractmethod
-    def get_request(self) -> Any:
+    @abstractmethod
+    def get_request(self) -> T:
         """Get request variables from environment
 
         In case an automation command needs to read variables from the HTTP request this has to be done
-        in this method. The request produced by this function is 1:1 handed over to the execute() method."""
+        in this method. The request produced by this function is 1:1 handed over to the execute() method.
+        """
         raise NotImplementedError()
 
-    @abc.abstractmethod
-    def execute(self, api_request: Any) -> Any:
+    @abstractmethod
+    def execute(self, api_request: T) -> object:
         raise NotImplementedError()
 
 
-class AutomationCommandRegistry(cmk.utils.plugin_registry.Registry[Type[AutomationCommand]]):
-    def plugin_name(self, instance: Type[AutomationCommand]) -> str:
+class AutomationCommandRegistry(cmk.ccc.plugin_registry.Registry[type[AutomationCommand]]):
+    def plugin_name(self, instance: type[AutomationCommand]) -> str:
         return instance().command_name()
 
 
 automation_command_registry = AutomationCommandRegistry()
 
 
-class AutomationPing(AutomationCommand):
+class AutomationPing(AutomationCommand[None]):
     def command_name(self) -> str:
         return "ping"
 
     def get_request(self) -> None:
         return None
 
-    def execute(self, _unused_request: None) -> Dict[str, str]:
+    def execute(self, _unused_request: None) -> dict[str, str]:
         return {
             "version": cmk_version.__version__,
-            "edition": cmk_version.edition().short,
+            "edition": cmk_version.edition(paths.omd_root).short,
+            "license_state": get_license_state().name,
         }

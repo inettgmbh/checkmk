@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+"""
+>>> C_SERIES_REGEX.match("HXAF240C") is not None
+True
+>>> C_SERIES_REGEX.match("UCSC") is not None
+True
+>>> C_SERIES_REGEX.match("APIC") is not None
+True
+>>> B_SERIES_REGEX.match("UCSB") is not None
+True
+"""
+
 import argparse
 import logging
+import re
 import sys
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import requests
 import urllib3
 
-from cmk.utils.exceptions import MKException
+from cmk.ccc.exceptions import MKException
+
 from cmk.utils.password_store import replace_passwords
 
-from cmk.special_agents.utils import vcrtrace
+from cmk.special_agents.v0_unstable.misc import vcrtrace
+from cmk.special_agents.v0_unstable.request_helper import HostnameValidationAdapter
 
-ElementAttributes = Dict[str, str]
-
-# TODO Add functionality in the future
-# import cmk.utils.password_store
+ElementAttributes = dict[str, str]
 
 # Be aware of
 # root = ET.fromstring(content)
@@ -37,15 +49,38 @@ ElementAttributes = Dict[str, str]
 #   |                  \___|_| |_|\__|_|\__|_|\___||___/                   |
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-Entry = Tuple[str, Sequence[str]]
-Entities = List[Tuple[str, str, Sequence[Entry]]]
+Entry = tuple[str, Sequence[str]]
+Entities = list[tuple[str, re.Pattern[str], Sequence[Entry]]]
+
+B_SERIES_REGEX = re.compile(r"^UCSB$")
+# As of SUP-11234 hyperflex systems share the same hardware with UCSC systems.
+# Those two models should be basically the same: UCSC-C240-M5SX and HXAF240C-M5SX
+# 13th Nov 2023 Michael Frank (michael.frank@forvia.com)
+# Added support for Cisco APIC Rackmount
+C_SERIES_REGEX = re.compile(
+    r"""
+    ^
+    (
+        APIC      # apic-server-l3
+        |
+        UCSC      # normal, direct form
+        |
+        HX        # hyperflex
+        (AF)?     # optional "all flash"
+        [0-9]{3}  # model number
+        C         # C for UCSC
+    )
+    $
+""",
+    re.VERBOSE,
+)
 
 # Cisco UCS B-Series Blade Servers
 B_SERIES_ENTITIES: Entities = [
     # FANS
     (
         "ucs_bladecenter_fans",
-        "UCSB",
+        B_SERIES_REGEX,
         [
             ("equipmentFan", ["Dn", "Model", "OperState"]),
             ("equipmentFanModuleStats", ["Dn", "AmbientTemp"]),
@@ -57,7 +92,7 @@ B_SERIES_ENTITIES: Entities = [
     # PSU
     (
         "ucs_bladecenter_psu",
-        "UCSB",
+        B_SERIES_REGEX,
         [
             ("equipmentPsuInputStats", ["Dn", "Current", "PowerAvg", "Voltage"]),
             ("equipmentPsuStats", ["Dn", "AmbientTemp", "Output12vAvg", "Output3v3Avg"]),
@@ -66,7 +101,7 @@ B_SERIES_ENTITIES: Entities = [
     # NETWORK
     (
         "ucs_bladecenter_if",
-        "UCSB",
+        B_SERIES_REGEX,
         [
             # Fibrechannel
             ("fcStats", ["Dn", "BytesRx", "BytesTx", "PacketsRx", "PacketsTx", "Suspect"]),
@@ -127,7 +162,7 @@ B_SERIES_ENTITIES: Entities = [
     # Fault Instances
     (
         "ucs_bladecenter_faultinst",
-        "UCSB",
+        B_SERIES_REGEX,
         [
             ("faultInst", ["Dn", "Descr", "Severity"]),
         ],
@@ -135,7 +170,7 @@ B_SERIES_ENTITIES: Entities = [
     # TopSystem Info
     (
         "ucs_bladecenter_topsystem",
-        "UCSB",
+        B_SERIES_REGEX,
         [
             ("topSystem", ["Address", "CurrentTime", "Ipv6Addr", "Mode", "Name", "SystemUpTime"]),
         ],
@@ -146,7 +181,7 @@ B_SERIES_ENTITIES: Entities = [
 C_SERIES_ENTITIES: Entities = [
     (
         "ucs_c_rack_server_fans",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "equipmentFan",
@@ -161,7 +196,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_psu",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "equipmentPsu",
@@ -177,7 +212,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_power",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "computeMbPowerStats",
@@ -192,7 +227,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_temp",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "computeRackUnitMbTempStats",
@@ -209,7 +244,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_environment",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "processorEnvStats",
@@ -224,7 +259,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_environment",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "memoryUnitEnvStats",
@@ -239,7 +274,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_health",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "storageControllerHealth",
@@ -253,7 +288,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_topsystem",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "topSystem",
@@ -269,7 +304,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_util",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "serverUtilization",
@@ -285,7 +320,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_led",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "equipmentIndicatorLed",
@@ -300,7 +335,7 @@ C_SERIES_ENTITIES: Entities = [
     ),
     (
         "ucs_c_rack_server_faultinst",
-        "UCSC",
+        C_SERIES_REGEX,
         [
             (
                 "faultInst",
@@ -333,17 +368,24 @@ class CommunicationException(MKException):
 
 
 class Server:
-    def __init__(  # type:ignore[no-untyped-def]
-        self, hostname, username, password, verify_ssl
+    def __init__(
+        self,
+        hostname: str,
+        username: str,
+        password: str,
+        cert_check: bool | str,
     ) -> None:
         self._url = "https://%s/nuova" % hostname
         self._username = username
         self._password = password
         self._session = requests.Session()
-        self._verify_ssl = verify_ssl
-        self._cookie = None
+        self._verify_ssl = bool(cert_check)
+        self._cookie: str | None = None
 
-    def login(self):
+        if isinstance(cert_check, str):
+            self._session.mount(self._url, HostnameValidationAdapter(cert_check))
+
+    def login(self) -> None:
         logging.debug("Server.login: Login")
         attributes: ElementAttributes = {
             "inName": self._username,
@@ -362,14 +404,14 @@ class Server:
             request.body = b"login request filtered out"
         return request
 
-    def logout(self):
+    def logout(self) -> None:
         logging.debug("Server.logout: Logout")
         attributes: ElementAttributes = {}
         if self._cookie:
             attributes.update({"inCookie": self._cookie})
         self._communicate(ET.Element("aaaLogout", attrib=attributes))
 
-    def _get_bios_unit_name_from_dn(self, xml_object) -> str:  # type:ignore[no-untyped-def]
+    def _get_bios_unit_name_from_dn(self, xml_object: ET.Element) -> str:
         dn = self._get_attribute_data(xml_object, "dn")
         return "/".join(dn.split("/")[0:2])
 
@@ -384,14 +426,14 @@ class Server:
 
     def get_data_from_entities(
         self, entities: Entities, model_info: Mapping[str, str]
-    ) -> Dict[str, List[Tuple[Any, Any]]]:
+    ) -> dict[str, list[tuple[Any, Any]]]:
         """
-        Returns dict[k: header, v: List[Tuple[class_id, List[Tuple[attribute, attribute data]]]]]
+        Returns dict[k: header, v: list[tuple[class_id, list[tuple[attribute, attribute data]]]]]
         from entities (B_SERIES_ENTITIES, C_SERIES_ENTITIES).
         """
         logging.debug("Server.get_data_from_entities: Try to get entities")
-        data: Dict[str, List[Tuple[Any, Any]]] = {}
-        for header, model, entries in entities:
+        data: dict[str, list[tuple[Any, Any]]] = {}
+        for header, model_pattern, entries in entities:
             for class_id, attributes in entries:
                 logging.debug(
                     "Server.get_data_from_entities: header: '%s', class_id: '%s' - attributes: '%s'",
@@ -413,8 +455,9 @@ class Server:
                     # if a class_id exists for all model types (e.g. faultInst).
                     # Only xml_object of the correct Model type may be processed.
                     bios_unit_name = self._get_bios_unit_name_from_dn(xml_object)
-                    if model != model_info.get(bios_unit_name, model):
-                        continue
+                    if (model_prefix := model_info.get(bios_unit_name)) is not None:
+                        if not model_pattern.match(model_prefix):
+                            continue
 
                     xml_data = []
                     for attribute in attributes:
@@ -424,13 +467,13 @@ class Server:
                             attribute_data = self._get_attribute_data(xml_object, "dn")
                         if attribute_data is None:
                             logging.debug("No such attribute '%s'", attribute)
-                            # ensure order of entries in related check plugins is consistent
+                            # ensure order of entries in related check plug-ins is consistent
                             attribute_data = ""
                         xml_data.append((attribute, attribute_data))
                     data.setdefault(header, []).append((class_id, xml_data))
         return data
 
-    def _get_attribute_data(self, xml_object, attribute):
+    def _get_attribute_data(self, xml_object: ET.Element, attribute: str) -> str:
         logging.debug("Server._get_attribute_data: Try getting attribute '%s'", attribute)
         attribute_data = xml_object.attrib.get(attribute)
         if attribute_data:
@@ -446,9 +489,9 @@ class Server:
         attribute_data = xml_object.attrib.get(attribute_lower)
         if attribute_data:
             return attribute_data
-        return None
+        raise ValueError("No such attribute '%s'" % attribute)
 
-    def _get_class_data(self, class_id):
+    def _get_class_data(self, class_id: str) -> list[ET.Element]:
         """
         Returns list of XML trees for class_id or empty list in case no entries are found.
         """
@@ -465,7 +508,7 @@ class Server:
         logging.debug("Server._get_class_data: Entries found: '%s'", xml_objects)
         return xml_objects
 
-    def _communicate(self, xml_obj):
+    def _communicate(self, xml_obj: ET.Element) -> ET.Element:
         """
         Sends a XML object and returns the response as XML tree. Raises CommunicationException
         in case of any error.
@@ -525,12 +568,12 @@ class Server:
 #   '----------------------------------------------------------------------'
 
 
-def debug():
+def debug() -> bool:
     """Do not depend on argument parsing here."""
     return "-d" in sys.argv[1:] or "--debug" in sys.argv[1:]
 
 
-def parse_arguments(argv):
+def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
@@ -538,10 +581,13 @@ def parse_arguments(argv):
         "--vcrtrace",
         action=vcrtrace(before_record_request=Server.filter_credentials),
     )
-    parser.add_argument(
-        "--no-cert-check",
-        action="store_true",
-        help="Disables the checking of the servers ssl certificate.",
+    cert_args = parser.add_mutually_exclusive_group()
+    cert_args.add_argument(
+        "--no-cert-check", action="store_true", help="Do not verify TLS certificate"
+    )
+    cert_args.add_argument(
+        "--cert-server-name",
+        help="Use this server name for TLS certificate validation.",
     )
     parser.add_argument("--debug", action="store_true", help="Raise Python exceptions.")
     parser.add_argument("-u", "--username", required=True, help="The username.")
@@ -550,7 +596,7 @@ def parse_arguments(argv):
     return parser.parse_args(argv)
 
 
-def setup_logging(opt_debug):
+def setup_logging(opt_debug: bool) -> None:
     fmt = "%(levelname)s: %(name)s: %(filename)s: %(lineno)s: %(message)s"
     if opt_debug:
         lvl = logging.DEBUG
@@ -559,12 +605,12 @@ def setup_logging(opt_debug):
     logging.basicConfig(level=lvl, format=fmt)
 
 
-def main(args=None):
-    if args is None:
+def main(argv: Sequence[str] | None = None) -> int:
+    if argv is None:
         replace_passwords()
-        args = sys.argv[1:]
+        argv = sys.argv[1:]
 
-    args = parse_arguments(args)
+    args = parse_arguments(argv)
     setup_logging(args.debug)
     handle = Server(args.hostname, args.username, args.password, not args.no_cert_check)
     try:
@@ -610,7 +656,7 @@ def main(args=None):
         sys.stdout.write("<<<%s:sep(9)>>>\n" % header)
         for class_id, values in class_data:
             values_str = "\t".join(["%s %s" % v for v in values])
-            sys.stdout.write("%s\t%s\n" % (class_id, values_str))
+            sys.stdout.write(f"{class_id}\t{values_str}\n")
 
     handle.logout()
     return 0

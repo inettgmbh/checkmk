@@ -1,0 +1,62 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "configure_make")
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(
+        ["**/*"],
+        exclude = ["bazel-*"],
+    ),
+)
+
+configure_make(
+    name = "stunnel",
+    args = ["-j4"],
+    configure_options = [
+        "--with-ssl=$$EXT_BUILD_DEPS/openssl",
+        "--with-bashcompdir=$$INSTALLDIR/share",
+    ],
+    copts = [
+        "-Wl,--rpath,$ORIGIN_VAR/../lib",
+    ],
+    env = {
+        "PKG_CONFIG_PATH": ":".join([
+            "/usr/lib/pkgconfig",
+            "/usr/lib64/pkgconfig",
+            "/usr/lib/x86_64-linux-gnu/pkgconfig",
+        ]),
+        "ORIGIN_VAR": "\\\\$$\\$$ORIGIN",
+    },
+    lib_source = ":all_srcs",
+    out_binaries = [
+        "stunnel",
+        "stunnel3",
+    ],
+    out_data_dirs = ["share"],  # For bash completion file
+    out_lib_dir = "lib/stunnel",
+    out_shared_libs = [
+        "libstunnel.so",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["@openssl"],
+)
+
+genrule(
+    name = "skel",
+    srcs = [
+        "@omd_packages//omd/packages/stunnel:skel",
+    ],
+    outs = [
+        "skel/etc/init.d/stunnel",
+        "skel/etc/logrotate.d/stunnel",
+        "skel/etc/rc.d/85-stunnel",
+        "skel/etc/stunnel/server.conf",
+        # Either .gitignore are deleted in the packaging step
+        # or empty folders are created later
+        # as Bazel genrules don't allow output directories.
+        "skel/etc/stunnel/conf.d/.gitignore",
+    ],
+    cmd = """
+        cp -r --dereference $(execpath @omd_packages//omd/packages/stunnel:skel) $$(realpath $(RULEDIR))
+    """,
+    visibility = ["//visibility:public"],
+)

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import json
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from livestatus import SiteId
 
-import cmk.utils.regex
 from cmk.utils.agent_registration import get_uuid_link_manager
-from cmk.utils.type_defs import HostName
+from cmk.utils.hostaddress import HostAddress, HostName
 
-from cmk.gui.exceptions import MKGeneralException
+from cmk.gui.config import active_config
 from cmk.gui.http import request
+from cmk.gui.log import logger
 from cmk.gui.site_config import get_site_config, site_is_local
-from cmk.gui.watolib.automation_commands import automation_command_registry, AutomationCommand
+from cmk.gui.watolib.automation_commands import AutomationCommand
 from cmk.gui.watolib.automations import do_remote_automation
 
 
@@ -24,39 +24,35 @@ def remove_tls_registration(hosts_by_site: Mapping[SiteId, Sequence[HostName]]) 
         if not host_names:
             continue
 
-        if site_is_local(site_id):
+        if site_is_local(active_config, site_id):
             _remove_tls_registration(host_names)
             return
 
         do_remote_automation(
-            get_site_config(site_id),
+            get_site_config(active_config, site_id),
             "remove-tls-registration",
             [("host_names", json.dumps(host_names))],
         )
 
 
-@automation_command_registry.register
-class AutomationRemoveTLSRegistration(AutomationCommand):
-    def command_name(self):
+class AutomationRemoveTLSRegistration(AutomationCommand[Sequence[HostName]]):
+    def command_name(self) -> str:
         return "remove-tls-registration"
 
     def get_request(self) -> Sequence[HostName]:
-        raw_host_names = json.loads(request.get_ascii_input_mandatory("host_names", "[]"))
-        return [
-            HostName(raw_host_name)
-            for raw_host_name in raw_host_names
-            if self._validate_host_name(raw_host_name)
-        ]
-
-    @staticmethod
-    def _validate_host_name(raw_host_name: str) -> None:
-        if cmk.utils.regex.regex(cmk.utils.regex.REGEX_HOST_NAME).match(str(raw_host_name)):
-            return
-        raise MKGeneralException("Invalid host name %s" % raw_host_name)
+        return json.loads(request.get_ascii_input_mandatory("host_names", "[]"))
 
     def execute(self, api_request: Sequence[HostName]) -> None:
-        _remove_tls_registration(api_request)
+        valid_hosts = [hostname for hostname in api_request if HostAddress.is_valid(hostname)]
+        if len(valid_hosts) < len(api_request):
+            logger.warning(
+                "remove-tls-registration called with the following invalid host names: %s",
+                ", ".join(
+                    hostname for hostname in api_request if not HostAddress.is_valid(hostname)
+                ),
+            )
+        _remove_tls_registration(valid_hosts)
 
 
 def _remove_tls_registration(host_names: Sequence[HostName]) -> None:
-    get_uuid_link_manager().unlink_sources(host_names)
+    get_uuid_link_manager().unlink(host_names)

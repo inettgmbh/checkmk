@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
 from cmk.gui.valuespec import Age, DropdownChoice, MonitoringState, Tuple
 
-run_duration = Tuple(
+run_duration: Tuple[tuple[int, int]] = Tuple(
     title=_("Maximum run duration for last execution"),
     help=_("Here you can define an upper limit for the run duration of last execution of the job."),
     elements=[
@@ -15,14 +15,23 @@ run_duration = Tuple(
     ],
 )
 
-ignore_db_status = DropdownChoice(
-    title=_("Job State"),
-    help=_("The state of the job is ignored by default."),
-    choices=[
-        (True, _("Ignore the state of the Job")),
-        (False, _("Consider the state of the job")),
-    ],
-)
+
+def get_default_consider_job_status_choices() -> tuple[tuple[str, str], tuple[str, str]]:
+    return (
+        ("ignore", _("Ignore the state of the job")),
+        ("consider", _("Consider the state of the job")),
+    )
+
+
+def get_consider_job_status_valuespec(
+    choices: tuple[tuple[str, str], ...] = get_default_consider_job_status_choices(),
+) -> DropdownChoice:
+    return DropdownChoice(
+        title=_("Job State"),
+        help=_("The state of the job is ignored by default."),
+        choices=list(choices),
+    )
+
 
 status_disabled_jobs = MonitoringState(
     title=_("Status of service in case of disabled job"),

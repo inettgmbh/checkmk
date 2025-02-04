@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -12,17 +12,17 @@ string concatenation.
 It's implementation is still a bit rudimentary but supports most necessary concepts already.
 
 """
+
 from __future__ import annotations
 
 import abc
-from typing import List, Tuple, Union
 
-Primitives = Union[str, int, bool, float, list, tuple]
+Primitives = str | int | bool | float | list[str] | tuple[str, ...]
 
 # TODO: column functions
 # TODO: more tests
 
-RenderIntermediary = List[Tuple[str, str]]
+RenderIntermediary = list[tuple[str, str]]
 
 LIVESTATUS_OPERATORS = [
     "=",
@@ -80,8 +80,13 @@ class NothingExpression(QueryExpression):
 class UnaryExpression(abc.ABC):
     """Base class of all concrete single parts of BinaryExpression."""
 
-    def __init__(self, value) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, value: str) -> None:
+        # The value is used in the __repr__, if we don't set it before raising
+        # the exception we get a new exception when the __repr__ is called,
+        # e.g. by the crash reporting
         self.value = value
+        if "\n" in value:
+            raise ValueError("Illegal newline character in query")
 
     def op(self, operator: str, other: UnaryExpression | Primitives) -> BinaryExpression:
         other_expr: UnaryExpression
@@ -90,11 +95,11 @@ class UnaryExpression(abc.ABC):
         elif isinstance(other, UnaryExpression):
             other_expr = other
         else:
-            other_expr = LiteralExpression(other)
+            other_expr = LiteralExpression(str(other))
         return BinaryExpression(self, other_expr, operator)
 
     def __repr__(self) -> str:
-        return "<%s %s 0x%x>" % (self.__class__.__name__, self.value, id(self))
+        return f"<{self.__class__.__name__} {self.value} 0x{id(self):x}>"
 
     @abc.abstractmethod
     def __eq__(self, other: Primitives) -> BinaryExpression:  # type: ignore[override]
@@ -170,7 +175,7 @@ class ScalarExpression(UnaryExpression):
     def empty(self) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
-    def disparity(self, other, ignore_case=False) -> BinaryExpression:
+    def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
 
@@ -196,13 +201,12 @@ class ListExpression(UnaryExpression):
         if not other:
             # Check for empty list
             op = "="
+        elif ignore_case:
+            # case-insensitive equality
+            op = "<="
         else:
-            if ignore_case:
-                # case-insensitive equality
-                op = "<="
-            else:
-                # equality
-                op = ">="
+            # equality
+            op = ">="
         return self.op(op, other)
 
     def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
@@ -220,28 +224,13 @@ class ListExpression(UnaryExpression):
 
 
 class LiteralExpression(ScalarExpression):
-    """A literal value to be rendered in a Filter
-
-    Examples:
-
-        >>> LiteralExpression("blah").render()
-        [('', 'blah')]
-
-      We make sure not to accidentally send query terminating newlines.
-
-        >>> LiteralExpression("blah\\n\\n").render()
-        [('', 'blah')]
-
-    """
+    """A literal value to be rendered in a Filter"""
 
     def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
     def empty(self) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
-
-    def render(self) -> RenderIntermediary:
-        return [("", self.value.replace("\n", ""))]
 
 
 LivestatusOperator = str
@@ -294,15 +283,10 @@ class BinaryExpression(QueryExpression):
         self._header = header
 
     def __repr__(self) -> str:
-        return "%s(%s %s %s)" % (
-            self._header,
-            self.left.value,
-            self.operator,
-            self.right.value,
-        )
+        return f"{self._header}({self.left.value} {self.operator} {self.right.value})"
 
     def __str__(self) -> str:
-        return "%s %s %s" % (self.left.value, self.operator, self.right.value)
+        return f"{self.left.value} {self.operator} {self.right.value}"
 
     def render(self) -> RenderIntermediary:
         return [(self._header, str(self))]

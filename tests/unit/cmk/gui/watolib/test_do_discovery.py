@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import itertools
-from typing import Any, Dict, List, Set, Tuple
+from collections.abc import MutableMapping
+
+from cmk.utils.servicename import ServiceName
+
+from cmk.checkengine.checking import CheckPluginName
+from cmk.checkengine.discovery import AutocheckEntry
 
 from cmk.gui.watolib.services import _apply_state_change, DiscoveryState
 
-MOCK_KEY: Tuple[str, str] = ("local", "1st service")
-MOCK_VALUE: Tuple[str, Dict[str, Any], Dict[str, Any], List[str]] = (
-    "1st service",
-    {},
-    {},
-    ["test"],
-)
+MOCK_VALUE = AutocheckEntry(CheckPluginName("local"), "1st service", {}, {})
 MOCK_DESC = "1st service"
+MOCK_KEY = ServiceName(MOCK_DESC)
 
-RESULT = Tuple[Dict, Set, Set, Set]
+RESULT = tuple[MutableMapping[ServiceName, AutocheckEntry], set, set, set]
 
 
 def _expected_clustered():
@@ -59,7 +59,7 @@ def _expected_ignored_standard():
     )
 
 
-def _get_combinations() -> List:
+def _get_combinations() -> list:
     states = [value for state, value in vars(DiscoveryState).items() if state.isupper()]
     return list(itertools.combinations_with_replacement(states, 2))
 
@@ -112,11 +112,6 @@ known_results = {
         DiscoveryState.MONITORED,
         DiscoveryState.CUSTOM_IGNORED,
     ): _expected_monitored_standard(),
-    (DiscoveryState.MONITORED, DiscoveryState.LEGACY): _expected_monitored_standard(),
-    (
-        DiscoveryState.MONITORED,
-        DiscoveryState.LEGACY_IGNORED,
-    ): _expected_monitored_standard(),
     (DiscoveryState.VANISHED, DiscoveryState.IGNORED): (
         {MOCK_KEY: MOCK_VALUE},
         set(),
@@ -151,11 +146,6 @@ known_results = {
     (
         DiscoveryState.VANISHED,
         DiscoveryState.CUSTOM_IGNORED,
-    ): _expected_vanished_standard(),
-    (DiscoveryState.VANISHED, DiscoveryState.LEGACY): _expected_vanished_standard(),
-    (
-        DiscoveryState.VANISHED,
-        DiscoveryState.LEGACY_IGNORED,
     ): _expected_vanished_standard(),
     (DiscoveryState.UNDECIDED, DiscoveryState.MONITORED): (
         {MOCK_KEY: MOCK_VALUE},
@@ -221,11 +211,6 @@ known_results = {
         DiscoveryState.IGNORED,
         DiscoveryState.CUSTOM_IGNORED,
     ): _expected_ignored_standard(),
-    (DiscoveryState.IGNORED, DiscoveryState.LEGACY): _expected_ignored_standard(),
-    (
-        DiscoveryState.IGNORED,
-        DiscoveryState.LEGACY_IGNORED,
-    ): _expected_ignored_standard(),
     (DiscoveryState.CLUSTERED_OLD, DiscoveryState.CLUSTERED_NEW): _expected_clustered(),
     (DiscoveryState.CLUSTERED_OLD, DiscoveryState.CLUSTERED_OLD): _expected_clustered(),
     (
@@ -235,11 +220,6 @@ known_results = {
     (
         DiscoveryState.CLUSTERED_OLD,
         DiscoveryState.CUSTOM_IGNORED,
-    ): _expected_clustered(),
-    (DiscoveryState.CLUSTERED_OLD, DiscoveryState.LEGACY): _expected_clustered(),
-    (
-        DiscoveryState.CLUSTERED_OLD,
-        DiscoveryState.LEGACY_IGNORED,
     ): _expected_clustered(),
     (
         DiscoveryState.CLUSTERED_OLD,
@@ -268,14 +248,6 @@ known_results = {
     ): _expected_clustered(),
     (
         DiscoveryState.CLUSTERED_NEW,
-        DiscoveryState.LEGACY,
-    ): _expected_clustered(),
-    (
-        DiscoveryState.CLUSTERED_NEW,
-        DiscoveryState.LEGACY_IGNORED,
-    ): _expected_clustered(),
-    (
-        DiscoveryState.CLUSTERED_NEW,
         DiscoveryState.CLUSTERED_IGNORED,
     ): _expected_clustered(),
     (
@@ -292,10 +264,6 @@ known_results = {
     ): _expected_clustered(),
     (
         DiscoveryState.CLUSTERED_IGNORED,
-        DiscoveryState.CLUSTERED_OLD,
-    ): _expected_clustered(),
-    (
-        DiscoveryState.CLUSTERED_IGNORED,
         DiscoveryState.CLUSTERED_IGNORED,
     ): _expected_clustered(),
     (
@@ -305,11 +273,6 @@ known_results = {
     (
         DiscoveryState.CLUSTERED_IGNORED,
         DiscoveryState.CUSTOM_IGNORED,
-    ): _expected_clustered(),
-    (DiscoveryState.CLUSTERED_IGNORED, DiscoveryState.LEGACY): _expected_clustered(),
-    (
-        DiscoveryState.CLUSTERED_IGNORED,
-        DiscoveryState.LEGACY_IGNORED,
     ): _expected_clustered(),
     (
         DiscoveryState.CLUSTERED_VANISHED,
@@ -331,11 +294,50 @@ known_results = {
         DiscoveryState.CLUSTERED_VANISHED,
         DiscoveryState.CUSTOM_IGNORED,
     ): _expected_clustered(),
-    (DiscoveryState.CLUSTERED_VANISHED, DiscoveryState.LEGACY): _expected_clustered(),
+    (DiscoveryState.MONITORED, DiscoveryState.CHANGED): _expected_monitored_standard(),
+    (DiscoveryState.CHANGED, DiscoveryState.VANISHED): _expected_monitored_standard(),
+    (DiscoveryState.CHANGED, DiscoveryState.REMOVED): _expected_monitored_standard(),
+    (DiscoveryState.CHANGED, DiscoveryState.MANUAL): _expected_monitored_standard(),
+    (DiscoveryState.CHANGED, DiscoveryState.ACTIVE): _expected_monitored_standard(),
+    (DiscoveryState.CHANGED, DiscoveryState.CUSTOM): _expected_monitored_standard(),
     (
+        DiscoveryState.CHANGED,
+        DiscoveryState.CLUSTERED_OLD,
+    ): _expected_monitored_standard(),
+    (
+        DiscoveryState.CHANGED,
+        DiscoveryState.CLUSTERED_NEW,
+    ): _expected_monitored_standard(),
+    (
+        DiscoveryState.CHANGED,
         DiscoveryState.CLUSTERED_VANISHED,
-        DiscoveryState.LEGACY_IGNORED,
-    ): _expected_clustered(),
+    ): _expected_monitored_standard(),
+    (
+        DiscoveryState.CHANGED,
+        DiscoveryState.CLUSTERED_IGNORED,
+    ): _expected_monitored_standard(),
+    (
+        DiscoveryState.CHANGED,
+        DiscoveryState.ACTIVE_IGNORED,
+    ): _expected_monitored_standard(),
+    (
+        DiscoveryState.CHANGED,
+        DiscoveryState.CUSTOM_IGNORED,
+    ): _expected_monitored_standard(),
+    # If we want to keep the service in DiscoveryState.CHANGED the old values have to be written
+    # to the new result
+    (DiscoveryState.CHANGED, DiscoveryState.CHANGED): (
+        {MOCK_KEY: MOCK_VALUE},
+        {MOCK_DESC},
+        set(),
+        set(),
+    ),
+    (DiscoveryState.CHANGED, DiscoveryState.IGNORED): (
+        {MOCK_KEY: MOCK_VALUE},
+        set(),
+        {MOCK_DESC},
+        set(),
+    ),
 }
 
 empty_result: RESULT = (
@@ -347,7 +349,6 @@ empty_result: RESULT = (
 
 
 def test_apply_state_change() -> None:
-
     for table_source, table_target in _get_combinations():
         result: RESULT = {}, set(), set(), set()
         _apply_state_change(
@@ -358,5 +359,5 @@ def test_apply_state_change() -> None:
             MOCK_DESC,
             *result,
         )
-        error_msg = "Error while applying changes from %s to %s" % (table_source, table_target)
+        error_msg = f"Error while applying changes from {table_source} to {table_target}"
         assert known_results.get((table_source, table_target), empty_result) == result, error_msg

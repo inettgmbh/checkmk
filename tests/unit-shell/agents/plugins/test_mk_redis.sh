@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -29,10 +29,9 @@ test_mk_redis_config() {
     assertEquals "-s /var/redis/redis.sock info" "${REDIS_ARGS[*]}"
 
     redis_args "IPHOST"
-    assertEquals "-h 127.0.0.1 -p 6380 -a MYPASSWORD info" "${REDIS_ARGS[*]}"
+    assertEquals "-h 127.0.0.1 -p 6380 info" "${REDIS_ARGS[*]}"
 
     assertEquals "-h" "${REDIS_ARGS[0]}"
-    assertEquals "MYPASSWORD" "${REDIS_ARGS[5]}"
 
 }
 

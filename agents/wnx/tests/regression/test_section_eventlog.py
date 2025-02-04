@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,11 +8,11 @@ import math
 import os
 import platform
 import re
-import winreg  # type: ignore
+import winreg
 from itertools import chain, repeat
 
 import pytest
-import win32evtlog  # type: ignore
+import win32evtlog  # type: ignore[import-not-found]
 
 from .local import assert_subprocess, host, local_test, user_dir
 
@@ -36,7 +35,8 @@ class Globals:
 def generate_logs():
     if platform.system() == "Windows":
         with winreg.OpenKey(  # type: ignore[attr-defined]
-            winreg.HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Eventlog"  # type: ignore[attr-defined]
+            winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
+            "SYSTEM\\CurrentControlSet\\Services\\Eventlog",
         ) as key:
             index = 0
             while True:
@@ -56,22 +56,18 @@ logs = list(l for l in generate_logs() if l not in ["Security", "System"])
 
 @contextlib.contextmanager
 def eventlog(logtype):
-    handle = win32evtlog.OpenEventLog(host, logtype)  # pylint: disable=c-extension-no-member
+    handle = win32evtlog.OpenEventLog(host, logtype)
     try:
         yield handle
     finally:
-        win32evtlog.CloseEventLog(handle)  # pylint: disable=c-extension-no-member
+        win32evtlog.CloseEventLog(handle)
 
 
 def get_last_record(logtype):
     try:
         with eventlog(logtype) as log_handle:
-            oldest = win32evtlog.GetOldestEventLogRecord(
-                log_handle
-            )  # pylint: disable=c-extension-no-member
-            total = win32evtlog.GetNumberOfEventLogRecords(
-                log_handle
-            )  # pylint: disable=c-extension-no-member
+            oldest = win32evtlog.GetOldestEventLogRecord(log_handle)
+            total = win32evtlog.GetNumberOfEventLogRecords(log_handle)
             result = oldest + total - 1
             return result if result >= 0 else 0
     except Exception:
@@ -140,7 +136,7 @@ def testconfig_engine(request, testconfig_sections):
 @pytest.fixture(name="expected_output_no_events")
 def expected_output_no_events_engine():
     if platform.system() != "Windows":
-        return
+        return None
 
     expected = [re.escape(r"<<<%s>>>" % Globals.section), re.escape(r"[[[Application]]]")]
     if not Globals.alone:
@@ -151,7 +147,7 @@ def expected_output_no_events_engine():
 @pytest.fixture(name="expected_output_application_events")
 def expected_output_application_events_engine():
     if platform.system() != "Windows":
-        return
+        return None
 
     split_index = logs.index("Application") + 1
     re_str = r"|".join(
@@ -173,8 +169,9 @@ def expected_output_application_events_engine():
 
 
 def last_records():
-    if platform.system() == "Windows":
-        return {logtype: get_last_record(logtype) for logtype in ["Application"]}
+    if platform.system() != "Windows":
+        return None
+    return {logtype: get_last_record(logtype) for logtype in ["Application"]}
 
 
 @pytest.fixture
@@ -198,7 +195,7 @@ def with_statefile(request):
         with open(os.path.join(Globals.statedir, request.param), "w") as statefile:
             eventstate = {logtype: get_last_record(logtype) for logtype in logs}
             for logtype, state in eventstate.items():
-                statefile.write("%s|%s\r\n" % (logtype, state))
+                statefile.write(f"{logtype}|{state}\r\n")
     yield
 
 
@@ -214,13 +211,15 @@ def verify_eventstate():
         ):
             assert expected_log == actual_log
             state_tolerance = 0 if expected_log == Globals.testlog else Globals.tolerance
-            assert (
-                math.fabs(expected_state - actual_state) <= state_tolerance
-            ), "expected state for log '%s' is %d, actual state %d, " "state_tolerance %d" % (
-                expected_log,
-                expected_state,
-                actual_state,
-                state_tolerance,
+            assert math.fabs(expected_state - actual_state) <= state_tolerance, (
+                "expected state for log '%s' is %d, actual state %d, "
+                "state_tolerance %d"
+                % (
+                    expected_log,
+                    expected_state,
+                    actual_state,
+                    state_tolerance,
+                )
             )
 
 

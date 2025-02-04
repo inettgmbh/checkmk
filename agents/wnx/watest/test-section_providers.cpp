@@ -1,37 +1,32 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
 
 #include "pch.h"
 
-#include "agent_controller.h"
-#include "cfg.h"
 #include "common/version.h"
 #include "common/wtools.h"
-#include "install_api.h"
 #include "providers/check_mk.h"
 #include "providers/df.h"
 #include "providers/internal.h"
-#include "providers/logwatch_event.h"
 #include "providers/mem.h"
-#include "providers/mrpe.h"
-#include "providers/ohm.h"
 #include "providers/p_perf_counters.h"
 #include "providers/plugins.h"
 #include "providers/services.h"
-#include "providers/skype.h"
-#include "providers/wmi.h"
-#include "service_processor.h"
-#include "test_tools.h"
 #include "tools/_misc.h"
-#include "tools/_process.h"
+#include "watest/test_tools.h"
+#include "wnx/agent_controller.h"
+#include "wnx/cfg.h"
+#include "wnx/install_api.h"
+#include "wnx/service_processor.h"
+
 namespace fs = std::filesystem;
 
 namespace cma::provider {
-static const std::string section_name{cma::section::kUseEmbeddedName};
+static const std::string section_name{section::kUseEmbeddedName};
 
-class Empty : public Synchronous {
+class Empty final : public Synchronous {
 public:
     Empty() : Synchronous("empty") {}
     std::string makeBody() override { return "****"; }
@@ -47,23 +42,22 @@ TEST(SectionProviders, Basic) {
 
 TEST(SectionProviders, PluginsProviderConstruction) {
     PluginsProvider plugins;
-    EXPECT_EQ(plugins.getUniqName(), cma::section::kPlugins);
+    EXPECT_EQ(plugins.getUniqName(), section::kPlugins);
 }
 
 TEST(SectionProviders, LocalProviderConstruction) {
     LocalProvider local;
-    EXPECT_EQ(local.getUniqName(), cma::section::kLocal);
+    EXPECT_EQ(local.getUniqName(), section::kLocal);
 }
 
 TEST(SectionProviders, BasicUptime) {
-    cma::srv::SectionProvider<cma::provider::UptimeSync> uptime_provider;
-    EXPECT_EQ(uptime_provider.getEngine().getUniqName(),
-              cma::section::kUptimeName);
+    srv::SectionProvider<provider::UptimeSync> uptime_provider;
+    EXPECT_EQ(uptime_provider.getEngine().getUniqName(), section::kUptimeName);
 
     auto &e3 = uptime_provider.getEngine();
     auto uptime = e3.generateContent(section_name);
     ASSERT_TRUE(!uptime.empty());
-    auto result = cma::tools::SplitString(uptime, "\n");
+    auto result = tools::SplitString(uptime, "\n");
     EXPECT_EQ(result.size(), 2);
     EXPECT_EQ(result[0], "<<<uptime>>>");
     auto value = result[1].find_first_not_of("0123456789");
@@ -71,18 +65,18 @@ TEST(SectionProviders, BasicUptime) {
 }
 
 TEST(SectionProviders, BasicDf) {
-    cma::srv::SectionProvider<cma::provider::Df> df_provider;
-    EXPECT_EQ(df_provider.getEngine().getUniqName(), cma::section::kDfName);
+    srv::SectionProvider<provider::Df> df_provider;
+    EXPECT_EQ(df_provider.getEngine().getUniqName(), section::kDfName);
 
     auto &e2 = df_provider.getEngine();
     auto df = e2.generateContent(section_name);
     ASSERT_TRUE(!df.empty());
-    auto result = cma::tools::SplitString(df, "\n");
+    auto result = tools::SplitString(df, "\n");
     ASSERT_TRUE(result.size() > 1);
     EXPECT_EQ(result[0], "<<<df:sep(9)>>>");
     auto count = result.size();
     for (size_t i = 1; i < count; ++i) {
-        auto values = cma::tools::SplitString(result[i], "\t");
+        auto values = tools::SplitString(result[i], "\t");
         ASSERT_EQ(values.size(), 7);
 
         auto ret = values[2].find_first_not_of("0123456789");
@@ -117,15 +111,16 @@ TEST(SectionProviders, SystemTime) {
 
 class SectionProviderCheckMkFixture : public ::testing::Test {
 public:
-    static constexpr size_t core_lines_ = 19;
+    static constexpr size_t core_lines_ = 23;
     static constexpr size_t full_lines_ = core_lines_ + 3;
     static constexpr std::string_view names_[core_lines_ - 1] = {
-        "Version",          "BuildDate",       "AgentOS",
-        "Hostname",         "Architecture",    "WorkingDirectory",
-        "ConfigFile",       "LocalConfigFile", "AgentDirectory",
-        "PluginsDirectory", "StateDirectory",  "ConfigDirectory",
-        "TempDirectory",    "LogDirectory",    "SpoolDirectory",
-        "LocalDirectory",   "OnlyFrom"};
+        "Version",          "BuildDate",        "AgentOS",
+        "Hostname",         "Architecture",     "OSName",
+        "OSVersion",        "OSType",           "Time",
+        "WorkingDirectory", "ConfigFile",       "LocalConfigFile",
+        "AgentDirectory",   "PluginsDirectory", "StateDirectory",
+        "ConfigDirectory",  "TempDirectory",    "LogDirectory",
+        "SpoolDirectory",   "LocalDirectory",   "OnlyFrom"};
 
     static constexpr std::pair<std::string_view, std::string_view>
         only_from_cases_[] = {
@@ -152,19 +147,19 @@ public:
 
     std::filesystem::path createDataDir() {
         if (!temp_fs_) {
-            temp_fs_ = std::move(tst::TempCfgFs::Create());
+            temp_fs_ = tst::TempCfgFs::Create();
         }
         return temp_fs_->data();
     }
 
-    auto get_val(const std::string &raw) -> std::string {
+    std::string get_val(const std::string &raw) const {
         auto tbl = tools::SplitString(raw, ": ");
         if (tbl.size() == 2) {
             return tbl[1];
         }
 
         return {};
-    };
+    }
 
 private:
     srv::SectionProvider<CheckMk> check_mk_provider_;
@@ -258,13 +253,13 @@ public:
     void SetUp() override {
         uniq_name_ = getEngine().getUniqName();
         auto mem = getEngine().generateContent(section_name);
-        auto rows = cma::tools::SplitString(mem, "\n");
+        auto rows = tools::SplitString(mem, "\n");
         header_ = rows[0];
         auto count = rows.size();
         for (size_t i = 1; i < count; ++i) {
-            auto values = cma::tools::SplitString(rows[i], ":");
-            cma::tools::LeftTrim(values[1]);
-            auto sub_values = cma::tools::SplitString(values[1], " ");
+            auto values = tools::SplitString(rows[i], ":");
+            tools::LeftTrim(values[1]);
+            auto sub_values = tools::SplitString(values[1], " ");
             rows_.push_back({.title = values[0],
                              .value = sub_values[0],
                              .kb = sub_values[1]});
@@ -302,7 +297,7 @@ private:
 TEST_F(SectionProvidersFixture, ServicesCtor) {
     EXPECT_EQ(getEngine().getUniqName(), section::kServices);
 }
-TEST_F(SectionProvidersFixture, ServicesIntegration) {
+TEST_F(SectionProvidersFixture, ServicesComponent) {
     auto content = getEngine().generateContent(section_name);
 
     // Validate content is presented and correct

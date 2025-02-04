@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import datetime as dt
@@ -14,7 +14,7 @@ def to_timestamp(datetime: dt.datetime) -> int:
 
     Examples:
 
-        >>> import pytz
+        >>> from zoneinfo import ZoneInfo
         >>> from dateutil import tz
 
         >>> to_timestamp(dt.datetime(2020, 1, 1))
@@ -25,17 +25,17 @@ def to_timestamp(datetime: dt.datetime) -> int:
         >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=tz.tzutc()))
         1577836800
 
-        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=pytz.timezone("UTC")))
+        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")))
         1577836800
 
-        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=pytz.timezone("GMT")))
+        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=ZoneInfo("GMT")))
         1577836800
 
-        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=pytz.timezone("MET")))
+        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=ZoneInfo("MET")))
         1577833200
 
-        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=pytz.timezone("Asia/Tokyo")))
-        1577803260
+        >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=ZoneInfo("Asia/Tokyo")))
+        1577804400
 
         >>> to_timestamp(dt.datetime(2020, 1, 1, tzinfo=tz.tzoffset(None, 3600)))
         1577833200

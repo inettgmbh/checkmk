@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,20 +16,19 @@ from cmk.gui.valuespec import Dictionary
 def _parameter_valuespec():
     return Dictionary(
         help=_(
-            (
-                "This ruleset is relevant for Kubernetes replicas. You can set "
-                "a maximum allowed duration during which replicas may be in a not "
-                "ready or not up-to-date state. For DaemonSets, you may "
-                "additionally specify the duration for which there may be a "
-                "positive number of misscheduled replicas. Keep in mind that replicas "
-                "may temporarily be in these states during the process of an "
-                "update. Therefore, it is recommended to always have a grace "
-                "period configured."
-            )
+            "This ruleset is relevant for Kubernetes replicas. You can set "
+            "a maximum allowed duration during which replicas may be in a not "
+            "ready, not available or not up-to-date state. For DaemonSets, you may "
+            "additionally specify the duration for which there may be a "
+            "positive number of misscheduled replicas. Keep in mind that replicas "
+            "may temporarily be in these states during the process of an "
+            "update. Therefore, it is recommended to always have a grace "
+            "period configured."
         ),
         elements=[
             ("update_duration", age_levels_dropdown(_("Update duration"))),
             ("not_ready_duration", age_levels_dropdown(_("Not ready duration"))),
+            ("not_available_duration", age_levels_dropdown(_("Not available duration"))),
             (
                 "misscheduled_duration",
                 age_levels_dropdown(_("Misscheduled duration (DaemonSet only)")),

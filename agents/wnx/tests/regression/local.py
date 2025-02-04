@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from __future__ import print_function
 
 import os
 import platform
 import re
 import subprocess
 import sys
-from builtins import zip
 from pathlib import Path
 
 import yaml
@@ -27,7 +24,7 @@ global:
 """
 
 if not it_utils.check_os():
-    print("Unsupported platform {}".format(platform.system()))
+    print(f"Unsupported platform {platform.system()}")
     sys.exit(13)
 
 
@@ -97,16 +94,13 @@ main_exe = test_dir / "check_mk_agent.exe"
 # environment variable set
 def run_subprocess(cmd):
     sys.stderr.write(" ".join(str(cmd)) + "\n")
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = p.communicate(timeout=10)
-
-    return p.returncode, stdout, stderr
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
+        stdout, stderr = p.communicate(timeout=10)
+        return p.returncode, stdout, stderr
 
 
 def run_agent(cmd):
-    p = subprocess.Popen([cmd, "exec"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    return p
+    return subprocess.Popen([cmd, "exec"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def assert_subprocess(cmd):
@@ -124,15 +118,15 @@ def assert_subprocess(cmd):
 class DuplicateSectionError(Exception):
     """Raised when a section is multiply-created."""
 
-    def __init__(self, section) -> None:  # type:ignore[no-untyped-def]
-        super(DuplicateSectionError, self).__init__(self, "Section %r already exists" % section)
+    def __init__(self, section) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(self, "Section %r already exists" % section)
 
 
 class NoSectionError(Exception):
     """Raised when no section matches a requested option."""
 
-    def __init__(self, section) -> None:  # type:ignore[no-untyped-def]
-        super(NoSectionError, self).__init__(self, "No section: %r" % section)
+    def __init__(self, section) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(self, "No section: %r" % section)
 
 
 class YamlWriter:
@@ -159,11 +153,8 @@ def local_test(
         #    print('DEBUG: expected output\r\n', '\r\n'.join(expected))
         # print("EXPECTED: %r\n ACTUAL  : %r\n" % (expected, actual))
 
-        assert (
-            expected == actual or re.match(expected, actual) is not None
-        ), "\nExpected '%r'\nActual   '%r'" % (
-            expected,
-            actual,
+        assert expected == actual or re.match(expected, actual) is not None, (
+            f"\nExpected '{expected!r}'\nActual   '{actual!r}'"
         )
     try:
         assert len(actual_output_from_agent) >= len(expected_output_from_agent), (

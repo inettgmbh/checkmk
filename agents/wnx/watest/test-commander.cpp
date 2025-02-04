@@ -3,22 +3,20 @@
 
 #include "pch.h"
 
-#include "carrier.h"
-#include "cfg.h"
-#include "commander.h"
+#include "wnx/carrier.h"
+#include "wnx/cfg.h"
+#include "wnx/commander.h"
 #include "common/mailslot_transport.h"
-#include "logger.h"
-#include "service_processor.h"
+#include "wnx/service_processor.h"
 
 using namespace std::chrono_literals;
 
 namespace cma::commander {
-bool RunCommand(std::string_view peer, std::string_view cmd);
 
 static bool GetEnabledFlag(bool dflt) {
     auto yaml = cfg::GetLoadedConfig();
     auto yaml_global = yaml[cfg::groups::kGlobal];
-    return cfg::GetVal(yaml_global, cfg::vars::kEnabled, true);
+    return cfg::GetVal(yaml_global, cfg::vars::kEnabled, dflt);
 }
 
 static void SetEnabledFlag(bool flag) {
@@ -28,7 +26,6 @@ static void SetEnabledFlag(bool flag) {
 }
 
 TEST(Commander, Base) {
-    //
     auto yaml = cfg::GetLoadedConfig();
     auto yaml_global = yaml[cfg::groups::kGlobal];
     EXPECT_TRUE(yaml_global[cfg::vars::kEnabled].IsScalar());
@@ -51,7 +48,8 @@ TEST(Commander, Base) {
     EXPECT_TRUE(enabled);
     SetEnabledFlag(false);
 
-    mailslot::Slot mailbox("WinAgentTestLocal", 0);
+    mailslot::Slot mailbox(
+        mailslot::BuildCustomMailSlotName("WinAgentTestLocal", 0, "."));
     using namespace cma::carrier;
     auto internal_port =
         BuildPortName(kCarrierMailslotName, mailbox.GetName());  // port here

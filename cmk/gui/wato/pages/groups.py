@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import abc
-from typing import Collection, Dict, Iterator, List, Optional, Sequence, Tuple, Type
+from collections.abc import Collection, Iterator, Sequence
+
+from cmk.ccc import version
+from cmk.ccc.version import edition_supports_nagvis
 
 import cmk.utils.paths
+from cmk.utils.user import UserId
 
-import cmk.gui.forms as forms
-import cmk.gui.userdb as userdb
-import cmk.gui.watolib.groups as groups
+from cmk.gui import forms, userdb
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.exceptions import MKUserError
-from cmk.gui.groups import (
-    GroupName,
-    GroupSpec,
-    GroupType,
-    load_contact_group_information,
-    load_host_group_information,
-    load_service_group_information,
-)
+from cmk.gui.groups import GroupName, GroupSpec, GroupType
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
@@ -35,18 +30,12 @@ from cmk.gui.page_menu import (
     PageMenuSearch,
     PageMenuTopic,
 )
-from cmk.gui.plugins.wato.utils import (
-    make_confirm_link,
-    mode_registry,
-    mode_url,
-    redirect,
-    WatoMode,
-)
 from cmk.gui.table import Table, table_element
-from cmk.gui.type_defs import ActionResult, PermissionName, UserId
+from cmk.gui.type_defs import ActionResult, PermissionName
+from cmk.gui.utils.csrf_token import check_csrf_token
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.transaction_manager import transactions
-from cmk.gui.utils.urls import makeactionuri
+from cmk.gui.utils.urls import make_confirm_delete_link, makeactionuri, makeuri
 from cmk.gui.valuespec import (
     CascadingDropdown,
     Dictionary,
@@ -55,7 +44,23 @@ from cmk.gui.valuespec import (
     ListOf,
     ListOfStrings,
 )
+from cmk.gui.watolib import groups
+from cmk.gui.watolib.groups_io import (
+    load_contact_group_information,
+    load_host_group_information,
+    load_service_group_information,
+)
 from cmk.gui.watolib.hosts_and_folders import folder_preserving_link
+from cmk.gui.watolib.mode import mode_url, ModeRegistry, redirect, WatoMode
+
+
+def register(mode_registry: ModeRegistry) -> None:
+    mode_registry.register(ModeHostgroups)
+    mode_registry.register(ModeServicegroups)
+    mode_registry.register(ModeContactgroups)
+    mode_registry.register(ModeEditServicegroup)
+    mode_registry.register(ModeEditHostgroup)
+    mode_registry.register(ModeEditContactgroup)
 
 
 class ModeGroups(WatoMode, abc.ABC):
@@ -65,7 +70,7 @@ class ModeGroups(WatoMode, abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -134,26 +139,31 @@ class ModeGroups(WatoMode, abc.ABC):
 
     def action(self) -> ActionResult:
         if not transactions.check_transaction():
-            return redirect(mode_url("%s_groups" % self.type_name))
+            request.del_var("_transid")
+            return redirect(makeuri(request=request, addvars=list(request.itervars())))
 
         if request.var("_delete"):
             delname = request.get_ascii_input_mandatory("_delete")
             usages = groups.find_usages_of_group(delname, self.type_name)
 
             if usages:
-                message = "<b>%s</b><br>%s:<ul>" % (
+                message = "<b>{}</b><br>{}:<ul>".format(
                     _("You cannot delete this %s group.") % self.type_name,
                     _("It is still in use by"),
                 )
                 for title, link in usages:
-                    message += '<li><a href="%s">%s</a></li>\n' % (link, title)
+                    message += f'<li><a href="{link}">{title}</a></li>\n'
                 message += "</ul>"
                 raise MKUserError(None, message)
 
             groups.delete_group(delname, self.type_name)
             self._groups = self._load_groups()
 
-        return redirect(mode_url("%s_groups" % self.type_name))
+        if request.var("mode") == "edit_host_group":
+            return redirect(mode_url("%s_groups" % self.type_name))
+
+        request.del_var("_transid")
+        return redirect(makeuri(request=request, addvars=list(request.itervars())))
 
     def _page_no_groups(self) -> None:
         html.div(_("No groups are defined yet."), class_="info")
@@ -161,14 +171,19 @@ class ModeGroups(WatoMode, abc.ABC):
     def _collect_additional_data(self) -> None:
         pass
 
-    def _show_row_cells(self, table: Table, name: GroupName, group: GroupSpec) -> None:
+    def _show_row_cells(self, nr: int, table: Table, name: GroupName, group: GroupSpec) -> None:
+        table.cell("#", css=["narrow nowrap"])
+        html.write_text_permissive(nr)
+
         table.cell(_("Actions"), css=["buttons"])
         edit_url = folder_preserving_link(
             [("mode", "edit_%s_group" % self.type_name), ("edit", name)]
         )
-        delete_url = make_confirm_link(
+        delete_url = make_confirm_delete_link(
             url=makeactionuri(request, transactions, [("_delete", name)]),
-            message=_('Do you really want to delete the %s group "%s"?') % (self.type_name, name),
+            title=_("Delete %s group #%d") % (self.type_name, nr),
+            suffix=group["alias"],
+            message=_("Name: %s") % name,
         )
         clone_url = folder_preserving_link(
             [("mode", "edit_%s_group" % self.type_name), ("clone", name)]
@@ -188,9 +203,11 @@ class ModeGroups(WatoMode, abc.ABC):
         self._collect_additional_data()
 
         with table_element(self.type_name + "groups") as table:
-            for name, group in sorted(self._groups.items(), key=lambda x: x[1]["alias"]):
+            for nr, (name, group) in enumerate(
+                sorted(self._groups.items(), key=lambda x: x[1]["alias"])
+            ):
                 table.row()
-                self._show_row_cells(table, name, group)
+                self._show_row_cells(nr, table, name, group)
 
 
 class ABCModeEditGroup(WatoMode, abc.ABC):
@@ -200,14 +217,14 @@ class ABCModeEditGroup(WatoMode, abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         raise NotImplementedError()
 
     def __init__(self) -> None:
-        self._name: Optional[GroupName] = None
+        self._name: GroupName | None = None
         self._new = False
         self.group: GroupSpec = {}
-        self._groups: Dict[GroupName, GroupSpec] = self._load_groups()
+        self._groups: dict[GroupName, GroupSpec] = self._load_groups()
 
         super().__init__()
 
@@ -239,6 +256,8 @@ class ABCModeEditGroup(WatoMode, abc.ABC):
         pass
 
     def action(self) -> ActionResult:
+        check_csrf_token()
+
         if not transactions.check_transaction():
             return redirect(mode_url("%s_groups" % self.type_name))
 
@@ -265,34 +284,32 @@ class ABCModeEditGroup(WatoMode, abc.ABC):
         )
 
     def page(self) -> None:
-        html.begin_form("group", method="POST")
-        forms.header(_("Properties"))
-        forms.section(_("Name"), simple=not self._new, is_required=True)
-        html.help(
-            _(
-                "The name of the group is used as an internal key. It cannot be "
-                "changed later. It is also visible in the status GUI."
+        with html.form_context("group", method="POST"):
+            forms.header(_("Properties"))
+            forms.section(_("Name"), simple=not self._new, is_required=True)
+            html.help(
+                _(
+                    "The name of the group is used as an internal key. It cannot be "
+                    "changed later. It is also visible in the status GUI."
+                )
             )
-        )
-        if self._new:
-            html.text_input("name")
-            html.set_focus("name")
-        else:
-            html.write_text(self._name)
-            html.set_focus("alias")
+            if self._new:
+                html.text_input("name", size=50)
+                html.set_focus("name")
+            else:
+                html.write_text_permissive(self._name)
+                html.set_focus("alias")
 
-        forms.section(_("Alias"), is_required=True)
-        html.help(_("An alias or description of this group."))
-        html.text_input("alias", self.group["alias"])
+            forms.section(_("Alias"), is_required=True)
+            html.help(_("An alias or description of this group."))
+            html.text_input("alias", self.group["alias"], size=50)
 
-        self._show_extra_page_elements()
+            self._show_extra_page_elements()
 
-        forms.end()
-        html.hidden_fields()
-        html.end_form()
+            forms.end()
+            html.hidden_fields()
 
 
-@mode_registry.register
 class ModeHostgroups(ModeGroups):
     @property
     def type_name(self) -> GroupType:
@@ -302,11 +319,11 @@ class ModeHostgroups(ModeGroups):
     def name(cls) -> str:
         return "host_groups"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["groups"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_host_group_information()
 
     def title(self) -> str:
@@ -323,7 +340,6 @@ class ModeHostgroups(ModeGroups):
         return folder_preserving_link([("mode", "edit_ruleset"), ("varname", "host_groups")])
 
 
-@mode_registry.register
 class ModeServicegroups(ModeGroups):
     @property
     def type_name(self) -> GroupType:
@@ -333,11 +349,11 @@ class ModeServicegroups(ModeGroups):
     def name(cls) -> str:
         return "service_groups"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["groups"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_service_group_information()
 
     def title(self) -> str:
@@ -354,7 +370,6 @@ class ModeServicegroups(ModeGroups):
         return folder_preserving_link([("mode", "edit_ruleset"), ("varname", "service_groups")])
 
 
-@mode_registry.register
 class ModeContactgroups(ModeGroups):
     @property
     def type_name(self) -> GroupType:
@@ -364,16 +379,16 @@ class ModeContactgroups(ModeGroups):
     def name(cls) -> str:
         return "contact_groups"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["users"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_contact_group_information()
 
     def title(self) -> str:
         # TODO: Move to constructor (incl. _collect_additional_data)
-        self._members: Dict[GroupName, List[Tuple[UserId, str]]] = {}
+        self._members: dict[GroupName, list[tuple[UserId, str]]] = {}
         return _("Contact groups")
 
     def _page_menu_entries_related(self) -> Iterator[PageMenuEntry]:
@@ -396,11 +411,11 @@ class ModeContactgroups(ModeGroups):
             for cg in cgs:
                 self._members.setdefault(cg, []).append((userid, user.get("alias", userid)))
 
-    def _show_row_cells(self, table: Table, name: GroupName, group: GroupSpec) -> None:
-        super()._show_row_cells(table, name, group)
+    def _show_row_cells(self, nr: int, table: Table, name: GroupName, group: GroupSpec) -> None:
+        super()._show_row_cells(nr, table, name, group)
         table.cell(_("Members"))
         html.write_html(
-            HTML(", ").join(
+            HTML.without_escaping(", ").join(
                 [
                     HTMLWriter.render_a(
                         alias,
@@ -412,7 +427,6 @@ class ModeContactgroups(ModeGroups):
         )
 
 
-@mode_registry.register
 class ModeEditServicegroup(ABCModeEditGroup):
     @property
     def type_name(self) -> GroupType:
@@ -423,14 +437,14 @@ class ModeEditServicegroup(ABCModeEditGroup):
         return "edit_service_group"
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeServicegroups
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["groups"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_service_group_information()
 
     def title(self) -> str:
@@ -439,7 +453,6 @@ class ModeEditServicegroup(ABCModeEditGroup):
         return _("Edit service group")
 
 
-@mode_registry.register
 class ModeEditHostgroup(ABCModeEditGroup):
     @property
     def type_name(self) -> GroupType:
@@ -450,14 +463,14 @@ class ModeEditHostgroup(ABCModeEditGroup):
         return "edit_host_group"
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeHostgroups
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["groups"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_host_group_information()
 
     def title(self) -> str:
@@ -466,7 +479,6 @@ class ModeEditHostgroup(ABCModeEditGroup):
         return _("Edit host group")
 
 
-@mode_registry.register
 class ModeEditContactgroup(ABCModeEditGroup):
     @property
     def type_name(self) -> GroupType:
@@ -477,14 +489,14 @@ class ModeEditContactgroup(ABCModeEditGroup):
         return "edit_contact_group"
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeContactgroups
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["users"]
 
-    def _load_groups(self) -> Dict[GroupName, GroupSpec]:
+    def _load_groups(self) -> dict[GroupName, GroupSpec]:
         return load_contact_group_information()
 
     def title(self) -> str:
@@ -504,21 +516,25 @@ class ModeEditContactgroup(ABCModeEditGroup):
         if permitted_inventory_paths:
             self.group["inventory_paths"] = permitted_inventory_paths
 
-        permitted_maps = self._vs_nagvis_maps().from_html_vars("nagvis_maps")
-        self._vs_nagvis_maps().validate_value(permitted_maps, "nagvis_maps")
-        if permitted_maps:
-            self.group["nagvis_maps"] = permitted_maps
+        if edition_supports_nagvis(version.edition(cmk.utils.paths.omd_root)):
+            permitted_maps = self._vs_nagvis_maps().from_html_vars("nagvis_maps")
+            self._vs_nagvis_maps().validate_value(permitted_maps, "nagvis_maps")
+            if permitted_maps:
+                self.group["nagvis_maps"] = permitted_maps
 
     def _show_extra_page_elements(self) -> None:
         super()._show_extra_page_elements()
 
         forms.header(_("Permissions"))
-        forms.section(_("Permitted HW/SW inventory paths"))
+        forms.section(_("Permitted HW/SW Inventory paths"))
         self._vs_inventory_paths_and_keys().render_input(
             "inventory_paths", self.group.get("inventory_paths")
         )
 
-        if self._get_nagvis_maps():
+        if (
+            edition_supports_nagvis(version.edition(cmk.utils.paths.omd_root))
+            and self._get_nagvis_maps()
+        ):
             forms.section(_("Access to NagVis Maps"))
             html.help(_("Configure access permissions to NagVis maps."))
             self._vs_nagvis_maps().render_input("nagvis_maps", self.group.get("nagvis_maps", []))

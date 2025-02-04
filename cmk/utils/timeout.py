@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import signal
 from types import FrameType
-from typing import Final, NoReturn, Optional
+from typing import Final, NoReturn
 
-from cmk.utils.exceptions import MKTimeout
+from cmk.ccc.exceptions import MKTimeout
 
 __all__ = ["MKTimeout", "Timeout"]
 
@@ -24,7 +24,7 @@ class Timeout:
     def signaled(self) -> bool:
         return self._signaled
 
-    def _handler(self, signum: int, frame: Optional[FrameType]) -> NoReturn:
+    def _handler(self, signum: int, frame: FrameType | None) -> NoReturn:
         self._signaled = True
         raise MKTimeout(self.message)
 

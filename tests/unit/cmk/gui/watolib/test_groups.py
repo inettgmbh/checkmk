@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+
+from collections.abc import Callable
+from typing import ContextManager
 
 import pytest
 
 import cmk.utils.paths
 
-import cmk.gui.groups as gui_groups
-import cmk.gui.watolib.groups as groups
 from cmk.gui.utils.script_helpers import application_and_request_context
+from cmk.gui.watolib import groups_io
+from cmk.gui.watolib.groups import contact_group_usage_finder_registry
 
 
 @pytest.fixture(autouse=True)
@@ -23,23 +27,23 @@ def patch_config_paths(monkeypatch, tmp_path):
     (gui_confd / "wato").mkdir(parents=True)
 
 
-def test_load_group_information_empty(  # type:ignore[no-untyped-def]
-    tmp_path, run_as_superuser
-) -> None:
+@pytest.mark.usefixtures("tmp_path")
+def test_load_group_information_empty(run_as_superuser: Callable[[], ContextManager[None]]) -> None:
     with application_and_request_context(), run_as_superuser():
-        assert groups.load_contact_group_information() == {}
-        assert gui_groups.load_host_group_information() == {}
-        assert gui_groups.load_service_group_information() == {}
+        assert groups_io.load_contact_group_information() == {}
+        assert groups_io.load_host_group_information() == {}
+        assert groups_io.load_service_group_information() == {}
 
 
-def test_load_group_information(tmp_path, run_as_superuser) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("tmp_path")
+def test_load_group_information(run_as_superuser: Callable[[], ContextManager[None]]) -> None:
     with open(cmk.utils.paths.check_mk_config_dir + "/wato/groups.mk", "w") as f:
         f.write(
             """# encoding: utf-8
 
-define_contactgroups.update({'all': u'Everything'})
 define_hostgroups.update({'all_hosts': u'All hosts :-)'})
 define_servicegroups.update({'all_services': u'All särvices'})
+define_contactgroups.update({'all': u'Everything'})
 """
         )
 
@@ -49,63 +53,78 @@ define_servicegroups.update({'all_services': u'All särvices'})
 
 multisite_hostgroups = {
     "all_hosts": {
-        "ding": "dong",
+        "customer": "foo",
     },
 }
 
 multisite_servicegroups = {
     "all_services": {
-        "d1ng": "dong",
+        "unknown": "field",
     },
 }
 
 multisite_contactgroups = {
     "all": {
-        "d!ng": "dong",
+        "inventory_paths": "allow_all",
     },
 }
 """
         )
 
     with application_and_request_context(), run_as_superuser():
-        assert groups.load_group_information() == {
-            "contact": {
-                "all": {
-                    "alias": "Everything",
-                    "d!ng": "dong",
-                }
-            },
+        assert groups_io.load_group_information() == {
             "host": {
                 "all_hosts": {
                     "alias": "All hosts :-)",
-                    "ding": "dong",
+                    "customer": "foo",
                 }
             },
             "service": {
                 "all_services": {
                     "alias": "All s\xe4rvices",
-                    "d1ng": "dong",
+                    "unknown": "field",
+                }
+            },
+            "contact": {
+                "all": {
+                    "alias": "Everything",
+                    "inventory_paths": "allow_all",
                 }
             },
         }
 
-        assert groups.load_contact_group_information() == {
-            "all": {
-                "alias": "Everything",
-                "d!ng": "dong",
-            }
-        }
-
-        assert gui_groups.load_host_group_information() == {
+        assert groups_io.load_host_group_information() == {
             "all_hosts": {
                 "alias": "All hosts :-)",
-                "ding": "dong",
+                "customer": "foo",
             }
         }
 
-        assert gui_groups.load_service_group_information() == {
+        assert groups_io.load_service_group_information() == {
             "all_services": {
                 "alias": "All s\xe4rvices",
-                "d1ng": "dong",
+                "unknown": "field",
             }
         }
+
+        assert groups_io.load_contact_group_information() == {
+            "all": {
+                "alias": "Everything",
+                "inventory_paths": "allow_all",
+            }
+        }
+
+
+def test_group_usage_finder_registry_entries() -> None:
+    expected = [
+        "find_usages_of_contact_group_in_dashboards",
+        "find_usages_of_contact_group_in_default_user_profile",
+        "find_usages_of_contact_group_in_ec_rules",
+        "find_usages_of_contact_group_in_hosts_and_folders",
+        "find_usages_of_contact_group_in_mkeventd_notify_contactgroup",
+        "find_usages_of_contact_group_in_notification_rules",
+        "find_usages_of_contact_group_in_users",
+    ]
+
+    registered = [f.__name__ for f in contact_group_usage_finder_registry.values()]
+    assert sorted(registered) == sorted(expected)

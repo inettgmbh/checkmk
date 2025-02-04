@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.utils.password_store import Password
 
-import cmk.gui.userdb as userdb
-from cmk.gui.groups import load_contact_group_information
+from cmk.gui import userdb
 from cmk.gui.logged_in import user
 from cmk.gui.watolib.changes import add_change
 from cmk.gui.watolib.config_domains import ConfigDomainCore
+from cmk.gui.watolib.groups_io import load_contact_group_information
 from cmk.gui.watolib.password_store import PasswordStore
 
 
@@ -53,21 +53,21 @@ def _add_change(ident: str, change_type: str) -> None:
         add_change(
             "add-password",
             f"Added the password {ident}",
-            domains=[ConfigDomainCore],
+            domains=[ConfigDomainCore()],
             sites=None,
         )
     elif change_type == "edit":
         add_change(
             "edit-password",
             f"Edited the password '{ident}'",
-            domains=[ConfigDomainCore],
+            domains=[ConfigDomainCore()],
             sites=None,
         )
     else:  # delete
         add_change(
             "delete-password",
             f"Removed the password '{ident}'",
-            domains=[ConfigDomainCore],
+            domains=[ConfigDomainCore()],
             sites=None,
         )
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from marshmallow.fields import Field
@@ -13,6 +13,7 @@ from cmk.fields.primitives import (
     Decimal,
     Dict,
     Email,
+    Float,
     Function,
     IPv4,
     IPv4Interface,
@@ -23,8 +24,8 @@ from cmk.fields.primitives import (
     UUID,
 )
 from cmk.fields.validators import (
+    HostNameValidator,
     IsValidRegexp,
-    validate_hostname,
     ValidateAnyOfValidators,
     ValidateHostName,
     ValidateIPv4,
@@ -43,8 +44,10 @@ __all__ = [
     "Date",
     "DateTime",
     "Decimal",
+    "Float",
     "Email",
     "Function",
+    "HostNameValidator",
     "IPv4",
     "IPv4Interface",
     "IPv6",
@@ -60,6 +63,5 @@ __all__ = [
     "ValidateIPv4Network",
     "ValidateIPv6",
     "IsValidRegexp",
-    "validate_hostname",
     "ValidateHostName",
 ]

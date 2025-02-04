@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
 import xml.etree.ElementTree as ET
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from requests.auth import HTTPBasicAuth
 
-from cmk.special_agents.utils.agent_common import special_agent_main
-from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
-from cmk.special_agents.utils.request_helper import create_api_connect_session, parse_api_url
+from cmk.special_agents.v0_unstable.agent_common import special_agent_main
+from cmk.special_agents.v0_unstable.argument_parsing import Args, create_default_argument_parser
+from cmk.special_agents.v0_unstable.request_helper import ApiSession, parse_api_url
 
 
-def parse_arguments(args: Optional[Sequence[str]]) -> Args:
+def parse_arguments(args: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
     parser.add_argument(
         "servername",
@@ -56,7 +56,7 @@ def parse_arguments(args: Optional[Sequence[str]]) -> Args:
     return parser.parse_args(args)
 
 
-def agent_activemq_main(args: Args) -> None:
+def agent_activemq_main(args: Args) -> int:
     api_url = parse_api_url(
         server_address=args.servername,
         api_path="admin/xml/",
@@ -68,7 +68,7 @@ def agent_activemq_main(args: Args) -> None:
     if args.username:
         auth = HTTPBasicAuth(args.username, args.password)
 
-    session = create_api_connect_session(api_url, auth=auth)
+    session = ApiSession(api_url, auth=auth)
 
     try:
         response = session.get("queues.jsp")
@@ -79,7 +79,7 @@ def agent_activemq_main(args: Args) -> None:
         data = ET.fromstring(xml)
     except Exception as e:
         sys.stderr.write("Unable to connect. Credentials might be incorrect: %s\n" % e)
-        return
+        return 1
 
     attributes = ["size", "consumerCount", "enqueueCount", "dequeueCount"]
     count = 0
@@ -106,14 +106,15 @@ def agent_activemq_main(args: Args) -> None:
             output_lines.append("0 Active_MQ - Found %s Queues in total" % count)
     except Exception as e:  # Probably an IndexError
         sys.stderr.write("Unable to process data. Returned data might be incorrect: %r" % e)
-        return
+        return 1
 
-    print("\n".join(output_lines))
+    sys.stdout.write("\n".join(output_lines) + "\n")
+    return 0
 
 
-def main() -> None:
+def main() -> int:
     """Main entry point to be used"""
-    special_agent_main(
+    return special_agent_main(
         parse_arguments,
         agent_activemq_main,
     )

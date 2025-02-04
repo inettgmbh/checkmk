@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=protected-access
 
 import inspect
-from typing import List
+from dataclasses import replace
 
-from cmk.utils.type_defs import CheckPluginName, ParsedSectionName, RuleSetName
+from pytest import MonkeyPatch
 
-import cmk.base.api.agent_based.checking_classes as checking_classes
-import cmk.base.api.agent_based.register.check_plugins_legacy as check_plugins_legacy
-import cmk.base.config as config
-from cmk.base.api.agent_based.checking_classes import Metric, Result
-from cmk.base.check_api import Service as OldService
+from cmk.utils.rulesets import RuleSetName
+
+from cmk.checkengine.checking import CheckPluginName
+from cmk.checkengine.sectionparser import ParsedSectionName
+
+from cmk.base.api.agent_based.plugin_classes import LegacyPluginLocation
+from cmk.base.api.agent_based.register import check_plugins_legacy
+
+from cmk.agent_based.legacy.v0_unstable import LegacyCheckDefinition
+from cmk.agent_based.v1 import Metric, Result, Service, State
 
 
-def dummy_generator(section):  # pylint: disable=unused-argument
+def dummy_generator(section):
     yield from ()
 
 
-MINIMAL_CHECK_INFO = {
-    "service_description": "Norris Device",
-    "inventory_function": dummy_generator,
-    "check_function": dummy_generator,
-}
+MINIMAL_CHECK_INFO = LegacyCheckDefinition(
+    name="norris",
+    service_name="Norris Device",
+    discovery_function=dummy_generator,
+    check_function=dummy_generator,
+)
 
 
-def test_create_discovery_function(monkeypatch) -> None:  # type:ignore[no-untyped-def]
+def test_create_discovery_function(monkeypatch: MonkeyPatch) -> None:
     def insane_discovery(info):
         """Completely crazy discovery function:
 
@@ -39,18 +44,11 @@ def test_create_discovery_function(monkeypatch) -> None:  # type:ignore[no-untyp
         assert info == ["info"]
         return [
             ("foo", {}),
-            ("foo", "params_string"),
             "some string",
-            OldService("bar", {"P": "O"}),
         ]
 
-    monkeypatch.setattr(
-        config, "_check_contexts", {"norris": {"params_string": {"levels": "default"}}}
-    )
     new_function = check_plugins_legacy._create_discovery_function(
-        "norris",
-        {"inventory_function": insane_discovery},
-        config.get_check_context,
+        LegacyCheckDefinition(name="test_plugin", discovery_function=insane_discovery),
     )
 
     fixed_params = inspect.signature(new_function).parameters
@@ -58,11 +56,9 @@ def test_create_discovery_function(monkeypatch) -> None:  # type:ignore[no-untyp
     assert inspect.isgeneratorfunction(new_function)
 
     result = list(new_function(["info"]))
-    expected: List = [
-        checking_classes.Service(item="foo"),
-        checking_classes.Service(item="foo", parameters={"levels": "default"}),
+    expected: list = [
+        Service(item="foo"),
         "some string",  # bogus value let through intentionally
-        checking_classes.Service(item="bar", parameters={"P": "O"}),
     ]
     assert result == expected
 
@@ -82,10 +78,11 @@ def test_create_check_function() -> None:
 
     new_function = check_plugins_legacy._create_check_function(
         "test_plugin",
-        {
-            "check_function": insane_check,
-            "service_description": "Foo %s",
-        },
+        "Foo %s",
+        LegacyCheckDefinition(
+            name="test_plugin",
+            check_function=insane_check,
+        ),
     )
 
     fixed_params = inspect.signature(new_function).parameters
@@ -96,22 +93,22 @@ def test_create_check_function() -> None:
     # we cannot compare the actual Result objects because of
     # the nasty bypassing of validation in the legacy conversion
     assert list(results) == [
-        Result(state=checking_classes.State.OK, summary="Main info", details="Main info"),  # Result
+        Result(state=State.OK, summary="Main info", details="Main info"),  # Result
         Metric("metric1", 23.0, levels=(2.0, 3.0), boundaries=(None, None)),  # Metric
         Result(
-            state=checking_classes.State.WARN,
+            state=State.WARN,
             summary="still main, but very long",
             details="still main, but very long\nadditional1\nadditional7",
         ),
         Metric("metric2", 23.0, levels=(None, None), boundaries=(0.0, None)),
         Result(
-            state=checking_classes.State.CRIT,
+            state=State.CRIT,
             summary="3 additional details available",
             details="additional2\nadditional3\nadditional5",
         ),
         Metric("metric3", 23.0, levels=(None, None), boundaries=(None, None)),
         Result(
-            state=checking_classes.State.OK,
+            state=State.OK,
             summary="2 additional details available",
             details="additional4\nadditional6",
         ),
@@ -129,10 +126,11 @@ def test_create_check_function_with_empty_summary_in_details() -> None:
 
     new_function = check_plugins_legacy._create_check_function(
         "test_plugin",
-        {
-            "check_function": insane_check,
-            "service_description": "Foo %s",
-        },
+        "Foo %s",
+        LegacyCheckDefinition(
+            name="test_plugin",
+            check_function=insane_check,
+        ),
     )
 
     fixed_params = inspect.signature(new_function).parameters
@@ -143,9 +141,9 @@ def test_create_check_function_with_empty_summary_in_details() -> None:
     # we cannot compare the actual Result objects because of
     # the nasty bypassing of validation in the legacy conversion
     assert list(results) == [
-        Result(state=checking_classes.State.OK, summary="Main info", details="Main info"),  # Result
+        Result(state=State.OK, summary="Main info", details="Main info"),  # Result
         Result(
-            state=checking_classes.State.OK,
+            state=State.OK,
             summary="1 additional detail available",
             details="additional3",
         ),
@@ -161,10 +159,11 @@ def test_create_check_function_without_details() -> None:
 
     new_function = check_plugins_legacy._create_check_function(
         "test_plugin",
-        {
-            "check_function": insane_check,
-            "service_description": "Foo %s",
-        },
+        "Foo %s",
+        LegacyCheckDefinition(
+            name="test_plugin",
+            check_function=insane_check,
+        ),
     )
 
     fixed_params = inspect.signature(new_function).parameters
@@ -175,7 +174,7 @@ def test_create_check_function_without_details() -> None:
     # we cannot compare the actual Result objects because of
     # the nasty bypassing of validation in the legacy conversion
     assert list(results) == [
-        Result(state=checking_classes.State.OK, summary="Main info", details="Main info"),  # Result
+        Result(state=State.OK, summary="Main info", details="Main info"),  # Result
     ]
 
 
@@ -189,10 +188,11 @@ def test_create_check_function_with_zero_details_after_newline() -> None:
 
     new_function = check_plugins_legacy._create_check_function(
         "test_plugin",
-        {
-            "check_function": insane_check,
-            "service_description": "Foo %s",
-        },
+        "Foo %s",
+        LegacyCheckDefinition(
+            name="test_plugin",
+            check_function=insane_check,
+        ),
     )
 
     fixed_params = inspect.signature(new_function).parameters
@@ -203,23 +203,21 @@ def test_create_check_function_with_zero_details_after_newline() -> None:
     # we cannot compare the actual Result objects because of
     # the nasty bypassing of validation in the legacy conversion
     assert list(results) == [
-        Result(state=checking_classes.State.OK, summary="Main info", details="Main info"),  # Result
+        Result(state=State.OK, summary="Main info", details="Main info"),  # Result
     ]
 
 
-def test_create_check_plugin_from_legacy_wo_params() -> None:
-
-    plugin = check_plugins_legacy.create_check_plugin_from_legacy(
-        "norris",
-        MINIMAL_CHECK_INFO,
-        [],
-        {},  # factory_settings
-        lambda _x: {},  # get_check_context
+def test_convert_legacy_check_plugins_wo_params() -> None:
+    _errors, (plugin,) = check_plugins_legacy.convert_legacy_check_plugins(
+        (MINIMAL_CHECK_INFO,),
+        {"norris": "blah/norris.py"},
+        validate_creation_kwargs=True,
+        raise_errors=True,
     )
 
     assert plugin.name == CheckPluginName("norris")
     assert plugin.sections == [ParsedSectionName("norris")]
-    assert plugin.service_name == MINIMAL_CHECK_INFO["service_description"]
+    assert plugin.service_name == MINIMAL_CHECK_INFO.service_name
     assert plugin.discovery_function.__name__ == "discovery_migration_wrapper"
     assert plugin.discovery_default_parameters is None
     assert plugin.discovery_ruleset_name is None
@@ -227,76 +225,33 @@ def test_create_check_plugin_from_legacy_wo_params() -> None:
     assert plugin.check_default_parameters == {}
     assert plugin.check_ruleset_name is None
     assert plugin.cluster_check_function is None
+    assert plugin.location == LegacyPluginLocation("blah/norris.py")
 
 
-def test_create_check_plugin_from_legacy_with_params() -> None:
-
-    plugin = check_plugins_legacy.create_check_plugin_from_legacy(
-        "norris",
-        {
-            **MINIMAL_CHECK_INFO,
-            "group": "norris_rule",
-            "default_levels_variable": "norris_default_levels",
-        },
-        [],
-        {"norris_default_levels": {"levels": (23, 42)}},
-        lambda _x: {"norris_default_levels": {"levels_lower": (1, 2)}},
+def test_convert_legacy_check_plugins_with_params() -> None:
+    _errors, (plugin,) = check_plugins_legacy.convert_legacy_check_plugins(
+        (
+            replace(
+                MINIMAL_CHECK_INFO,
+                check_ruleset_name="norris_rule",
+                check_default_parameters={"levels": (23, 42)},
+            ),
+        ),
+        {"norris": "blah/norris.py"},
+        validate_creation_kwargs=True,
+        raise_errors=True,
     )
 
     assert plugin.name == CheckPluginName("norris")
     assert plugin.sections == [ParsedSectionName("norris")]
-    assert plugin.service_name == MINIMAL_CHECK_INFO["service_description"]
+    assert plugin.service_name == MINIMAL_CHECK_INFO.service_name
     assert plugin.discovery_function.__name__ == "discovery_migration_wrapper"
     assert plugin.discovery_default_parameters is None
     assert plugin.discovery_ruleset_name is None
     assert plugin.check_function.__name__ == "check_migration_wrapper"
     assert plugin.check_default_parameters == {
         "levels": (23, 42),
-        "levels_lower": (1, 2),
     }
     assert plugin.check_ruleset_name == RuleSetName("norris_rule")
     assert plugin.cluster_check_function is None
-
-
-def test_get_default_params_clean_case() -> None:
-    # with params
-    assert check_plugins_legacy._get_default_parameters(
-        check_legacy_info={"default_levels_variable": "foo"},
-        factory_settings={"foo": {"levels": (23, 42)}},
-        check_context={},
-    ) == {"levels": (23, 42)}
-
-    # without params
-    assert (
-        check_plugins_legacy._get_default_parameters(
-            check_legacy_info={},
-            factory_settings={},
-            check_context={},
-        )
-        is None
-    )
-
-
-def test_get_default_params_with_user_update() -> None:
-    # with params
-    assert check_plugins_legacy._get_default_parameters(
-        check_legacy_info={"default_levels_variable": "foo"},
-        factory_settings={"foo": {"levels": (23, 42), "overwrite_this": None}},
-        check_context={"foo": {"overwrite_this": 3.14, "more": "is better!"}},
-    ) == {
-        "levels": (23, 42),
-        "overwrite_this": 3.14,
-        "more": "is better!",
-    }
-
-
-def test_get_default_params_ignore_user_defined_tuple() -> None:
-    # with params
-    assert (
-        check_plugins_legacy._get_default_parameters(
-            check_legacy_info={"default_levels_variable": "foo"},
-            factory_settings={},
-            check_context={"foo": (23, 42)},
-        )
-        == {}
-    )
+    assert plugin.location == LegacyPluginLocation("blah/norris.py")

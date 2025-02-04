@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,8 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Age, Dictionary, Integer, TextInput, Tuple
+from cmk.gui.valuespec import Dictionary, Integer, TextInput, Tuple
+from cmk.gui.valuespec import TimeSpan as Age
 
 
 def _parameter_valuespec_graylog_sources():
@@ -40,7 +41,7 @@ def _parameter_valuespec_graylog_sources():
                 Integer(
                     title=_("Message averaging"),
                     help=_(
-                        "By activating averaging, Check_MK will compute the average of "
+                        "By activating averaging, Checkmk will compute the average of "
                         "the message count over a given interval. If you define "
                         "alerting levels they will automatically be applied on the "
                         "averaged value. This helps to mask out short peaks."
@@ -74,7 +75,6 @@ def _parameter_valuespec_graylog_sources():
                 "msgs_diff",
                 Age(
                     title=_("Timespan for difference calculation of total number of messages"),
-                    display=["days", "hours", "minutes"],
                     default_value=1800,
                 ),
             ),

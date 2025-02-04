@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Dict, Final, List, Literal, Optional
+from pathlib import Path
+from typing import Final, Literal
 
-import cmk.utils.paths
-from cmk.utils.type_defs import UserId
+from cmk.ccc import store
 
-import cmk.gui.permissions as permissions
+from cmk.utils import paths
+from cmk.utils.user import UserId
+
+from cmk.gui import permissions
 from cmk.gui.config import active_config
 from cmk.gui.hooks import request_memoize
 
 
 @request_memoize()
-def user_may(user_id: Optional[UserId], pname: str) -> bool:
+def user_may(user_id: UserId | None, pname: str) -> bool:
     return may_with_roles(roles_of_user(user_id), pname)
 
 
-def get_role_permissions() -> Dict[str, List[str]]:
+def get_role_permissions() -> dict[str, list[str]]:
     """Returns the set of permissions for all roles"""
-    role_permissions: Dict[str, List[str]] = {}
+    role_permissions: dict[str, list[str]] = {}
     roleids = set(active_config.roles.keys())
     for perm in permissions.permission_registry.values():
         for role_id in roleids:
@@ -36,13 +39,13 @@ _default_admin_permissions: Final[frozenset[str]] = frozenset(
     {
         "general.use",  # use Multisite
         "wato.use",  # enter WATO
-        "wato.edit",  # make changes in WATO...
+        "wato.edit",  # make changes in Setup...
         "wato.users",  # ... with access to user management
     }
 )
 
 
-def may_with_roles(some_role_ids: List[str], pname: str) -> bool:
+def may_with_roles(some_role_ids: list[str], pname: str) -> bool:
     if "admin" in some_role_ids and pname in _default_admin_permissions:
         return True
 
@@ -70,9 +73,17 @@ def may_with_roles(some_role_ids: List[str], pname: str) -> bool:
     return False
 
 
+def is_two_factor_required(user_id: UserId) -> bool:
+    users_roles = roles_of_user(user_id)
+
+    return any(
+        active_config.roles.get(role_id, {}).get("two_factor", False) for role_id in users_roles
+    )
+
+
 def is_user_with_publish_permissions(
     for_type: Literal["visual", "pagetype"],
-    user_id: Optional[UserId],
+    user_id: UserId | None,
     type_name: str,
 ) -> bool:
     """
@@ -90,15 +101,23 @@ def is_user_with_publish_permissions(
         if for_type == "visual"
         else "general.publish_to_foreign_groups_%s" % type_name
     )
+    publish_sites_permission: str = (
+        "general.publish_" + type_name + "_to_sites"
+        if for_type == "visual"
+        else "general.publish_to_sites_%s" % type_name
+    )
 
     return (
         user_may(user_id, publish_all_permission)
         or user_may(user_id, publish_groups_permission)
         or user_may(user_id, publish_foreign_groups_permission)
+        or user_may(user_id, publish_sites_permission)
     )
 
 
-def roles_of_user(user_id: Optional[UserId]) -> List[str]:
+def roles_of_user(
+    user_id: UserId | None,
+) -> list[str]:
     def existing_role_ids(role_ids):
         return [role_id for role_id in role_ids if role_id in active_config.roles]
 
@@ -110,13 +129,28 @@ def roles_of_user(user_id: Optional[UserId]) -> List[str]:
         return ["guest"]
     if active_config.users is not None and user_id in active_config.users:
         return ["user"]
-    if (
-        user_id is not None
-        and cmk.utils.paths.profile_dir.joinpath(user_id, "automation.secret").exists()
-    ):
+    if user_id is not None and is_automation_user(user_id):
         return ["guest"]  # unknown user with automation account
     if "roles" in active_config.default_user_profile:
         return existing_role_ids(active_config.default_user_profile["roles"])
     if active_config.default_user_role:
         return existing_role_ids([active_config.default_user_role])
     return []
+
+
+def is_automation_user(user_id: UserId) -> bool:
+    return AutomationUserFile(user_id).load()
+
+
+class AutomationUserFile:
+    def __init__(self, user_id: UserId, profile_dir: Path | None = None) -> None:
+        if profile_dir is None:
+            profile_dir = paths.profile_dir
+        self.path = profile_dir / user_id / "automation_user.mk"
+
+    def load(self) -> bool:
+        return store.load_object_from_file(self.path, default=False)
+
+    def save(self, value: bool) -> None:
+        store.mkdir(self.path.parent)
+        store.save_object_to_file(self.path, value)

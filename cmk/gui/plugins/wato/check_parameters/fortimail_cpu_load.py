@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,8 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersOperatingSystem,
 )
-from cmk.gui.valuespec import Dictionary, Float, Tuple
+from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
+from cmk.gui.valuespec import Dictionary, Float
 
 
 def _parameter_valuespec_fortimail_cpu_load():
@@ -17,13 +18,9 @@ def _parameter_valuespec_fortimail_cpu_load():
         elements=[
             (
                 "cpu_load",
-                Tuple(
-                    elements=[
-                        Float(title=_("Warning at")),
-                        Float(title=_("Critical at")),
-                    ],
-                    title=_("CPU load"),
-                    help=("Set levels on the CPU load."),
+                SimpleLevels(
+                    spec=Float,
+                    title=_("Upper levels for CPU load"),
                 ),
             ),
         ],

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -13,7 +13,7 @@ from cmk.gui.plugins.wato.utils import (
 from cmk.gui.valuespec import CascadingDropdown, Dictionary, Integer, Percentage, Tuple
 
 
-def _parameter_valuespec_kube_pod_resources(help_text: str):
+def _parameter_valuespec_kube_pod_resources(help_text: str) -> Dictionary:
     return Dictionary(
         elements=[
             (
@@ -61,9 +61,9 @@ rulespec_registry.register(
         group=RulespecGroupCheckParametersApplications,
         parameter_valuespec=lambda: _parameter_valuespec_kube_pod_resources(
             _(
-                "According to the Kubernetes docs, the phase of a Pod is a simple, high-level "
-                "summary of where the Pod is in its lifecycle. The phase is not intended to be a "
-                "comprehensive rollup of observations of container or Pod state, nor is it intended"
+                "According to the Kubernetes docs, the phase of a pod is a simple, high-level "
+                "summary of where the pod is in its lifecycle. The phase is not intended to be a "
+                "comprehensive rollup of observations of container or pod state, nor is it intended"
                 " to be a comprehensive state machine. For the pending pods, the check keeps track "
                 "for how long they have been pending. If a tolerating time period is set, the "
                 "service goes WARN/CRIT after any of the pods has been pending for longer than the "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -7,16 +7,13 @@ import argparse
 import json
 import logging
 import sys
-from typing import Any, Dict, Union
+from typing import Any
 
-import urllib3
-from jira import JIRA  # type: ignore[import]
-from jira.exceptions import JIRAError  # type: ignore[import]
+from jira import JIRA
+from jira.exceptions import JIRAError
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
 from cmk.utils.password_store import replace_passwords
-
-urllib3.disable_warnings(urllib3.exceptions.SubjectAltNameWarning)
 
 
 def main(argv=None):
@@ -53,7 +50,7 @@ def main(argv=None):
 
 
 def _handle_jira_connection(args):
-    jira_url = "%s://%s/" % (args.proto, args.hostname)
+    jira_url = f"{args.proto}://{args.hostname}/"
 
     jira = JIRA(
         server=jira_url,
@@ -67,14 +64,12 @@ def _handle_jira_connection(args):
 
 def _handle_request(args, jira):
     if args.project_workflows_key:
-
         logging.info("Retrieving workflow data")
         workflow_output = _handle_project(jira, args)
         if workflow_output is not None:
             sys.stdout.write("%s\n" % workflow_output)
 
     if args.jql_result:
-
         logging.info("Retrieving custom service data")
         custom_query_output = _handle_custom_query(jira, args)
         if custom_query_output is not None:
@@ -92,15 +87,14 @@ def _handle_project(jira, args):
 
     # get open issues for each project and workflow
     sys.stdout.write("<<<jira_workflow>>>\n")
-    issues_dict: Dict[str, Dict[str, int]] = {}
+    issues_dict: dict[str, dict[str, int]] = {}
     for project in projects:
         project_name = project["Name"][0]
         for workflow in project.get("Workflow", []):
-
             max_results = 0
             field = None
             svc_desc = None
-            jql = "project = '%s' AND status = '%s'" % (project_name, workflow)
+            jql = f"project = '{project_name}' AND status = '{workflow}'"
             issues = _handle_search_issues(
                 jira,
                 jql,
@@ -139,9 +133,8 @@ def _handle_custom_query(jira, args):
     ]
 
     sys.stdout.write("<<<jira_custom_svc>>>\n")
-    result_dict: Dict[str, Dict[str, Any]] = {}
+    result_dict: dict[str, dict[str, Any]] = {}
     for query in projects:
-
         jql = query["Query"][0]
         max_results = query["Limit"][0] if query["Limit"][0] != "-1" else None
         svc_desc = query["Description"][0]
@@ -185,7 +178,7 @@ def _handle_custom_query(jira, args):
         if query["Result"][0] == "sum":
             key = "sum"
             # TODO: Why do we use a float below, but a str in the else part?
-            value: Union[float, str] = total
+            value: float | str = total
         else:
             # average
             key = "avg"
@@ -206,12 +199,12 @@ def _handle_custom_query(jira, args):
 
 def _handle_search_issues(jira, jql, field, max_results, args, project, svc_desc):
     try:
-        issues = jira.search_issues(
+        return jira.search_issues(
             jql, maxResults=max_results, json_result=False, fields=field, validate_query=True
         )
     except JIRAError as jira_error:
         # errors of sections are handled and shown by/in the related checks
-        msg = "Jira error %s: %s" % (jira_error.status_code, jira_error.text)
+        msg = f"Jira error {jira_error.status_code}: {jira_error.text}"
         if project:
             key = project
         else:
@@ -221,8 +214,6 @@ def _handle_search_issues(jira, jql, field, max_results, args, project, svc_desc
         if args.debug:
             raise
         return None
-    else:
-        return issues
 
 
 def setup_logging(verbosity: int) -> None:
@@ -271,7 +262,7 @@ def parse_arguments(argv):
         action="append",
         help="The names of workflows of the given project",
     )
-    parser.add_argument("--jql-desc", nargs=1, action="append", help="Service description.")
+    parser.add_argument("--jql-desc", nargs=1, action="append", help="Service name.")
     parser.add_argument("--jql-query", nargs=1, action="append", help="JQL search string.")
     parser.add_argument(
         "--jql-result",
@@ -286,12 +277,12 @@ def parse_arguments(argv):
         "--jql-field",
         nargs=1,
         action="append",
-        help='Field for operation. Please use "None" if you ' 'use "count" as result option.',
+        help='Field for operation. Please use "None" if you use "count" as result option.',
     )
     parser.add_argument(
         "--jql-limit", nargs=1, action="append", help="Maximum number of processed search results."
     )
-    parser.add_argument("--hostname", required=True, help="JIRA server to use")
+    parser.add_argument("--hostname", required=True, help="Jira server to use")
 
     return parser.parse_args(argv)
 

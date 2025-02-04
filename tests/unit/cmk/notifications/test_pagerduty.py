@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from cmk.notification_plugins.pagerduty import _notification_source_from_context, pagerduty_msg
+from cmk.notification_plugins.pagerduty import _notification_source_from_context, _pagerduty_msg
 
 
 @pytest.mark.parametrize(
@@ -42,7 +42,7 @@ from cmk.notification_plugins.pagerduty import _notification_source_from_context
         ),
     ],
 )
-def test_notification_source_from_context(context, result) -> None:  # type:ignore[no-untyped-def]
+def test_notification_source_from_context(context: dict[str, str], result: str) -> None:
     msg = _notification_source_from_context(context)
     assert msg == result
 
@@ -53,7 +53,11 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
         pytest.param(
             {
                 "PARAMETER_URL_PREFIX_AUTOMATIC": "http",
-                "PARAMETER_ROUTING_KEY": "routing_key\tsomehex",
+                "PARAMETER_ROUTING_KEY_1": "cmk_postprocessed",
+                "PARAMETER_ROUTING_KEY_2": "explicit_password",
+                "PARAMETER_ROUTING_KEY_3": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580\tmypassword",
+                "PARAMETER_ROUTING_KEY_3_1": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580",
+                "PARAMETER_ROUTING_KEY_3_2": "mykey",
                 "MONITORING_HOST": "localhost",
                 "OMD_SITE": "testsite",
                 "HOSTURL": "/view?key=val",
@@ -82,7 +86,7 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
                     "source": "127.0.0.1",
                     "summary": "CRITICAL: first on site1",
                 },
-                "routing_key": "somehex",
+                "routing_key": "mykey",
                 "client": "Check_MK",
                 "client_url": "http://localhost/testsite/view?key=val2",
             },
@@ -92,7 +96,11 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
             {
                 "HOSTOUTPUT": "Packet received via smart PING",
                 "HOSTADDRESS": "10.3.1.239",
-                "PARAMETER_ROUTING_KEY": "routing_key\tsomehex",
+                "PARAMETER_ROUTING_KEY_1": "cmk_postprocessed",
+                "PARAMETER_ROUTING_KEY_2": "explicit_password",
+                "PARAMETER_ROUTING_KEY_3": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580\tmypassword",
+                "PARAMETER_ROUTING_KEY_3_1": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580",
+                "PARAMETER_ROUTING_KEY_3_2": "mykey",
                 "NOTIFICATIONTYPE": "RECOVERY",
                 "HOSTURL": "/check_mk/index.py?start_url=view.py%3Fview_name%3Dhoststatus%26host%3Dwin7vm%26site%3Dheute",
                 "HOSTNAME": "win7vm",
@@ -118,7 +126,7 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
                     "source": "10.3.1.239",
                     "summary": "win7vm is UP",
                 },
-                "routing_key": "somehex",
+                "routing_key": "mykey",
             },
             id="notification_host_state",
         ),
@@ -126,7 +134,11 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
             {
                 "HOSTOUTPUT": "Packet received via smart PING",
                 "HOSTADDRESS": "",
-                "PARAMETER_ROUTING_KEY": "routing_key\tsomehex",
+                "PARAMETER_ROUTING_KEY_1": "cmk_postprocessed",
+                "PARAMETER_ROUTING_KEY_2": "explicit_password",
+                "PARAMETER_ROUTING_KEY_3": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580\tmypassword",
+                "PARAMETER_ROUTING_KEY_3_1": "uuidcdd72f8e-1b70-473e-9a5e-8abdb2c42580",
+                "PARAMETER_ROUTING_KEY_3_2": "mykey",
                 "NOTIFICATIONTYPE": "RECOVERY",
                 "HOSTURL": "/check_mk/index.py?start_url=view.py%3Fview_name%3Dhoststatus%26host%3Dwin7vm%26site%3Dheute",
                 "HOSTNAME": "win7vm",
@@ -152,12 +164,15 @@ def test_notification_source_from_context(context, result) -> None:  # type:igno
                     "source": "win7vm",
                     "summary": "win7vm is UP",
                 },
-                "routing_key": "somehex",
+                "routing_key": "mykey",
             },
             id="notification_host_state_missing_host_address",
         ),
     ],
 )
-def test_pagerduty_message(context, result) -> None:  # type:ignore[no-untyped-def]
-    msg = pagerduty_msg(context)
+def test_pagerduty_message(
+    context: dict[str, str],
+    result: dict[str, str | dict[str, str | dict[str, str | dict[str, str]]]],
+) -> None:
+    msg = _pagerduty_msg(context)
     assert msg == result

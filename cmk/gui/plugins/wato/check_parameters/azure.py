@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Optional
-from typing import Tuple as TupleType
+from typing import Any
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.utils import (
@@ -13,20 +12,19 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
+from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
 from cmk.gui.valuespec import (
     DEF_VALUE,
     Dictionary,
     DropdownChoice,
     Float,
     Integer,
+    Migrate,
     MonitoringState,
+    Percentage,
     TextInput,
     Tuple,
 )
-
-
-def _item_spec_azure_agent_info():
-    return TextInput(title=_("Azure Agent Info"))
 
 
 def _parameter_valuespec_azure_agent_info():
@@ -71,8 +69,8 @@ def _parameter_valuespec_azure_agent_info():
                 Tuple(
                     title=_("Lower levels for remaining API reads"),
                     elements=[
-                        Integer(title=_("Warning below"), default_value=6000),
-                        Integer(title=_("Critical below"), default_value=3000),
+                        Integer(title=_("Warning below")),
+                        Integer(title=_("Critical below")),
                     ],
                 ),
             ),
@@ -89,10 +87,9 @@ def _parameter_valuespec_azure_agent_info():
 
 
 rulespec_registry.register(
-    CheckParameterRulespecWithItem(
+    CheckParameterRulespecWithoutItem(
         check_group_name="azure_agent_info",
         group=RulespecGroupCheckParametersApplications,
-        item_spec=_item_spec_azure_agent_info,
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_azure_agent_info,
         title=lambda: _("Azure Agent Info"),
@@ -255,14 +252,14 @@ rulespec_registry.register(
 
 def _item_spec_azure_databases():
     return TextInput(
-        title=_("Database Name"),
+        title=_("Database name"),
         help=_("Specify database names that the rule should apply to"),
     )
 
 
 def _parameter_valuespec_azure_databases():
     return Dictionary(
-        title=_("Set Levels"),
+        title=_("Set levels"),
         elements=[
             (
                 "storage_percent_levels",
@@ -294,6 +291,10 @@ def _parameter_valuespec_azure_databases():
                     ],
                 ),
             ),
+            (
+                "deadlocks_levels",
+                SimpleLevels(Float, title=_("Average deadlock count")),
+            ),
         ],
     )
 
@@ -314,39 +315,51 @@ def _item_spec_azure_vms():
     return TextInput(title=_("VM name"))
 
 
-def _parameter_valuespec_azure_vms():
-    return Dictionary(
-        help=_(
-            "To obtain the data required for this check, please configure"
-            ' the datasource program "Microsoft Azure".'
+# the migration is introduced in 2.2.0b1
+def migrate_map_states(params: dict[str, Any]) -> dict[str, Any]:
+    map_provisioning = params.pop("map_provisioning_states", None)
+    map_power = params.pop("map_power_states", None)
+
+    if map_provisioning:
+        for state in ("succeeded", "failed"):
+            params[state] = map_provisioning.get(state, 1)
+
+    if map_power:
+        for state in (
+            "starting",
+            "running",
+            "stopping",
+            "stopped",
+            "deallocating",
+            "deallocated",
+            "unknown",
+        ):
+            params[state] = map_power.get(state, 1)
+
+    return params
+
+
+def _parameter_valuespec_azure_vms() -> Migrate:
+    return Migrate(
+        Dictionary(
+            help=_(
+                "To obtain the data required for this check, please configure"
+                ' the datasource program "Microsoft Azure".'
+            ),
+            title=_("Map provisioning and power states"),
+            elements=[
+                ("succeeded", MonitoringState(title="Provisioning state succeeded")),
+                ("failed", MonitoringState(title="Provisioning state failed", default_value=2)),
+                ("starting", MonitoringState(title="Power state starting")),
+                ("running", MonitoringState(title="Power state running")),
+                ("stopping", MonitoringState(title="Power state stopping", default_value=1)),
+                ("stopped", MonitoringState(title="Power state stopped", default_value=1)),
+                ("deallocating", MonitoringState(title="Power state deallocating")),
+                ("deallocated", MonitoringState(title="Power state deallocated")),
+                ("unknown", MonitoringState(title=_("Power state unknown"), default_value=3)),
+            ],
         ),
-        elements=[
-            (
-                "map_provisioning_states",
-                Dictionary(
-                    title=_("Map provisioning states"),
-                    elements=[
-                        ("succeeded", MonitoringState(title="succeeded")),
-                        ("failed", MonitoringState(title="failed", default_value=2)),
-                    ],
-                ),
-            ),
-            (
-                "map_power_states",
-                Dictionary(
-                    title=_("Map power states"),
-                    elements=[
-                        ("starting", MonitoringState(title="starting")),
-                        ("running", MonitoringState(title="running")),
-                        ("stopping", MonitoringState(title="stopping", default_value=1)),
-                        ("stopped", MonitoringState(title="stopped", default_value=1)),
-                        ("deallocating", MonitoringState(title="deallocating")),
-                        ("deallocated", MonitoringState(title="deallocated")),
-                        ("unknown", MonitoringState(title=_("unknown"), default_value=3)),
-                    ],
-                ),
-            ),
-        ],
+        migrate=migrate_map_states,
     )
 
 
@@ -357,15 +370,15 @@ rulespec_registry.register(
         item_spec=_item_spec_azure_vms,
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_azure_vms,
-        title=lambda: _("Azure Virtual Machines"),
+        title=lambda: _("Azure virtual machines"),
     )
 )
 
 
 def _azure_vms_summary_levels(
     title: str,
-    lower: Optional[TupleType[int, int]] = None,
-    upper: Optional[TupleType[int, int]] = None,
+    lower: tuple[int, int] | None = None,
+    upper: tuple[int, int] | None = None,
 ) -> Dictionary:
     return Dictionary(
         title=title,
@@ -461,7 +474,7 @@ rulespec_registry.register(
         group=RulespecGroupCheckParametersApplications,
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_azure_vms_summary,
-        title=lambda: _("Azure Virtual Machines Summary"),
+        title=lambda: _("Azure virtual machines summary"),
     )
 )
 
@@ -536,6 +549,46 @@ def _parameter_valuespec_azure_virtualnetworkgateways():
                     ],
                 ),
             ),
+            (
+                "ingress_levels",
+                Tuple(
+                    title=_("Upper levels on tunnel ingress"),
+                    elements=[
+                        Integer(title=_("Warning above"), unit="B"),
+                        Integer(title=_("Critical above"), unit="B"),
+                    ],
+                ),
+            ),
+            (
+                "egress_levels",
+                Tuple(
+                    title=_("Upper levels on tunnel egress"),
+                    elements=[
+                        Integer(title=_("Warning above"), unit="B"),
+                        Integer(title=_("Critical above"), unit="B"),
+                    ],
+                ),
+            ),
+            (
+                "ingress_packet_drop_levels",
+                Tuple(
+                    title=_("Upper levels on tunnel ingress packet drop"),
+                    elements=[
+                        Integer(title=_("Warning above")),
+                        Integer(title=_("Critical above")),
+                    ],
+                ),
+            ),
+            (
+                "egress_packet_drop_levels",
+                Tuple(
+                    title=_("Upper levels on tunnel egress packet drop"),
+                    elements=[
+                        Integer(title=_("Warning above")),
+                        Integer(title=_("Critical above")),
+                    ],
+                ),
+            ),
         ],
     )
 
@@ -585,5 +638,172 @@ rulespec_registry.register(
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_azure_usagedetails,
         title=lambda: _("Azure Usage Details (Costs)"),
+    )
+)
+
+
+def _parameter_valuespec_storage():
+    return Dictionary(
+        title=_("Levels storage"),
+        elements=[
+            (
+                "io_consumption",
+                SimpleLevels(Percentage, title=_("Storage IO")),
+            ),
+            (
+                "storage",
+                SimpleLevels(Percentage, title=_("Storage")),
+            ),
+            (
+                "serverlog_storage",
+                SimpleLevels(Percentage, title=_("Server log storage")),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithItem(
+        check_group_name="azure_db_storage",
+        item_spec=lambda: TextInput(title=_("Azure DB Storage")),
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_storage,
+        title=lambda: _("Azure DB Storage"),
+    )
+)
+
+
+def _parameter_valuespec_qps():
+    return Dictionary(
+        title=_("Levels qps"),
+        elements=[
+            (
+                "levels",
+                SimpleLevels(Integer, title=_("Queries per second"), unit="1/s"),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithItem(
+        check_group_name="azure_traffic_manager_qps",
+        item_spec=lambda: TextInput(title=_("Qps")),
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_qps,
+        title=lambda: _("Azure Traffic Manager Qps"),
+    )
+)
+
+
+def _parameter_valuespec_probe_state():
+    return Dictionary(
+        title=_("Custom probe state"),
+        elements=[
+            (
+                "custom_state",
+                MonitoringState(
+                    title=_("State if probe state not OK"),
+                    default_value=2,
+                    help=_(
+                        "Choose the Checkmk state in case of probe state"
+                        " not OK (probe state metric is 0)."
+                    ),
+                ),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithItem(
+        check_group_name="azure_traffic_manager_probe_state",
+        item_spec=lambda: TextInput(title=_("Probe State")),
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_probe_state,
+        title=lambda: _("Azure Traffic Manager Probe State"),
+    )
+)
+
+
+def _parameter_valuespec_health():
+    return Dictionary(
+        title=_("Levels health"),
+        elements=[
+            (
+                "vip_availability",
+                SimpleLevels(Percentage, title=_("Data path availability lower levels")),
+            ),
+            (
+                "health_probe",
+                SimpleLevels(Percentage, title=_("Health probe status lower levels")),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithItem(
+        check_group_name="azure_load_balancer_health",
+        item_spec=lambda: TextInput(title=_("Load Balancer Health")),
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_health,
+        title=lambda: _("Azure Load Balancer Health"),
+    )
+)
+
+
+def _parameter_valuespec_vm_burst_cpu_credits() -> Dictionary:
+    return Dictionary(
+        title=_("Levels CPU credits"),
+        elements=[
+            (
+                "levels",
+                SimpleLevels(Float, title=_("Remaining credits lower levels")),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithoutItem(
+        check_group_name="azure_vm_burst_cpu_credits",
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_vm_burst_cpu_credits,
+        title=lambda: _("Azure VM Burst CPU Credits"),
+    )
+)
+
+
+def _parameter_valuespec_vm_disk() -> Dictionary:
+    return Dictionary(
+        title=_("Levels disk"),
+        elements=[
+            (
+                "disk_read",
+                SimpleLevels(Float, title=_("Disk read"), unit="B/s"),
+            ),
+            (
+                "disk_write",
+                SimpleLevels(Float, title=_("Disk write"), unit="B/s"),
+            ),
+            (
+                "disk_read_ios",
+                SimpleLevels(Float, title=_("Disk read operations"), unit="1/s"),
+            ),
+            (
+                "disk_write_ios",
+                SimpleLevels(Float, title=_("Disk write operations"), unit="1/s"),
+            ),
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithoutItem(
+        check_group_name="azure_vm_disk",
+        group=RulespecGroupCheckParametersApplications,
+        parameter_valuespec=_parameter_valuespec_vm_disk,
+        title=lambda: _("Azure VM Disk"),
     )
 )

@@ -1,71 +1,85 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# flake8: noqa
-
 import json
-import os
-import re
 import subprocess
-from typing import List
+from pathlib import Path
+from subprocess import check_output
+from typing import NamedTuple, NewType
 
-import pkg_resources as pkg  # type: ignore[import]
-import pytest  # type: ignore[import]
-from pipfile import Pipfile  # type: ignore[import]
-from semver import VersionInfo  # type: ignore[import]
+import pytest
+from semver import VersionInfo
 
-from tests.testlib import repo_path
+from tests.testlib.repo import repo_path
 from tests.testlib.site import Site
 
-
-def _load_pipfile_data() -> dict:
-    return Pipfile.load(filename=repo_path() + "/Pipfile").data
-
-
-def _get_import_names_from_dist_name(dist_name: str) -> List[str]:
-
-    # We still have some exceptions to the rule...
-    dist_renamings = {
-        "repoze-profile": "repoze.profile",
-    }
-
-    metadata_dir = pkg.get_distribution(
-        dist_renamings.get(dist_name, dist_name)
-    ).egg_info  # type: ignore[attr-defined]
-    with open("%s/%s" % (metadata_dir, "top_level.txt")) as top_level:
-        import_names = top_level.read().rstrip().split("\n")
-        # Skip the private modules (starting with an underscore)
-        return [name.replace("/", ".") for name in import_names if not name.startswith("_")]
-
-
-def _get_import_names_from_pipfile() -> List[str]:
-
-    # TODO: There are packages which are currently missing the top_level.txt, so we're hardcoding the import names
-    static_import_names = ["typing_extensions"]
-
-    import_names = []
-    for dist_name in _load_pipfile_data()["default"].keys():
-        if dist_name not in static_import_names:
-            import_names.extend(_get_import_names_from_dist_name(dist_name))
-    assert import_names
-    import_names.extend(static_import_names)
-    return import_names
+ImportName = NewType("ImportName", "str")
 
 
 def _get_python_version_from_defines_make() -> VersionInfo:
-    with open(repo_path() + "/defines.make") as defines:
-        python_version = (
-            [line for line in defines.readlines() if re.match(r"^PYTHON_VERSION .*:=", line)][0]
-            .split(":=")[1]
-            .strip()
-        )
-    return VersionInfo.parse(python_version)
+    return VersionInfo.parse(
+        check_output(["make", "--no-print-directory", "print-PYTHON_VERSION"], cwd=repo_path())
+        .decode()
+        .rstrip()
+    )
+
+
+class PipCommand(NamedTuple):
+    command: list[str]
+    needs_target_as_commandline: bool
+
+
+PYTHON_VERSION = _get_python_version_from_defines_make()
+
+SUPPORTED_PIP_CMDS: tuple[PipCommand, ...] = (
+    PipCommand(["python3", "-m", "pip"], True),
+    PipCommand(
+        [f"pip{PYTHON_VERSION.major}"], False
+    ),  # Target is set in the wrapper script as cmd line
+    PipCommand(
+        [f"pip{PYTHON_VERSION.major}.{PYTHON_VERSION.minor}"], False
+    ),  # Target is set in the wrapper script as cmd line
+)
+
+
+def _local_package_installation_path(site: Site) -> Path:
+    return Path(f"{site.root}", "local/lib/python3")
+
+
+def assert_local_package_install_path(
+    site: Site, package_name: str, local_package_installation_path: Path
+) -> None:
+    module_file = import_module_and_get_file_path(site, package_name)
+    assert module_file
+
+    # We only want to install into local as mkp will search there
+    assert local_package_installation_path in Path(module_file).parents
+
+
+def assert_install_package(cmd: list[str], package_name: str, site: Site) -> None:
+    p = site.execute(cmd, stdout=subprocess.PIPE)
+    install_stdout, _ = p.communicate()
+
+    assert "Successfully installed" in install_stdout, install_stdout
+    p = site.execute(["python3", "-c", f"import {package_name}"], stdout=subprocess.PIPE)
+    p.communicate()
+    assert p.returncode == 0
+
+
+def assert_uninstall_and_purge_cache(pip_cmd: PipCommand, package_name: str, site: Site) -> None:
+    for cmd in (
+        pip_cmd.command + ["uninstall", "-y", package_name],
+        pip_cmd.command + ["cache", "purge"],
+    ):
+        p = site.execute(cmd, stdout=subprocess.PIPE)
+        p.communicate()
+        assert p.returncode == 0
 
 
 def test_01_python_interpreter_exists(site: Site) -> None:
-    assert os.path.exists(site.root + f"/bin/python{_get_python_version_from_defines_make().major}")
+    assert site.path(f"bin/python{_get_python_version_from_defines_make().major}").exists()
 
 
 def test_02_python_interpreter_path(site: Site) -> None:
@@ -94,19 +108,19 @@ def test_03_python_path(site: Site) -> None:
 
     ordered_path_elements = [
         # there may be more, but these have to occur in this order:
-        site.root + f"/local/lib/python{python_version.major}",
-        site.root + f"/lib/python{python_version.major}/plus",
-        site.root + f"/lib/python{python_version.major}.{python_version.minor}",
-        site.root + f"/lib/python{python_version.major}",
+        site.root.as_posix() + f"/local/lib/python{python_version.major}",
+        site.root.as_posix() + f"/lib/python{python_version.major}/cloud",
+        site.root.as_posix() + f"/lib/python{python_version.major}.{python_version.minor}",
+        site.root.as_posix() + f"/lib/python{python_version.major}",
     ]
     assert [s for s in sys_path if s in ordered_path_elements] == ordered_path_elements
 
     for path in sys_path[1:]:
-        assert path.startswith(site.root), f"Found non site path {path!r} in sys.path"
+        assert path.startswith(site.root.as_posix()), f"Found non site path {path!r} in sys.path"
 
 
 def test_01_pip_exists(site: Site) -> None:
-    assert os.path.exists(site.root + "/bin/pip3")
+    assert site.path("bin/pip3").exists()
 
 
 def test_02_pip_path(site: Site) -> None:
@@ -115,30 +129,70 @@ def test_02_pip_path(site: Site) -> None:
     assert path == "/omd/sites/%s/bin/pip3" % site.id
 
 
-def test_03_pip_interpreter_version(site: Site) -> None:
-    p = site.execute(["pip3", "-V"], stdout=subprocess.PIPE)
+@pytest.mark.parametrize(
+    "pip_cmd",
+    SUPPORTED_PIP_CMDS,
+)
+def test_03_pip_interpreter_version(site: Site, pip_cmd: PipCommand) -> None:
+    p = site.execute(pip_cmd.command + ["-V"], stdout=subprocess.PIPE)
     version = p.stdout.read() if p.stdout else "<NO STDOUT>"
-    assert version.startswith("pip 22.0.4")
+    assert version.startswith("pip 24.0")
 
 
-@pytest.mark.parametrize("module_name", _get_import_names_from_pipfile())
-def test_python_modules(site: Site, module_name) -> None:
-    # TODO: Clarify and remove skipping of obscure modules
-    # Skip those modules for now, they throw:
-    # >       found = self._search_paths(context.pattern, context.path)
-    # E       AttributeError: 'Context' object has no attribute 'pattern'
-    if module_name in ("jsonschema", "openapi_spec_validator"):
-        return
-    import importlib  # pylint: disable=import-outside-toplevel
+def test_04_pip_user_can_install_non_wheel_packages(site: Site) -> None:
+    # ibm_db must be compiled from source, so choosing this also ensures that the Python headers
+    # can be found by pip
+    package_name = "ibm_db"
 
-    module = importlib.import_module(module_name)
+    # We're testing this only for one supported pip command as building from source just takes too long
+    pip_cmd = PipCommand(["pip3"], False)
 
-    # Skip namespace modules, they don't have __file__
-    if module.__file__:
-        assert module.__file__.startswith(site.root)
+    assert_install_package(pip_cmd.command + ["install", package_name], package_name, site)
+    assert_local_package_install_path(site, package_name, _local_package_installation_path(site))
+    assert_uninstall_and_purge_cache(pip_cmd, package_name, site)
 
 
-def test_python_preferred_encoding() -> None:
-    import locale  # pylint: disable=import-outside-toplevel
+@pytest.mark.parametrize("pip_cmd", SUPPORTED_PIP_CMDS)
+def test_05_pip_user_can_install_wheel_packages(site: Site, pip_cmd: PipCommand) -> None:
+    # We're using here another package which is needed for check_sql but not deployed by us
+    package_name = "oracledb"
+    if pip_cmd.needs_target_as_commandline:
+        command = pip_cmd.command + [
+            "install",
+            "--target",
+            str(_local_package_installation_path(site)),
+            package_name,
+        ]
+    else:
+        command = pip_cmd.command + ["install", package_name]
 
-    assert locale.getpreferredencoding() == "UTF-8"
+    assert_install_package(command, package_name, site)
+    assert_local_package_install_path(site, package_name, _local_package_installation_path(site))
+    assert_uninstall_and_purge_cache(pip_cmd, package_name, site)
+
+
+def import_module_and_get_file_path(site: Site, import_name: str) -> str:
+    p = site.execute(
+        ["python3", "-c", f"import {import_name} as m; print(m.__file__ or '')"],
+        stdout=subprocess.PIPE,
+    )
+    return p.communicate()[0].rstrip()
+
+
+def test_python_preferred_encoding(site: Site) -> None:
+    p = site.execute(
+        ["python3", "-c", "import locale; print(locale.getpreferredencoding())"],
+        stdout=subprocess.PIPE,
+    )
+    assert p.communicate()[0].rstrip() == "UTF-8"
+
+
+def test_python_optimized_and_lto_enable(site: Site) -> None:
+    output = site.execute(
+        ["python3", "-c", "import sysconfig; print(sysconfig.get_config_vars('CONFIG_ARGS'));"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).communicate()[0]
+    assert "--enable-optimizations" in output
+    assert "--with-lto" in output

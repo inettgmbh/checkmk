@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,69 +9,56 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Dictionary, MonitoringState, TextInput, Transform
+from cmk.gui.valuespec import Dictionary, MonitoringState, TextInput
 
 
-def _oracle_instance_transform_oracle_instance_params(p):
-    if "ignore_noarchivelog" in p:
-        if p["ignore_noarchivelog"]:
-            p["noarchivelog"] = 0
-        del p["ignore_noarchivelog"]
-    if "uptime_min" in p:
-        del p["uptime_min"]
-    return p
-
-
-def _parameter_valuespec_oracle_instance():
-    return Transform(
-        valuespec=Dictionary(
-            title=_("Consider state of Archivelogmode: "),
-            elements=[
-                (
-                    "archivelog",
-                    MonitoringState(
-                        default_value=0,
-                        title=_("State in case of Archivelogmode is enabled: "),
-                    ),
+def _parameter_valuespec_oracle_instance() -> Dictionary:
+    return Dictionary(
+        title=_("Consider state of archive log mode: "),
+        elements=[
+            (
+                "archivelog",
+                MonitoringState(
+                    default_value=0,
+                    title=_("State in case of archive log mode is enabled: "),
                 ),
-                (
-                    "noarchivelog",
-                    MonitoringState(
-                        default_value=1,
-                        title=_("State in case of Archivelogmode is disabled: "),
-                    ),
+            ),
+            (
+                "noarchivelog",
+                MonitoringState(
+                    default_value=1,
+                    title=_("State in case of archive log mode is disabled: "),
                 ),
-                (
-                    "forcelogging",
-                    MonitoringState(
-                        default_value=0,
-                        title=_("State in case of Force Logging is enabled: "),
-                    ),
+            ),
+            (
+                "forcelogging",
+                MonitoringState(
+                    default_value=0,
+                    title=_("State in case of force logging is enabled: "),
                 ),
-                (
-                    "noforcelogging",
-                    MonitoringState(
-                        default_value=1,
-                        title=_("State in case of Force Logging is disabled: "),
-                    ),
+            ),
+            (
+                "noforcelogging",
+                MonitoringState(
+                    default_value=1,
+                    title=_("State in case of force logging is disabled: "),
                 ),
-                (
-                    "logins",
-                    MonitoringState(
-                        default_value=2,
-                        title=_("State in case of logins are not possible: "),
-                    ),
+            ),
+            (
+                "logins",
+                MonitoringState(
+                    default_value=2,
+                    title=_("State in case of logins are not possible: "),
                 ),
-                (
-                    "primarynotopen",
-                    MonitoringState(
-                        default_value=2,
-                        title=_("State in case of Database is PRIMARY and not OPEN: "),
-                    ),
+            ),
+            (
+                "primarynotopen",
+                MonitoringState(
+                    default_value=2,
+                    title=_("State in case of database is PRIMARY and not OPEN: "),
                 ),
-            ],
-        ),
-        forth=_oracle_instance_transform_oracle_instance_params,
+            ),
+        ],
     )
 
 
@@ -82,6 +69,6 @@ rulespec_registry.register(
         item_spec=lambda: TextInput(title=_("Database SID"), size=12, allow_empty=False),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_oracle_instance,
-        title=lambda: _("Oracle Instance"),
+        title=lambda: _("Oracle instance"),
     )
 )

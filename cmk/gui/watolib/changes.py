@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Functions for logging changes and keeping the "Activate Changes" state and finally activating changes."""
 
 import time
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from typing import Iterable, Iterator, List, Optional, Type
 
 from livestatus import SiteId
 
 import cmk.utils
-from cmk.utils.type_defs import UserId
+from cmk.utils.setup_search_index import request_index_update
+from cmk.utils.user import UserId
 
 import cmk.gui.utils
 import cmk.gui.watolib.git
 import cmk.gui.watolib.sidebar_reload
+from cmk.gui.config import active_config
 from cmk.gui.logged_in import user
-from cmk.gui.plugins.watolib.utils import ABCConfigDomain, config_domain_registry, DomainSettings
 from cmk.gui.site_config import site_is_local
 from cmk.gui.user_sites import activation_sites
 from cmk.gui.utils import escaping
-from cmk.gui.watolib import search
 from cmk.gui.watolib.audit_log import log_audit, LogMessage
+from cmk.gui.watolib.config_domain_name import (
+    ABCConfigDomain,
+    config_domain_registry,
+    DomainSettings,
+)
 from cmk.gui.watolib.objref import ObjectRef
 from cmk.gui.watolib.site_changes import SiteChanges
 
@@ -30,15 +35,21 @@ from cmk.gui.watolib.site_changes import SiteChanges
 def add_change(
     action_name: str,
     text: LogMessage,
-    object_ref: Optional[ObjectRef] = None,
-    diff_text: Optional[str] = None,
+    object_ref: ObjectRef | None = None,
+    diff_text: str | None = None,
     add_user: bool = True,
-    need_sync: Optional[bool] = None,
-    need_restart: Optional[bool] = None,
-    domains: Optional[List[Type[ABCConfigDomain]]] = None,
-    sites: Optional[List[SiteId]] = None,
-    domain_settings: Optional[DomainSettings] = None,
+    need_sync: bool | None = None,
+    need_restart: bool | None = None,
+    need_apache_reload: bool | None = None,
+    domains: Sequence[ABCConfigDomain] | None = None,
+    sites: Sequence[SiteId] | None = None,
+    domain_settings: DomainSettings | None = None,
+    prevent_discard_changes: bool = False,
 ) -> None:
+    """
+    config_domains:
+        list of config domains that are affected by this change
+    """
     log_audit(
         action=action_name,
         message=text,
@@ -48,7 +59,7 @@ def add_change(
     )
     cmk.gui.watolib.sidebar_reload.need_sidebar_reload()
 
-    search.update_index_background(action_name)
+    request_index_update(action_name)
 
     ActivateChangesWriter().add_change(
         action_name,
@@ -57,9 +68,12 @@ def add_change(
         add_user,
         need_sync,
         need_restart,
+        need_apache_reload,
         domains,
         sites,
         domain_settings,
+        prevent_discard_changes,
+        diff_text=diff_text,
     )
 
 
@@ -69,8 +83,8 @@ class ActivateChangesWriter:
     @classmethod
     @contextmanager
     def disable(cls) -> Iterator[None]:
+        cls._enabled = False
         try:
-            cls._enabled = False
             yield
         finally:
             cls._enabled = True
@@ -79,13 +93,16 @@ class ActivateChangesWriter:
         self,
         action_name: str,
         text: LogMessage,
-        object_ref: Optional[ObjectRef],
+        object_ref: ObjectRef | None,
         add_user: bool,
-        need_sync: Optional[bool],
-        need_restart: Optional[bool],
-        domains: Optional[List[Type[ABCConfigDomain]]],
-        sites: Optional[Iterable[SiteId]],
-        domain_settings: Optional[DomainSettings],
+        need_sync: bool | None,
+        need_restart: bool | None,
+        need_apache_reload: bool | None,
+        domains: Sequence[ABCConfigDomain] | None,
+        sites: Iterable[SiteId] | None,
+        domain_settings: DomainSettings | None,
+        prevent_discard_changes: bool = False,
+        diff_text: str | None = None,
     ) -> None:
         if not ActivateChangesWriter._enabled:
             return
@@ -110,8 +127,11 @@ class ActivateChangesWriter:
                 add_user,
                 need_sync,
                 need_restart,
+                need_apache_reload,
                 domains,
                 domain_settings,
+                prevent_discard_changes,
+                diff_text,
             )
 
     def _new_change_id(self) -> str:
@@ -123,12 +143,15 @@ class ActivateChangesWriter:
         change_id: str,
         action_name: str,
         text: LogMessage,
-        object_ref: Optional[ObjectRef],
+        object_ref: ObjectRef | None,
         add_user: bool,
-        need_sync: Optional[bool],
-        need_restart: Optional[bool],
-        domains: List[Type[ABCConfigDomain]],
-        domain_settings: Optional[DomainSettings],
+        need_sync: bool | None,
+        need_restart: bool | None,
+        need_apache_reload: bool | None,
+        domains: Sequence[ABCConfigDomain],
+        domain_settings: DomainSettings | None,
+        prevent_discard_changes: bool,
+        diff_text: str | None = None,
     ) -> None:
         # Individual changes may override the domain restart default value
         if need_restart is None:
@@ -137,19 +160,17 @@ class ActivateChangesWriter:
         if need_sync is None:
             need_sync = any(d.needs_sync for d in domains)
 
+        # Only changes are currently capable of requesting an apache reload not the entire domain
+        if need_apache_reload is None:
+            need_apache_reload = False
+
         # Using attrencode here is against our regular rule to do the escaping
         # at the last possible time: When rendering. But this here is the last
         # place where we can distinguish between HTML() encapsulated (already)
         # escaped / allowed HTML and strings to be escaped.
         text = escaping.escape_text(text)
 
-        # If the local site don't need a restart, there is no reason to add a
-        # change for that site. Otherwise the activation page would show a
-        # change but the site would not be selected for activation.
-        if site_is_local(site_id) and need_restart is False:
-            return
-
-        SiteChanges(SiteChanges.make_path(site_id)).append(
+        SiteChanges(site_id).append(
             {
                 "id": change_id,
                 "action_name": action_name,
@@ -161,6 +182,11 @@ class ActivateChangesWriter:
                 "need_sync": need_sync,
                 "need_restart": need_restart,
                 "domain_settings": domain_settings or {},
+                "prevent_discard_changes": prevent_discard_changes,
+                "diff_text": diff_text,
+                "has_been_activated": site_is_local(active_config, site_id)
+                and need_restart is False
+                and need_apache_reload is False,
             }
         )
 
@@ -170,7 +196,7 @@ def add_service_change(
     text: str,
     object_ref: ObjectRef,
     site_id: SiteId,
-    diff_text: Optional[str] = None,
+    diff_text: str | None = None,
     need_sync: bool = False,
 ) -> None:
     add_change(

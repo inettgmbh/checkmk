@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+
 import abc
-from typing import Callable, List, Type, Union
+from collections.abc import Callable, Sequence
 
-from six import ensure_str
+import cmk.ccc.plugin_registry
 
-import cmk.utils.plugin_registry
-
+from cmk.gui.type_defs import PermissionName, RoleName
 from cmk.gui.utils.speaklater import LazyString
 
 
@@ -39,7 +39,7 @@ class PermissionSection(abc.ABC):
         return False
 
 
-class PermissionSectionRegistry(cmk.utils.plugin_registry.Registry[Type[PermissionSection]]):
+class PermissionSectionRegistry(cmk.ccc.plugin_registry.Registry[type[PermissionSection]]):
     def plugin_name(self, instance):
         return instance().name
 
@@ -55,11 +55,11 @@ class Permission(abc.ABC):
 
     def __init__(
         self,
-        section: Type[PermissionSection],
+        section: type[PermissionSection],
         name: str,
-        title: Union[str, LazyString],
-        description: Union[str, LazyString],
-        defaults: List[str],
+        title: str | LazyString,
+        description: str | LazyString,
+        defaults: Sequence[RoleName],
     ) -> None:
         self._section = section
         self._name = name
@@ -69,7 +69,7 @@ class Permission(abc.ABC):
         self._sort_index = 0
 
     @property
-    def section(self) -> Type[PermissionSection]:
+    def section(self) -> type[PermissionSection]:
         return self._section
 
     @property
@@ -89,7 +89,7 @@ class Permission(abc.ABC):
         return str(self._description)
 
     @property
-    def defaults(self) -> List[str]:
+    def defaults(self) -> Sequence[str]:
         """List of role IDs that have this permission by default"""
         return self._defaults
 
@@ -108,7 +108,7 @@ class Permission(abc.ABC):
         self._sort_index = value
 
 
-class PermissionRegistry(cmk.utils.plugin_registry.Registry[Permission]):
+class PermissionRegistry(cmk.ccc.plugin_registry.Registry[Permission]):
     def __init__(self) -> None:
         super().__init__()
         # TODO: Better make the sorting explicit in the future
@@ -135,7 +135,6 @@ class PermissionRegistry(cmk.utils.plugin_registry.Registry[Permission]):
 permission_registry = PermissionRegistry()
 
 
-# Kept for compatibility with pre 1.6 GUI plugins
 def declare_permission_section(name, title, prio=50, do_sort=False):
     cls = type(
         "LegacyPermissionSection%s" % name.title(),
@@ -150,13 +149,12 @@ def declare_permission_section(name, title, prio=50, do_sort=False):
     permission_section_registry.register(cls)
 
 
-# Kept for compatibility with pre 1.6 GUI plugins
-# Some dynamically registered permissions still use this
-def declare_permission(name, title, description, defaults):
-    # ? declare_permission seems to be used with the type of name argument being str
-    if not isinstance(name, str):
-        name = ensure_str(name, encoding="ascii")  # pylint: disable= six-ensure-str-bin-call
-
+def declare_permission(
+    name: PermissionName,
+    title: str | LazyString,
+    description: str | LazyString,
+    defaults: Sequence[RoleName],
+) -> None:
     section_name, permission_name = name.split(".", 1)
 
     permission_registry.register(

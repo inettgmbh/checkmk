@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,11 +16,9 @@ from cmk.gui.valuespec import Dictionary
 def _parameter_valuespec():
     return Dictionary(
         help=_(
-            (
-                "A Deployment enters various states during its lifecycle. Depending on this a "
-                "Deployment may present different conditions. You can set a time for how long "
-                "a condition is allowed to be in a certain state before the check alerts."
-            )
+            "A deployment enters various states during its lifecycle. Depending on this a "
+            "deployment may present different conditions. You can set a time for how long "
+            "a condition is allowed to be in a certain state before the check alerts."
         ),
         elements=[
             (

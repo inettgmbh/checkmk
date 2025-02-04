@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,10 +20,12 @@
 
 import cProfile
 import getopt
-import os
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from cmk.utils.password_store import replace_passwords
 
@@ -69,7 +71,24 @@ OPTIONS:
 #############################################################################
 
 
-def main(sys_argv=None):  # pylint: disable=too-many-branches
+def _run_cmd(debug: bool, cmd: str) -> list[str]:
+    if debug:
+        sys.stderr.write("executing external command: %s\n" % cmd)
+
+    return subprocess.run(
+        shlex.split(cmd),
+        stderr=subprocess.STDOUT,
+        stdout=subprocess.PIPE,
+        check=False,
+        encoding="utf-8",
+    ).stdout.splitlines(keepends=True)
+
+
+def normalize_str(line: str) -> str:
+    return line.rstrip("\n").rstrip("\r")
+
+
+def main(sys_argv=None):
     if sys_argv is None:
         replace_passwords()
         sys_argv = sys.argv[1:]
@@ -94,7 +113,7 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
     mortypes = ["all"]
     fetch_agent_info = False
 
-    naviseccli_options: Dict[str, Dict[str, Any]] = {
+    naviseccli_options: dict[str, dict[str, Any]] = {
         "disks": {"cmd_options": [(None, "getall -disk")], "active": False, "sep": None},
         "hba": {"cmd_options": [(None, "getall -hba")], "active": False, "sep": None},
         "hwstatus": {"cmd_options": [(None, "getall -array")], "active": False, "sep": None},
@@ -126,7 +145,7 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
         elif o in ["-i", "--modules"]:
             mortypes = a.split(",")
         elif o in ["-t", "--timeout"]:
-            _opt_timeout = int(a)  # noqa: F841
+            _opt_timeout = int(a)
         elif o in ["-h", "--help"]:
             usage()
             sys.exit(0)
@@ -160,6 +179,10 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
     except ValueError:
         pass
 
+    if not shutil.which("naviseccli"):
+        sys.stderr.write('The command "naviseccli" could not be found. Terminating.\n')
+        sys.exit(1)
+
     #############################################################################
     # fetch information by calling naviseccli
     #############################################################################
@@ -168,49 +191,35 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
         # try using security files
         basecmd = "naviseccli -h %s " % host_address
     else:
-        basecmd = "naviseccli -h %s -User %s -Password '%s' -Scope 0 " % (
-            host_address,
-            user,
-            password,
-        )
+        basecmd = f"naviseccli -h {host_address} -User {user} -Password '{password}' -Scope 0 "
 
     #
     # check_mk section of agent output
     #
 
-    cmd = basecmd + "getall -sp"
-    if opt_debug:
-        sys.stderr.write("executing external command: %s\n" % cmd)
+    def run(cmd):
+        return _run_cmd(opt_debug, basecmd + cmd)
 
     # Now read the whole output of the command
-    cmdout = [l.strip() for l in os.popen(cmd + " 2>&1").readlines()]  # nosec
+    cmdout = run("getall -sp")
 
-    if cmdout:
-        if "naviseccli: not found" in cmdout[0]:
-            sys.stderr.write('The command "naviseccli" could not be found. Terminating.\n')
-            sys.exit(1)
+    if cmdout and cmdout[0].startswith("Security file not found"):
+        sys.stderr.write(
+            "Could not find security file. Please provide valid user "
+            "credentials if you don't have a security file.\n"
+        )
+        sys.exit(1)
 
-        elif cmdout[0].startswith("Security file not found"):
-            sys.stderr.write(
-                "Could not find security file. Please provide valid user "
-                "credentials if you don't have a security file.\n"
-            )
-            sys.exit(1)
-
-    print("<<<emcvnx_info:sep(58)>>>")
+    sys.stdout.write("<<<emcvnx_info:sep(58)>>>\n")
     for line in cmdout:
-        print(line)
+        sys.stdout.write(line.strip() + "\n")
 
     # if module "agent" was requested, fetch additional information about the
     # agent, e. g. Model and Revision
     if fetch_agent_info:
-        print("<<<emcvnx_agent:sep(58)>>>")
-        cmd = basecmd + "getagent"
-        if opt_debug:
-            sys.stderr.write("executing external command: %s\n" % cmd)
-
-        for line in os.popen(cmd).readlines():  # nosec
-            print(line, end=" ")
+        sys.stdout.write("<<<emcvnx_agent:sep(58)>>>\n")
+        for line in run("getagent"):
+            sys.stdout.write(normalize_str(line) + "\n")
 
     #
     # all other sections of agent output
@@ -219,18 +228,15 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
         if module_options["active"] is True:
             separator = module_options["sep"]
             if separator:
-                print("<<<emcvnx_%s:sep(%s)>>>" % (module, separator))
+                sys.stdout.write(f"<<<emcvnx_{module}:sep({separator})>>>\n")
             else:
-                print("<<<emcvnx_%s>>>" % module)
+                sys.stdout.write("<<<emcvnx_%s>>>\n" % module)
 
             for header, cmd_option in module_options["cmd_options"]:
                 if header is not None:
-                    print("[[[%s]]]" % header)
-                cmd = basecmd + cmd_option
-                if opt_debug:
-                    sys.stderr.write("executing external command: %s\n" % cmd)
-                for line in os.popen(cmd).readlines():  # nosec
-                    print(line, end=" ")
+                    sys.stdout.write("[[[%s]]]\n" % header)
+                for line in run(cmd_option):
+                    sys.stdout.write(normalize_str(line) + "\n")
 
     if g_profile:
         g_profile_path = Path("emcvnx_profile.out")
@@ -245,4 +251,4 @@ def main(sys_argv=None):  # pylint: disable=too-many-branches
         )
         show_profile.chmod(0o755)
 
-        sys.stderr.write("Profile '%s' written. Please run %s.\n" % (g_profile_path, show_profile))
+        sys.stderr.write(f"Profile '{g_profile_path}' written. Please run {show_profile}.\n")

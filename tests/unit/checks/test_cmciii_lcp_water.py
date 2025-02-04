@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import pytest
 
-from tests.testlib import Check
+from cmk.agent_based.v2 import StringTable
 
-from cmk.base.plugins.agent_based.agent_based_api.v1.type_defs import StringTable
+from .checktestlib import Check
 
 pytestmark = pytest.mark.checks
 
@@ -152,8 +152,9 @@ pytestmark = pytest.mark.checks
     ],
 )
 def test_parse_cmciii_lcp_water(string_table: StringTable, section: StringTable) -> None:
-    check = Check("cmciii_lcp_water")
-    assert list(check.run_parse(string_table)) == section
+    parsed = Check("cmciii_lcp_water").run_parse(string_table)
+    assert isinstance(parsed, list)
+    assert parsed == section
 
 
 @pytest.mark.parametrize(
@@ -166,8 +167,8 @@ def test_parse_cmciii_lcp_water(string_table: StringTable, section: StringTable)
         )
     ],
 )
-def test_discover_cmciii_lcp_water(  # type:ignore[no-untyped-def]
-    string_table: StringTable, discovered_item
+def test_discover_cmciii_lcp_water(
+    string_table: StringTable, discovered_item: Sequence[object]
 ) -> None:
     check = Check("cmciii_lcp_water")
     assert list(check.run_discovery(string_table)) == discovered_item

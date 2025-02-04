@@ -1,4 +1,4 @@
-' Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+' Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 ' This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 ' conditions defined in the file COPYING, which is part of this source code package.
 
@@ -6,10 +6,10 @@
 ' is running one or multiple MySQL server instances locally.
 
 Option Explicit
-Const CMK_VERSION = "2.2.0i1"
+Const CMK_VERSION = "2.5.0b1"
 
 Dim SHO, FSO, WMI, PROC
-Dim cfg_dir, cfg_file, service_list, service, instances, instance, cmd
+Dim cfg_dir, cfg_file, service_list, service, instances, instance, cmd, mysqlLocalIni
 Dim output, pos, conn_args
 
 Set instances = CreateObject("Scripting.Dictionary")
@@ -24,7 +24,7 @@ cfg_dir = SHO.ExpandEnvironmentStrings("%MK_CONFDIR%")
 '
 
 Set WMI = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2")
-Set service_list = WMI.ExecQuery("SELECT * FROM Win32_Service WHERE (Name LIKE '%MySQL%' or Name LIKE '%MariaDB') and State = 'Running'")
+Set service_list = WMI.ExecQuery("SELECT * FROM Win32_Service WHERE (Name LIKE '%MySQL%' or Name LIKE '%MariaDB%') and State = 'Running'")
 For Each service in service_list
     ' add the internal service name as key and the launch command line as value
     instances.add service.Name, service.PathName
@@ -51,6 +51,24 @@ Sub Run(cmd)
     Set FILE = Nothing
 End Sub
 
+Function BuildPrintDefaultsCmd(instance_name, instance_cmd)
+   Dim print_defaults_cmd
+   print_defaults_cmd = Replace(instance_cmd, "mysqld.exe", "mysql.exe")
+   print_defaults_cmd = Replace(print_defaults_cmd, "mysqld-nt.exe", "mysql.exe")
+   print_defaults_cmd = Left(print_defaults_cmd, InStrRev(print_defaults_cmd, instance_name) - 2) & " --print-defaults"
+   BuildPrintDefaultsCmd = print_defaults_cmd
+End Function
+
+' The following logic exists as well in the linux bash script mk_mysql
+mysqlLocalIni = cfg_dir & "\mysql.local.ini"
+If Not FSO.FileExists(mysqlLocalIni) Then
+    dim inifile
+    Set inifile = FSO.CreateTextFile(mysqlLocalIni, True)
+    inifile.WriteLine("# This file is created by mk_mysql.vbs because some versions of mysqladmin")
+    inifile.WriteLine("# issue a warning if there are missing includes.")
+    inifile.Close
+End If
+
 For Each instance In instances.Keys
     ' Use either an instance specific config file named mysql_<instance-id>.ini
     ' or the default mysql.ini file.
@@ -65,11 +83,7 @@ For Each instance In instances.Keys
     ' Now detect the correct socket / port to connect to this instance. This can be done by executing
     ' mysql.exe with the --defaults-file found in the command line of the windows process together
     ' with the option --print-defaults
-    cmd = instances.Item(instance)
-    cmd = Replace(cmd, "mysqld.exe", "mysql.exe")
-    cmd = Replace(cmd, "mysqld-nt.exe", "mysql.exe")
-    cmd = Left(cmd, InStrRev(cmd, " ")) & " --print-defaults"
-    Set PROC = SHO.Exec(cmd)
+    Set PROC = SHO.Exec(BuildPrintDefaultsCmd(instance, instances.Item(instance)))
     PROC.StdIn.Close()
     PROC.StdErr.Close()
     output = PROC.StdOut.ReadAll()

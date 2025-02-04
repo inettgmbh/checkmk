@@ -1,17 +1,16 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-set -e
+set -e -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=buildscripts/infrastructure/build-nodes/scripts/build_lib.sh
+. "${SCRIPT_DIR}/build_lib.sh"
 
 VERSION="0.14.3"
 INSTALL_PREFIX=/opt/patchelf-${VERSION}
-
-failure() {
-    echo "$(basename "$0"):" "$@" >&2
-    exit 1
-}
 
 # temporary directory handling #################################################
 
@@ -41,3 +40,5 @@ echo "$PWD"
 make -j8 install
 
 ln -sf "${INSTALL_PREFIX}/bin/"* /usr/bin
+
+test_package "patchelf --version" "patchelf $VERSION$"

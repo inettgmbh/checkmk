@@ -2,7 +2,8 @@ editions = [
     ( "cre",          "Raw Edition" ),
     ( "cee",          "Enterprise Edition" ),
     ( "cme",          "Managed Services Edition" ),
-    ( "cpe",          "Plus Edition" ),
+    ( "cce",          "Cloud Edition" ),
+    ( "cse",          "SaaS Edition" ),
 ]
 
 components = [
@@ -56,12 +57,6 @@ levels = [
 compatible = [
     ("compat", "Compatible"),
     ("incomp", "Incompatible"),
-]
-
-knowledge = [
-    ( "undoc", "User manual state unknown" ),
-    ( "todoc", "Needs to be added to user manual" ),
-    ( "doc",   "Is reflected in user manual or does not need to" ),
 ]
 
 online_url = "https://checkmk.com/werk/%d"

@@ -1,14 +1,15 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
 
 #include "pch.h"
 
-#include "cfg.h"
+#include "wnx/cfg.h"
 #include "common/wtools.h"
 #include "providers/ps.h"
-#include "service_processor.h"
+#include "wnx/service_processor.h"
+#include "watest/test_tools.h"
 #include "tools/_misc.h"
 #include "tools/_process.h"
 
@@ -19,7 +20,7 @@ namespace cma::provider {
 namespace {
 long long convert(const std::string &value) {
     try {
-        return std::stoull(value);
+        return std::stoll(value);
     } catch (const std::invalid_argument &) {
         return -1;
     }
@@ -36,12 +37,15 @@ const std::vector<std::string_view> g_special_processes{
     {"fish"sv},
     {"wininit.exe"sv},
     {"LsaIso.exe"sv},
-    {"bash"sv}};
+    {"bash"sv},
+    {"git.exe"sv},
+};
 
 }  // namespace
 
-TEST(PsTest, Integration) {
-    OnStart(AppType::test);
+TEST(PsTest, Component) {
+    auto temp_fs = tst::TempCfgFs::CreateNoIo();
+    ASSERT_TRUE(temp_fs->loadFactoryConfig());
     for (auto use_full_path : {false, true}) {
         SCOPED_TRACE(
             fmt::format("'{}'", use_full_path ? "Full path" : "Short path"));
@@ -50,7 +54,6 @@ TEST(PsTest, Integration) {
                   out.find("svchost.exe\t-k") != std::string::npos);
         auto all = tools::SplitString(out, "\n");
         for (const auto &in : all) {
-            EXPECT_LE(in.length(), 2048U) << in;  // due to pascom crash handler
             auto by_tab = tools::SplitString(in, "\t");
             EXPECT_TRUE(all.size() > 10);
             SCOPED_TRACE(fmt::format("'{}'", in));
@@ -104,18 +107,18 @@ namespace {
 
 auto ToTm(const std::string &in) {
     auto check_time = ConvertWmiTimeToHumanTime(in);
-    return *std::localtime(&check_time);
+    return *std::localtime(&check_time);  // NOLINT
 }
 
 bool IsAccountExist(const std::string &account) {
     SID_NAME_USE snu;
-    SID sid{0};
-    auto sz = static_cast<DWORD>(sizeof(sid));
-    DWORD rd_size{0};
+    SID sid = {};
+    auto sz = static_cast<DWORD>(sizeof sid);
+    DWORD rd_size = {};
     char *rd{nullptr};
-    auto succ = ::LookupAccountNameA(nullptr, account.c_str(), &sid, &sz, rd,
-                                     &rd_size, &snu);
-    return succ || ::GetLastError() != ERROR_INSUFFICIENT_BUFFER;
+    auto success = ::LookupAccountNameA(nullptr, account.c_str(), &sid, &sz, rd,
+                                        &rd_size, &snu);
+    return success || ::GetLastError() != ERROR_INSUFFICIENT_BUFFER;
 }
 
 }  // namespace

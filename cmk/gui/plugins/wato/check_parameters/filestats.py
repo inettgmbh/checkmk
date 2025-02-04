@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-
-from typing import List
-from typing import Tuple as _Tuple
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.utils import (
@@ -25,7 +22,7 @@ from cmk.gui.valuespec import (
     ValueSpec,
 )
 
-file_size_age_elements: List[_Tuple[str, ValueSpec]] = [
+file_size_age_elements: list[tuple[str, ValueSpec]] = [
     (
         "minage_oldest",
         Tuple(
@@ -193,10 +190,10 @@ def _parameter_valuespec_filestats():
         ],
         help=_(
             "Here you can impose various levels on the results reported by the"
-            " mk_filstats plugin. Note that some levels only apply to a matching"
+            " mk_filstats plug-in. Note that some levels only apply to a matching"
             " output format (e.g. max/min count levels are not applied if only the"
             " smallest, largest, oldest and newest file is reported). In order to"
-            " receive the required data, you must configure the plugin mk_filestats."
+            " receive the required data, you must configure the plug-in mk_filestats."
         ),
     )
 

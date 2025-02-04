@@ -1,55 +1,64 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=protected-access
 
-from typing import Any, Dict
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
-from cmk.utils.type_defs import CheckPluginName, ParsedSectionName
+from cmk.checkengine.checking import CheckPluginName
+from cmk.checkengine.inventory import InventoryPluginName
+from cmk.checkengine.sectionparser import ParsedSectionName
 
-import cmk.base.api.agent_based.register.check_plugins as check_plugins
+from cmk.base.api.agent_based.register import AgentBasedPlugins, check_plugins
+from cmk.base.api.agent_based.register.utils import (
+    create_subscribed_sections,
+    validate_function_arguments,
+)
+
+from cmk.discover_plugins import PluginLocation
 
 
-def dummy_generator(section):  # pylint: disable=unused-argument
+def dummy_generator(section):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
-MINIMAL_CREATION_KWARGS: Dict[str, Any] = {
+MINIMAL_CREATION_KWARGS: dict[str, Any] = {
     "name": "norris",
     "service_name": "Norris Device",
     "discovery_function": dummy_generator,
     "check_function": dummy_generator,
+    "location": PluginLocation(""),
 }
 
 
-def dummy_function(section):  # pylint: disable=unused-argument
+def dummy_function(section):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
-def dummy_function_i(item, section):  # pylint: disable=unused-argument
+def dummy_function_i(item, section):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
-def dummy_function_ip(item, params, quark):  # pylint: disable=unused-argument
+def dummy_function_ip(item, params, quark):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
-def dummy_function_ips(item, params, section):  # pylint: disable=unused-argument
+def dummy_function_ips(item, params, section):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
-def dummy_function_jj(section_jim, section_jill):  # pylint: disable=unused-argument
+def dummy_function_jj(section_jim, section_jill):
     return
-    yield  # pylint: disable=unreachable
+    yield
 
 
 @pytest.mark.parametrize(
@@ -62,13 +71,13 @@ def dummy_function_jj(section_jim, section_jill):  # pylint: disable=unused-argu
         ("", ValueError),
     ],
 )
-def test_invalid_service_name(string, exc_ty) -> None:
+def test_invalid_service_name(string: str, exc_ty: type["TypeError"] | type["ValueError"]) -> None:
     with pytest.raises(exc_ty):
         check_plugins._validate_service_name(CheckPluginName("test"), string)
 
 
 @pytest.mark.parametrize("string", ["whooop", "foo %s bar"])
-def test_valid_service_name(string) -> None:
+def test_valid_service_name(string: str) -> None:
     check_plugins._validate_service_name(CheckPluginName("test"), string)
 
 
@@ -79,7 +88,7 @@ def test_valid_service_name(string) -> None:
         ("Foo %s", True),
     ],
 )
-def test_requires_item(service_name, expected) -> None:
+def test_requires_item(service_name: str, expected: bool) -> None:
     assert check_plugins._requires_item(service_name) == expected
 
 
@@ -90,9 +99,9 @@ def test_requires_item(service_name, expected) -> None:
         "mööp",
     ],
 )
-def test_create_sections_invalid(sections) -> None:
+def test_create_sections_invalid(sections: list[str] | None) -> None:
     with pytest.raises((TypeError, ValueError)):
-        check_plugins.create_subscribed_sections(sections, None)  # type: ignore[arg-type]
+        create_subscribed_sections(sections, None)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -106,8 +115,12 @@ def test_create_sections_invalid(sections) -> None:
         ),
     ],
 )
-def test_create_sections(sections, plugin_name, expected) -> None:
-    assert check_plugins.create_subscribed_sections(sections, plugin_name) == expected
+def test_create_sections(
+    sections: list[str] | None,
+    plugin_name: InventoryPluginName | CheckPluginName,
+    expected: list[ParsedSectionName],
+) -> None:
+    assert create_subscribed_sections(sections, plugin_name) == expected
 
 
 @pytest.mark.parametrize(
@@ -140,9 +153,15 @@ def test_create_sections(sections, plugin_name, expected) -> None:
         (dummy_function_jj, False, False, [CheckPluginName("jim"), CheckPluginName("jill")], None),
     ],
 )
-def test_validate_function_args(function, has_item, has_params, sections, raises) -> None:
+def test_validate_function_args(
+    function: Callable,
+    has_item: bool,
+    has_params: bool,
+    sections: list[ParsedSectionName],
+    raises: None | type["TypeError"],
+) -> None:
     if raises is None:
-        check_plugins.validate_function_arguments(
+        validate_function_arguments(
             type_label="check",
             function=function,
             has_item=has_item,
@@ -152,7 +171,7 @@ def test_validate_function_args(function, has_item, has_params, sections, raises
         return
 
     with pytest.raises(raises):
-        check_plugins.validate_function_arguments(
+        validate_function_arguments(
             type_label="check",
             function=function,
             has_item=has_item,
@@ -162,7 +181,7 @@ def test_validate_function_args(function, has_item, has_params, sections, raises
 
 
 @pytest.mark.parametrize("key", list(MINIMAL_CREATION_KWARGS.keys()))
-def test_create_check_plugin_mandatory(key) -> None:
+def test_create_check_plugin_mandatory(key: str) -> None:
     kwargs = {k: v for k, v in MINIMAL_CREATION_KWARGS.items() if k != key}
     with pytest.raises(TypeError):
         _ = check_plugins.create_check_plugin(**kwargs)
@@ -201,6 +220,8 @@ def test_create_check_plugin() -> None:
     assert plugin.check_ruleset_name is None
 
 
-def test_module_attribute(fix_register) -> None:
-    local_check = fix_register.check_plugins[CheckPluginName("local")]
-    assert local_check.module == "local"
+def test_module_attribute(agent_based_plugins: AgentBasedPlugins) -> None:
+    local_check = agent_based_plugins.check_plugins[CheckPluginName("local")]
+    assert local_check.location == PluginLocation(
+        "cmk.plugins.collection.agent_based.local", "check_plugin_local"
+    )

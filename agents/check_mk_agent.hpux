@@ -1,5 +1,5 @@
 #!/usr/bin/ksh
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -31,7 +31,7 @@ fi
 section_checkmk() {
 
     echo "<<<check_mk>>>"
-    echo "Version: 2.2.0i1"
+    echo "Version: 2.5.0b1"
     echo "AgentOS: hpux"
     echo "Hostname: $(hostname)"
     echo "AgentDirectory: $MK_CONFDIR"
@@ -39,7 +39,9 @@ section_checkmk() {
     echo "SpoolDirectory: $SPOOLDIR"
     echo "PluginsDirectory: $PLUGINSDIR"
     echo "LocalDirectory: $LOCALDIR"
-
+    echo "OSType: unix"
+    echo "OSName: HP-UX"
+    echo "OSVersion: $(uname -r | cut -d' ' -f1)"
 }
 
 run_purely_synchronous_sections() {
@@ -169,3 +171,5 @@ main() {
     return 0
 
 }
+
+main

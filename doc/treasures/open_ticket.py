@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 # Custom command for creating support tickets
 
-# pylint: disable=all
+
 # noqa
 
 config.declare_permission(
@@ -17,11 +17,11 @@ config.declare_permission(
 
 
 def command_open_ticket(cmdtag, spec, row):
-    if html.request.var("_sap_openticket"):
+    if request.var("_sap_openticket"):
         comment = "OPENTICKET:" + html.get_str_input("_sap_ticket_comment")
         broadcast = 0
         forced = 2
-        command = "SEND_CUSTOM_%s_NOTIFICATION;%s;%s;%s;%s" % (
+        command = "SEND_CUSTOM_{}_NOTIFICATION;{};{};{};{}".format(
             cmdtag,
             spec,
             broadcast + forced,

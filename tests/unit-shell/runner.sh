@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -34,4 +34,6 @@ run_files() {
 }
 
 # watch out! make sure a failure is reflected in the exit code
-find "${_REPO}/tests/unit-shell" -name "test*.sh" | run_files
+PATTERN=${1:-*}
+PATTERN="**/test_$(basename "${PATTERN/test_/}" ".sh").sh"
+find "${_REPO}/tests/unit-shell" -wholename "${PATTERN}" | run_files

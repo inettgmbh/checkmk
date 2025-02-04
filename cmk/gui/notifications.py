@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple
 
 from livestatus import LivestatusResponse, MKLivestatusNotFoundError
 
 import cmk.utils.render
 
-import cmk.gui.i18n
 import cmk.gui.pages
-import cmk.gui.sites as sites
+from cmk.gui import sites
 from cmk.gui.breadcrumb import Breadcrumb, make_simple_page_breadcrumb
 from cmk.gui.config import active_config
 from cmk.gui.ctx_stack import g
@@ -30,18 +29,25 @@ from cmk.gui.page_menu import (
     PageMenuEntry,
     PageMenuTopic,
 )
-from cmk.gui.pages import Page, page_registry
+from cmk.gui.pages import Page, PageRegistry
 from cmk.gui.permissions import (
     declare_dynamic_permissions,
-    permission_section_registry,
     PermissionSection,
+    PermissionSectionRegistry,
 )
 from cmk.gui.table import table_element
+from cmk.gui.user_async_replication import user_profile_async_replication_page
 from cmk.gui.utils.flashed_messages import get_flashed_messages
 from cmk.gui.utils.transaction_manager import transactions
-from cmk.gui.utils.urls import make_confirm_link, makeactionuri
-from cmk.gui.wato.pages.user_profile.async_replication import user_profile_async_replication_page
+from cmk.gui.utils.urls import make_confirm_delete_link, makeactionuri
 from cmk.gui.watolib.user_scripts import declare_notification_plugin_permissions
+
+
+def register(
+    page_registry: PageRegistry, permission_section_registry: PermissionSectionRegistry
+) -> None:
+    page_registry.register_page("clear_failed_notifications")(ClearFailedNotificationPage)
+    permission_section_registry.register(PermissionSectionNotificationPlugins)
 
 
 class FailedNotificationTimes(NamedTuple):
@@ -49,7 +55,7 @@ class FailedNotificationTimes(NamedTuple):
     modified: float
 
 
-g_columns: List[str] = [
+g_columns: list[str] = [
     "time",
     "contact_name",
     "type",
@@ -59,7 +65,6 @@ g_columns: List[str] = [
 ]
 
 
-@permission_section_registry.register
 class PermissionSectionNotificationPlugins(PermissionSection):
     @property
     def name(self) -> str:
@@ -67,7 +72,7 @@ class PermissionSectionNotificationPlugins(PermissionSection):
 
     @property
     def title(self) -> str:
-        return _("Notification plugins")
+        return _("Notification plug-ins")
 
     @property
     def do_sort(self) -> bool:
@@ -75,7 +80,7 @@ class PermissionSectionNotificationPlugins(PermissionSection):
 
 
 def load_plugins() -> None:
-    """Plugin initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
+    """Plug-in initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
     declare_dynamic_permissions(declare_notification_plugin_permissions)
 
 
@@ -87,7 +92,7 @@ def _acknowledge_failed_notifications(timestamp: float, now: float) -> None:
 
 def acknowledged_time() -> float:
     """Returns the timestamp to start looking for failed notifications for the current user"""
-    times: Optional[FailedNotificationTimes] = g.get("failed_notification_times")
+    times: FailedNotificationTimes | None = g.get("failed_notification_times")
 
     # Initialize the request cache "g.failed_notification_times" from the user profile in case it is
     # needed. Either on first call to this function or when the file on disk was modified.
@@ -108,7 +113,7 @@ def acknowledged_time() -> float:
     return g.failed_notification_times.acknowledged_unitl
 
 
-def number_of_failed_notifications(after: Optional[float]) -> int:
+def number_of_failed_notifications(after: float | None) -> int:
     if not _may_see_failed_notifications():
         return 0
 
@@ -131,9 +136,9 @@ def number_of_failed_notifications(after: Optional[float]) -> int:
 
 
 def load_failed_notifications(
-    before: Optional[float] = None,
-    after: Optional[float] = None,
-    extra_headers: Optional[str] = None,
+    before: float | None = None,
+    after: float | None = None,
+    extra_headers: str | None = None,
 ) -> LivestatusResponse:
     may_see_notifications = _may_see_failed_notifications()
     if not may_see_notifications:
@@ -145,9 +150,9 @@ def load_failed_notifications(
 
 
 def _failed_notification_query(
-    before: Optional[float],
-    after: Optional[float],
-    extra_headers: Optional[str] = None,
+    before: float | None,
+    after: float | None,
+    extra_headers: str | None = None,
     *,
     stat_only: bool,
 ) -> str:
@@ -192,7 +197,6 @@ def _may_see_failed_notifications() -> bool:
     )
 
 
-@page_registry.register_page("clear_failed_notifications")
 class ClearFailedNotificationPage(Page):
     def __init__(self) -> None:
         if not _may_see_failed_notifications():
@@ -211,7 +215,7 @@ class ClearFailedNotificationPage(Page):
                 make_header(html, title, breadcrumb)
 
                 for message in get_flashed_messages():
-                    html.show_message(message)
+                    html.show_message(message.msg)
                 user_profile_async_replication_page(back_url="clear_failed_notifications.py")
                 return
 
@@ -242,7 +246,7 @@ class ClearFailedNotificationPage(Page):
                     _("Time"), cmk.utils.render.approx_age(time.time() - row[header["time"]])
                 )
                 table.cell(_("Contact"), row[header["contact_name"]])
-                table.cell(_("Plugin"), row[header["type"]])
+                table.cell(_("Plug-in"), row[header["type"]])
                 table.cell(_("Host"), row[header["host_name"]])
                 table.cell(_("Service"), row[header["service_description"]])
                 table.cell(_("Output"), row[header["comment"]])
@@ -251,12 +255,13 @@ class ClearFailedNotificationPage(Page):
         self, acktime: float, failed_notifications: LivestatusResponse, breadcrumb: Breadcrumb
     ) -> PageMenu:
         confirm_url = make_simple_link(
-            make_confirm_link(
+            make_confirm_delete_link(
                 url=makeactionuri(
                     request, transactions, [("acktime", str(acktime)), ("_confirm", "1")]
                 ),
-                message=_("Do you really want to acknowledge all failed notifications up to %s?")
-                % cmk.utils.render.date_and_time(acktime),
+                title=_("Acknowledge all failed notifications"),
+                message=("Up to: %s") % cmk.utils.render.date_and_time(acktime),
+                confirm_button=_("Acknowledge"),
             )
         )
 
@@ -270,7 +275,7 @@ class ClearFailedNotificationPage(Page):
                             title=_("Actions"),
                             entries=[
                                 PageMenuEntry(
-                                    title=_("Confirm"),
+                                    title=_("Acknowledge"),
                                     icon_name="save",
                                     item=confirm_url,
                                     is_shortcut=True,

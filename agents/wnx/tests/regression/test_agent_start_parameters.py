@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import platform
 import sys
-from builtins import range
-from typing import List
 
 import pytest
 
@@ -16,7 +13,7 @@ from .local import local_test, main_exe, run_subprocess
 
 
 class Globals:
-    param: List[str] = []
+    param: list[str] = []
 
 
 @pytest.fixture(name="testfile")
@@ -152,7 +149,7 @@ def post_test():
     yield
 
 
-def test_agent_start_parameters(  # type:ignore[no-untyped-def]
+def test_agent_start_parameters(  # type: ignore[no-untyped-def]
     request, testconfig, expected_output, actual_output, testfile
 ) -> None:
     # request.node.name gives test name

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -12,7 +12,10 @@
 # warnings.simplefilter("error", RemovedInMarshmallow4Warning)
 
 
-from marshmallow.fields import Field, missing_
+from marshmallow.fields import (  # type: ignore[attr-defined,unused-ignore]
+    Field,
+    missing_,
+)
 
 from cmk.gui.fields.attributes import (
     HostAttributeManagementBoardField,
@@ -24,52 +27,96 @@ from cmk.gui.fields.attributes import (
     NetworkScanResult,
     SNMPCredentials,
 )
+from cmk.gui.fields.custom_fields import (
+    AuxTagIDField,
+    CertPrivateKey,
+    CertPublicKey,
+    ContactGroupField,
+    GlobalHTTPProxyField,
+    IPField,
+    LDAPConnectionID,
+    NetworkPortNumber,
+    PasswordStoreIDField,
+    RelativeUrl,
+    SAMLConnectionID,
+    ServiceLevelField,
+    SplunkURLField,
+    TagGroupIDField,
+    Timeout,
+    TimePeriodIDField,
+    UnixPath,
+)
 from cmk.gui.fields.definitions import (
-    attributes_field,
     column_field,
-    CustomAttributes,
     customer_field,
+    CustomHostAttributes,
     ExprSchema,
     FOLDER_PATTERN,
     FolderField,
+    FolderIDField,
     GroupField,
+    host_attributes_field,
     HostField,
+    HostnameOrIP,
+    PasswordEditableBy,
     PasswordIdent,
-    PasswordOwner,
     PasswordShare,
     PythonString,
     query_field,
     SiteField,
     Timestamp,
+    Username,
+    UserRoleID,
     X509ReqPEMFieldUUID,
 )
 
 __all__ = [
-    "attributes_field",
+    "AuxTagIDField",
+    "host_attributes_field",
+    "CertPublicKey",
+    "CertPrivateKey",
     "column_field",
+    "ContactGroupField",
     "customer_field",
-    "CustomAttributes",
+    "CustomHostAttributes",
     "ExprSchema",
     "Field",
     "FolderField",
+    "FolderIDField",
     "FOLDER_PATTERN",
+    "GlobalHTTPProxyField",
     "GroupField",
     "HostAttributeManagementBoardField",
     "HostContactGroup",
     "HostField",
+    "HostnameOrIP",
+    "TagGroupIDField",
+    "IPField",
     "IPMIParameters",
     "MetaData",
     "missing_",
+    "NetworkPortNumber",
     "NetworkScan",
     "NetworkScanResult",
+    "PasswordStoreIDField",
+    "LDAPConnectionID",
     "LockedBy",
+    "PasswordEditableBy",
     "PasswordIdent",
-    "PasswordOwner",
     "PasswordShare",
     "PythonString",
     "query_field",
+    "ServiceLevelField",
     "SiteField",
+    "SplunkURLField",
+    "SAMLConnectionID",
     "SNMPCredentials",
+    "Timeout",
+    "TimePeriodIDField",
     "Timestamp",
+    "UnixPath",
+    "Username",
+    "UserRoleID",
+    "RelativeUrl",
     "X509ReqPEMFieldUUID",
 ]

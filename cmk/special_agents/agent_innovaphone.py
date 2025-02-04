@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
 import urllib.parse
-from typing import Iterable, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
 from xml.etree import ElementTree as etree
 
 import requests
 
 import cmk.utils.password_store
 
-from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
+from cmk.special_agents.v0_unstable.argument_parsing import Args, create_default_argument_parser
 
 
 class InnovaphoneConnection:
-    def __init__(self, *, host, protocol, user, password, verify_ssl) -> None:
+    def __init__(
+        self, *, host: str, protocol: str, user: str, password: str, verify_ssl: bool
+    ) -> None:
         self._base_url = f"{protocol}://{host}"
         self._user = user
         self._password = password
@@ -25,7 +27,7 @@ class InnovaphoneConnection:
         # the REQUESTS_CA_BUNDLE env variable
         self._verify_ssl = verify_ssl
 
-    def get(self, endpoint):
+    def get(self, endpoint: str) -> str | None:
         try:
             # we must provide the verify keyword to every individual request call!
             url = urllib.parse.urljoin(self._base_url, endpoint)
@@ -45,7 +47,9 @@ class InnovaphoneConnection:
         return response.text
 
 
-def get_informations(connection: InnovaphoneConnection, name, xml_id, org_name):
+def get_informations(
+    connection: InnovaphoneConnection, name: str, xml_id: str, org_name: str
+) -> None:
     url = "LOG0/CNT/mod_cmd.xml?cmd=xml-count&x=%s" % (xml_id)
     response = connection.get(url)
     if response is None:
@@ -60,8 +64,8 @@ def get_informations(connection: InnovaphoneConnection, name, xml_id, org_name):
             if child.get("c"):
                 c = child.get("c")
     if c:
-        print("<<<%s>>>" % name)
-        print(org_name + " " + c)
+        sys.stdout.write("<<<%s>>>\n" % name)
+        sys.stdout.write(org_name + " " + c + "\n")
 
 
 def pri_channels_section(
@@ -77,7 +81,7 @@ def pri_channels_section(
 def _pri_channels_fetch_data(
     connection: InnovaphoneConnection,
     channels: Sequence[str],
-) -> Iterable[Tuple[str, etree.Element]]:
+) -> Iterable[tuple[str, etree.Element]]:
     for channel_name in channels:
         url = "%s/mod_cmd.xml" % channel_name
         response = connection.get(url)
@@ -97,7 +101,7 @@ def _pri_channel_format_line(channel_name: str, data: etree.Element) -> str:
     link = data.get("link")
     physical = data.get("physical")
     if link != "Up" or physical != "Up":
-        return "%s %s %s 0 0" % (channel_name, link, physical)
+        return f"{channel_name} {link} {physical} 0 0"
     idle = 0
     total = 0
     for channel in data.findall("ch"):
@@ -105,7 +109,7 @@ def _pri_channel_format_line(channel_name: str, data: etree.Element) -> str:
             idle += 1
         total += 1
     total -= 1
-    return "%s %s %s %s %s" % (channel_name, link, physical, idle, total)
+    return f"{channel_name} {link} {physical} {idle} {total}"
 
 
 def licenses_section(connection: InnovaphoneConnection) -> Iterable[str]:
@@ -127,7 +131,7 @@ def licenses_section(connection: InnovaphoneConnection) -> Iterable[str]:
             return
 
 
-def _get_element(text: str) -> Optional[etree.Element]:
+def _get_element(text: str) -> etree.Element | None:
     try:
         return etree.fromstring(text)
     except etree.ParseError as e:
@@ -136,7 +140,7 @@ def _get_element(text: str) -> Optional[etree.Element]:
     return None
 
 
-def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
+def parse_arguments(argv: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
     parser.add_argument("host", metavar="HOST")
     parser.add_argument("user", metavar="USER")
@@ -158,7 +162,7 @@ def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
     return parser.parse_args(argv)
 
 
-def main(sys_argv=None):
+def main(sys_argv: Sequence[str] | None = None) -> int:
     if sys_argv is None:
         cmk.utils.password_store.replace_passwords()
         sys_argv = sys.argv[1:]
@@ -185,9 +189,9 @@ def main(sys_argv=None):
         informations[n] = x
 
     for what in ["CPU", "MEM", "TEMP"]:
-        if informations.get(what):
+        if x := informations.get(what):
             section_name = "innovaphone_" + what.lower()
-            get_informations(connection, section_name, informations[what], what)
+            get_informations(connection, section_name, x, what)
 
     sys.stdout.writelines(
         f"{line}\n"
@@ -199,7 +203,7 @@ def main(sys_argv=None):
     )
 
     sys.stdout.writelines(f"{line}\n" for line in licenses_section(connection))
-    return None
+    return 0
 
 
 if __name__ == "__main__":

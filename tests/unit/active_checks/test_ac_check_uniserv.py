@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=protected-access,redefined-outer-name
+from collections.abc import Mapping, Sequence
+from types import ModuleType
+
 import pytest
 
-from tests.testlib import import_module  # pylint: disable=import-error
+from tests.testlib.unit.utils import import_module_hack
 
 
-@pytest.fixture(scope="module")
-def check_uniserv():
-    return import_module("active_checks/check_uniserv")
+@pytest.fixture(name="check_uniserv", scope="module")
+def fixture_check_uniserv() -> ModuleType:
+    return import_module_hack("active_checks/check_uniserv")
 
 
 @pytest.mark.parametrize(
@@ -29,13 +31,15 @@ def check_uniserv():
         ["host", "port", "service", "ADDRESS", "street", "street_nr", "city", "regex"],
     ],
 )
-def test_ac_check_uniserv_broken_arguments(capsys, check_uniserv, args) -> None:
+def test_ac_check_uniserv_broken_arguments(
+    capsys: pytest.CaptureFixture[str], check_uniserv: ModuleType, args: Sequence[str]
+) -> None:
     with pytest.raises(SystemExit):
         check_uniserv.parse_arguments(args)
     out, _err = capsys.readouterr()
     assert (
         out
-        == " Usage: check_uniserv HOSTNAME PORT SERVICE (VERSION|ADDRESS STREET NR CITY SEARCH_REGEX)\n"
+        == "usage: check_uniserv HOSTNAME PORT SERVICE (VERSION|ADDRESS STREET NR CITY SEARCH_REGEX)\n"
     )
 
 
@@ -52,7 +56,9 @@ def test_ac_check_uniserv_broken_arguments(capsys, check_uniserv, args) -> None:
         ),
     ],
 )
-def test_ac_check_uniserv_parse_arguments(check_uniserv, args, expected_args) -> None:
+def test_ac_check_uniserv_parse_arguments(
+    check_uniserv: ModuleType, args: Sequence[str], expected_args: object
+) -> None:
     assert check_uniserv.parse_arguments(args) == expected_args
 
 
@@ -70,7 +76,9 @@ def test_ac_check_uniserv_parse_arguments(check_uniserv, args, expected_args) ->
         "foo=bar;type=TIPTOP",
     ],
 )
-def test_ac_check_uniserv_broken_data(capsys, check_uniserv, data) -> None:
+def test_ac_check_uniserv_broken_data(
+    capsys: pytest.CaptureFixture[str], check_uniserv: ModuleType, data: str
+) -> None:
     with pytest.raises(SystemExit):
         check_uniserv.parse_response(data)
     out, _err = capsys.readouterr()
@@ -84,7 +92,9 @@ def test_ac_check_uniserv_broken_data(capsys, check_uniserv, data) -> None:
         "type=1;foo=bar",
     ],
 )
-def test_ac_check_uniserv_broken_response(capsys, check_uniserv, data) -> None:
+def test_ac_check_uniserv_broken_response(
+    capsys: pytest.CaptureFixture[str], check_uniserv: ModuleType, data: str
+) -> None:
     with pytest.raises(SystemExit):
         check_uniserv.parse_response(data)
     out, _err = capsys.readouterr()
@@ -98,7 +108,9 @@ def test_ac_check_uniserv_broken_response(capsys, check_uniserv, data) -> None:
         ("type=TIPTOP;key=value;foo=bar", {"type": "TIPTOP", "key": "value"}),
     ],
 )
-def test_ac_check_uniserv_parse_response(check_uniserv, data, expected_result) -> None:
+def test_ac_check_uniserv_parse_response(
+    check_uniserv: ModuleType, data: str, expected_result: Mapping[str, str]
+) -> None:
     assert sorted(check_uniserv.parse_response(data).items()) == sorted(expected_result.items())
 
 
@@ -140,7 +152,11 @@ def test_ac_check_uniserv_parse_response(check_uniserv, data, expected_result) -
     ],
 )
 def test_ac_check_uniserv_check_job(
-    monkeypatch, check_uniserv, args, parsed, expected_result
+    monkeypatch: pytest.MonkeyPatch,
+    check_uniserv: ModuleType,
+    args: tuple[str | None, str | None, str, str | None, str | None, str | None, str | None],
+    parsed: Mapping[str, str],
+    expected_result: tuple[int, str],
 ) -> None:
     job, s, sid, street, street_nr, city, regex = args
     monkeypatch.setattr("check_uniserv.send_and_receive", lambda x, y: parsed)

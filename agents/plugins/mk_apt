@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,20 +9,13 @@
 
 # Disable unused variable error (needed to keep track of version)
 # shellcheck disable=SC2034
-CMK_VERSION="2.2.0i1"
+CMK_VERSION="2.5.0b1"
 
 # Check for APT updates (Debian, Ubuntu)
 # TODO:
-# Einstellungen:
-# - upgrade oder dist-upgrade
-# - vorher ein update machen
-# Bakery:
-# - Bakelet anlegen
-# - Async-Zeit einstellbar machen und das Ding immer async laufen lassen
 # Check programmieren:
 #   * Schwellwerte auf Anzahlen
 #   * Regexen auf Pakete, die zu CRIT/WARN führen
-# - Graph malen mit zwei Kurven
 
 # This variable can either be "upgrade" or "dist-upgrade"
 UPGRADE=upgrade

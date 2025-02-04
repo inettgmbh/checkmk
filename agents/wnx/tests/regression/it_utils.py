@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import platform
 import subprocess
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import pytest
 
 
-def check_actual_input(name: str, lines: int, alone: bool, data: Optional[Sequence[str]]) -> bool:
+def check_actual_input(name: str, lines: int, alone: bool, data: Sequence[str] | None) -> bool:
     if data is None:
         pytest.skip(f"Section '{name}': Data is absent")
         return False
@@ -47,13 +46,10 @@ def remove_files(target_dir, binaries):
         safe_binary_remove(os.path.join(target_dir, f))
 
 
-def make_dir(dir):
-    if not os.path.exists(dir):
-        os.mkdir(dir)
+def make_dir(directory):
+    if not os.path.exists(directory):
+        os.mkdir(directory)
 
 
 def check_os():
-    if platform.system() != "Windows":
-        return False
-
-    return True
+    return platform.system() == "Windows"

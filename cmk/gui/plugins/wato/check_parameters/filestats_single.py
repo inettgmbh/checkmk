@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -66,8 +66,8 @@ def _parameter_valuespec_filestats():
             ),
         ],
         help=_(
-            "Here you can impose various levels the results reported by the"
-            " mk_filstats plugin. Note that those levels only concern about a single file."
+            "Here you can impose various levels on the results reported by the"
+            " mk_filstats plug-in. Note that those levels only concern about a single file."
         ),
     )
 

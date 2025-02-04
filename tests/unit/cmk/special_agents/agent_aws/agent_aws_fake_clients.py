@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from __future__ import annotations
+
 import abc
 import random
-from typing import Any, Iterable, Mapping, Optional, Sequence, TypedDict
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from typing import Any, TypedDict
 
-from cmk.utils.aws_constants import AWSEC2InstTypes
+from cmk.plugins.aws.constants import AWSEC2InstTypes
 
 #   .--entities------------------------------------------------------------.
 #   |                             _   _ _   _                              |
@@ -22,19 +25,24 @@ from cmk.utils.aws_constants import AWSEC2InstTypes
 
 
 class Entity(abc.ABC):
-    def __init__(self, key) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, key: str) -> None:
         self.key = key
 
     @abc.abstractmethod
-    def create(self, idx, amount):
-        return
+    def create(self, idx, amount: int) -> Entity:  # type: ignore[no-untyped-def]
+        ...
 
 
 #   ---structural-----------------------------------------------------------
 
 
 class List(Entity):
-    def __init__(self, key, elements, from_choice=None) -> None:  # type:ignore[no-untyped-def]
+    def __init__(
+        self,
+        key: str,
+        elements: Iterable[Entity],
+        from_choice: Choice | None = None,
+    ) -> None:
         super().__init__(key)
         self._elements = elements
         self._from_choice = from_choice
@@ -51,8 +59,8 @@ class List(Entity):
 
 
 class Dict(Entity):
-    def __init__(  # type:ignore[no-untyped-def]
-        self, key, values, enumerate_keys: Optional[Entity] = None
+    def __init__(
+        self, key: str, values: Iterable[Entity], enumerate_keys: Entity | None = None
     ) -> None:
         super().__init__(key)
         self._values = values
@@ -62,7 +70,7 @@ class Dict(Entity):
         dict_ = {}
         if self._enumerate_keys:
             for x in range(amount):
-                this_idx = "%s-%s" % (self._enumerate_keys.key, x)
+                this_idx = f"{self._enumerate_keys.key}-{x}"
                 dict_.update({this_idx: self._enumerate_keys.create(this_idx, amount)})
         dict_.update({v.key: v.create(idx, amount) for v in self._values})
         return dict_
@@ -72,12 +80,12 @@ class Dict(Entity):
 
 
 class Str(Entity):
-    def __init__(self, key, value=None) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, key: str, value: str | None = None) -> None:
         super().__init__(key)
         self.value = value
 
     def create(self, idx, amount):
-        return "%s-%s" % (self.value or self.key, idx)
+        return f"{self.value or self.key}-{idx}"
 
 
 class Int(Entity):
@@ -100,11 +108,11 @@ class Timestamp(Entity):
 
 class Enum(Entity):
     def create(self, idx, amount):
-        return ["%s-%s-%s" % (self.key, idx, x) for x in range(amount)]
+        return [f"{self.key}-{idx}-{x}" for x in range(amount)]
 
 
 class Choice(Entity):
-    def __init__(self, key, choices) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, key: str, choices: Sequence[str | bool | int | Entity]) -> None:
         super().__init__(key)
         self.choices = choices
 
@@ -113,7 +121,7 @@ class Choice(Entity):
 
 
 class BoolChoice(Choice):
-    def __init__(self, key) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, key: str) -> None:
         super().__init__(key, [True, False])
 
 
@@ -136,7 +144,7 @@ class Bytes(Str):
 
 
 class InstanceBuilder(abc.ABC):
-    def __init__(self, idx, amount, skip_entities=None) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, idx: int, amount: int, skip_entities: Collection[str] = ()) -> None:
         self._idx = idx
         self._amount = amount
         self._skip_entities = [] if not skip_entities else skip_entities
@@ -188,18 +196,20 @@ class DictInstanceBuilder(abc.ABC):
     #   }
     # }
 
-    def __init__(self, idx, amount) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, idx: int, amount: int) -> None:
         self._idx = idx
         self._amount = amount
 
-    def _key(self) -> Optional[Entity]:
+    def _key(self) -> Entity | None:
         return None
 
-    def _value(self) -> Optional[Entity]:
+    def _value(self) -> Entity | None:
         return None
 
     @classmethod
-    def create_instances(cls, amount) -> Mapping[str, Any]:  # type:ignore[no-untyped-def]
+    def create_instances(
+        cls: Callable[[int, int], DictInstanceBuilder], amount: int
+    ) -> Mapping[Entity, Entity]:
         return {
             # static analysis does not recognize that None can not happen because of if clause -> disable warning
             key.create(idx, amount): value.create(idx, amount)
@@ -209,30 +219,6 @@ class DictInstanceBuilder(abc.ABC):
                 and (value := cls(idx, amount)._value()) is not None
             )
         }
-
-
-# .
-#   .--S3-------------------------------------------------------------------
-
-
-class GlacierListVaultsIB(InstanceBuilder):
-    def _fill_instance(self) -> Iterable[Entity]:
-        return [
-            Str("VaultARN"),
-            Str("VaultName"),
-            Str("CreationDate"),
-            Str("LastInventoryDate"),
-            Int("NumberOfArchives"),
-            Int("SizeInBytes"),
-        ]
-
-
-class GlacierVaultTaggingIB(InstanceBuilder):
-    def _fill_instance(self) -> Iterable[Entity]:
-        return [
-            Str("Key"),
-            Str("Value"),
-        ]
 
 
 # .
@@ -776,6 +762,7 @@ class ELBDescribeTagsIB(InstanceBuilder):
     def _fill_instance(self) -> Iterable[Entity]:
         return [
             Str("LoadBalancerName"),
+            Str("LoadBalancerArn"),
             List(
                 "Tags",
                 [
@@ -2518,49 +2505,6 @@ class EC2DescribeVolumeStatusIB(InstanceBuilder):
         ]
 
 
-class EC2DescribeTagsIB(InstanceBuilder):
-    def _fill_instance(self) -> Iterable[Entity]:
-        return [
-            Str("Key"),
-            Str("ResourceId"),
-            Choice(
-                "ResourceType",
-                [
-                    "client-vpn-endpoint",
-                    "customer-gateway",
-                    "dedicated-host",
-                    "dhcp-options",
-                    "elastic-ip",
-                    "fleet",
-                    "fpga-image",
-                    "host-reservation",
-                    "image",
-                    "instance",
-                    "internet-gateway",
-                    "launch-template",
-                    "natgateway",
-                    "network-acl",
-                    "network-interface",
-                    "reserved-instances",
-                    "route-table",
-                    "security-group",
-                    "snapshot",
-                    "spot-instances-request",
-                    "subnet",
-                    "transit-gateway",
-                    "transit-gateway-attachment",
-                    "transit-gateway-route-table",
-                    "volume",
-                    "vpc",
-                    "vpc-peering-connection",
-                    "vpn-connection",
-                    "vpn-gateway",
-                ],
-            ),
-            Str("Value"),
-        ]
-
-
 # .
 #   .--DynamoDB-------------------------------------------------------------
 
@@ -2892,12 +2836,88 @@ class WAFV2GetWebACLIB(InstanceBuilder):
                                 [
                                     Int("Limit"),
                                     Str("AggregateKeyType"),
-                                    Dict("ScopeDownStatement", []),
+                                    Dict(
+                                        "ScopeDownStatement",
+                                        [
+                                            Dict(
+                                                "ByteMatchStatement",
+                                                [
+                                                    Bytes("SearchString"),
+                                                    self._field_to_match(),
+                                                    self._text_transformations(),
+                                                    Choice(
+                                                        "PositionalConstraint",
+                                                        [
+                                                            "EXACTLY",
+                                                            "STARTS_WITH",
+                                                            "ENDS_WITH",
+                                                            "CONTAINS",
+                                                            "CONTAINS_WORD",
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    ),
                                 ],
                             ),
-                            Dict("AndStatement", [List("Statements", [])]),
+                            Dict(
+                                "AndStatement",
+                                [
+                                    List(
+                                        "Statements",
+                                        [
+                                            Dict(
+                                                "ByteMatchStatement",
+                                                [
+                                                    Bytes("SearchString"),
+                                                    self._field_to_match(),
+                                                    self._text_transformations(),
+                                                    Choice(
+                                                        "PositionalConstraint",
+                                                        [
+                                                            "EXACTLY",
+                                                            "STARTS_WITH",
+                                                            "ENDS_WITH",
+                                                            "CONTAINS",
+                                                            "CONTAINS_WORD",
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    )
+                                ],
+                            ),
                             Dict("OrStatement", [List("Statements", [])]),
-                            Dict("NotStatement", [Dict("ScopeDownStatement", [])]),
+                            Dict(
+                                "NotStatement",
+                                [
+                                    Dict(
+                                        "ScopeDownStatement",
+                                        [
+                                            Dict(
+                                                "ByteMatchStatement",
+                                                [
+                                                    Bytes("SearchString"),
+                                                    self._field_to_match(),
+                                                    self._text_transformations(),
+                                                    Choice(
+                                                        "PositionalConstraint",
+                                                        [
+                                                            "EXACTLY",
+                                                            "STARTS_WITH",
+                                                            "ENDS_WITH",
+                                                            "CONTAINS",
+                                                            "CONTAINS_WORD",
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
+                                    )
+                                ],
+                            ),
                             Dict(
                                 "Statement",
                                 [
@@ -2942,14 +2962,19 @@ class WAFV2ListTagsForResourceIB(InstanceBuilder):
 #   |         |_|  \__,_|_|\_\___|  \___|_|_|\___|_| |_|\__|___/           |
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-
-
-class FakeCloudwatchClient:
-    def describe_alarms(self, AlarmNames=None):
+class FakeCloudwatchClientDescribeAlarmsPaginator:
+    def paginate(self, AlarmNames=None):
         alarms = CloudwatchDescribeAlarmsIB.create_instances(amount=2)
         if AlarmNames:
             alarms = [alarm for alarm in alarms if alarm["AlarmName"] in AlarmNames]
-        return {"MetricAlarms": alarms, "NextToken": "string"}
+        yield {"MetricAlarms": alarms, "NextToken": "string"}
+
+
+class FakeCloudwatchClient:
+    def get_paginator(self, api_call):
+        if api_call == "describe_alarms":
+            return FakeCloudwatchClientDescribeAlarmsPaginator()
+        raise NotImplementedError(f"Please implement the paginator for {api_call}")
 
     def get_metric_data(self, MetricDataQueries, StartTime="START", EndTime="END"):
         results = []
@@ -2989,10 +3014,12 @@ class QueryResults(TypedDict):
 FAKE_CLOUDWATCH_CLIENT_LOGS_CLIENT_DEFAULT_RESPONSE: QueryResults = {
     "results": [
         [
-            {"field": "max_memory_used_bytes", "value": "35000000"},
-            {"field": "count_cold_starts", "value": "0"},
-            {"field": "count_invocations", "value": "2"},
-        ]
+            {"field": "@log", "value": "710145618630:/aws/lambda/FunctionName-0"},
+            {"field": "max_memory_used_bytes", "value": "29000000"},
+            {"field": "max_init_duration_ms", "value": "201.44"},
+            {"field": "count_cold_starts", "value": "1"},
+            {"field": "count_invocations", "value": "3"},
+        ],
     ],
     "statistics": {"recordsMatched": 2.0, "recordsScanned": 6.0, "bytesScanned": 710.0},
     "status": "Complete",
@@ -3010,6 +3037,39 @@ FAKE_CLOUDWATCH_CLIENT_LOGS_CLIENT_DEFAULT_RESPONSE: QueryResults = {
 }
 
 
+FAKE_LOGWATCH_CLIENT_DESCRIBE_LOG_GROUPS_PAGINATOR_RESPONSE = [
+    {
+        "logGroups": [
+            {
+                "logGroupName": "/aws/lambda/FunctionName-0",
+                "creationTime": 1655379990007,
+                "metricFilterCount": 0,
+                "arn": "arn:aws:logs:us-east-1:710145618630:log-group:/aws/lambda/FunctionName-0:*",
+                "storedBytes": 5129,
+            },
+            {
+                "logGroupName": "/aws/lambda/deleted-function",
+                "creationTime": 1659443572877,
+                "metricFilterCount": 0,
+                "arn": "arn:aws:logs:us-east-1:710145618630:log-group:/aws/lambda/deleted-function:*",
+                "storedBytes": 4105,
+            },
+        ],
+        "ResponseMetadata": {
+            "RequestId": "ed9c2a23-f656-423c-9a47-f21c11e66ec9",
+            "HTTPStatusCode": 200,
+            "HTTPHeaders": {
+                "x-amzn-requestid": "ed9c2a23-f656-423c-9a47-f21c11e66ec9",
+                "content-type": "application/x-amz-json-1.1",
+                "content-length": "2503",
+                "date": "Wed, 03 Aug 2022 13:50:28 GMT",
+            },
+            "RetryAttempts": 0,
+        },
+    }
+]
+
+
 class QueryId(TypedDict):
     queryId: str
 
@@ -3022,36 +3082,110 @@ class FakeCloudwatchClientLogsClientExceptions:
     ResourceNotFoundException = FakeResourceNotFoundException
 
 
+class FakeCloudwatchClientLogsDescribeLogGroupsPaginator:
+    def paginate(self, *args, **kwargs):
+        return FAKE_LOGWATCH_CLIENT_DESCRIBE_LOG_GROUPS_PAGINATOR_RESPONSE
+
+
 class FakeCloudwatchClientLogsClient:
     exceptions = FakeCloudwatchClientLogsClientExceptions()
 
     def start_query(
-        self, logGroupName: str, startTime: int, endTime: int, queryString: str
+        self, logGroupNames: list[str], startTime: int, endTime: int, queryString: str
     ) -> QueryId:
         return {"queryId": "MY_QUERY_ID"}
 
     def get_query_results(self, queryId: str) -> QueryResults:
         return FAKE_CLOUDWATCH_CLIENT_LOGS_CLIENT_DEFAULT_RESPONSE
 
-    def stop_query(self, queryId: str):  # type:ignore[no-untyped-def]
+    def stop_query(self, queryId: str) -> None:
         pass
+
+    def get_paginator(self, api_call):
+        if api_call == "describe_log_groups":
+            return FakeCloudwatchClientLogsDescribeLogGroupsPaginator()
+        raise NotImplementedError(f"Please implement the paginator for {api_call}")
+
+
+class QuotaPaginator:
+    def paginate(self, ServiceCode: str = "") -> Iterator[Mapping[str, object]]:
+        if ServiceCode == "ec2":
+            q_val = Float("Value")
+            yield {
+                "Quotas": [
+                    {"QuotaName": name, "Value": q_val.create(None, None)}
+                    for name in [
+                        "Running On-Demand F instances",
+                        "Running On-Demand G instances",
+                        "Running On-Demand P instances",
+                        "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances",
+                        "Running On-Demand X instances",
+                    ]
+                ]
+            }
+        elif ServiceCode == "ecs":
+            yield {
+                "Quotas": [
+                    {
+                        "ServiceCode": "ecs",
+                        "ServiceName": "Amazon Elastic Container Service (Amazon ECs)",
+                        "QuotaArn": "arn:aws:servicequotas:us-east-1:710145618630:ecs/L-85EED4F7",
+                        "QuotaCode": "L-85EED4F7",
+                        "QuotaName": "Container instances per cluster",
+                        "Value": 20,
+                        "Unit": "None",
+                        "Adjustable": True,
+                        "GlobalQuota": False,
+                    }
+                ],
+                "ResponseMetadata": {
+                    "RequestId": "3158f3b7-9788-4394-8d8c-ede95a113476",
+                    "HTTPStatusCode": 200,
+                    "HTTPHeaders": {
+                        "date": "Thu, 20 Oct 2022 08:10:44 GMT",
+                        "content-type": "application/x-amz-json-1.1",
+                        "content-length": "13",
+                        "connection": "keep-alive",
+                        "x-amzn-requestid": "3158f3b7-9788-4394-8d8c-ede95a113476",
+                    },
+                    "RetryAttempts": 0,
+                },
+            }
+        elif ServiceCode == "elasticache":
+            yield {
+                "Quotas": [
+                    {
+                        "ServiceCode": "elasticache",
+                        "ServiceName": "Amazon ElastiCache",
+                        "QuotaArn": "arn:aws:servicequotas:us-east-1:710145618630:elasticache/L-85EED4F7",
+                        "QuotaCode": "L-85EED4F7",
+                        "QuotaName": "Nodes per cluster per instance type (Redis cluster mode enabled)",
+                        "Value": 5,
+                        "Unit": "None",
+                        "Adjustable": True,
+                        "GlobalQuota": False,
+                    }
+                ],
+                "ResponseMetadata": {
+                    "RequestId": "3158f3b7-9788-4394-8d8c-ede95a113476",
+                    "HTTPStatusCode": 200,
+                    "HTTPHeaders": {
+                        "date": "Thu, 20 Oct 2022 08:10:44 GMT",
+                        "content-type": "application/x-amz-json-1.1",
+                        "content-length": "13",
+                        "connection": "keep-alive",
+                        "x-amzn-requestid": "3158f3b7-9788-4394-8d8c-ede95a113476",
+                    },
+                    "RetryAttempts": 0,
+                },
+            }
 
 
 class FakeServiceQuotasClient:
-    def list_service_quotas(self, ServiceCode):
-        q_val = Float("Value")
-        return {
-            "Quotas": [
-                {"QuotaName": name, "Value": q_val.create(None, None)}
-                for name in [
-                    "Running On-Demand F instances",
-                    "Running On-Demand G instances",
-                    "Running On-Demand P instances",
-                    "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances",
-                    "Running On-Demand X instances",
-                ]
-            ]
-        }
+    def get_paginator(self, function: str) -> QuotaPaginator:
+        assert function == "list_service_quotas"
+
+        return QuotaPaginator()
 
 
 #   .--Lambda----------------------------------
@@ -3182,4 +3316,28 @@ class SNSListSubscriptionsIB(InstanceBuilder):
 
 class SNSListTopicsIB(InstanceBuilder):
     def _fill_instance(self) -> Iterable[Entity]:
-        return [Str("TopicArn")]
+        return [Str("TopicArn", value="arn:aws:sns:eu-west-1:710145618630:TopicName")]
+
+
+# .
+#   .--Glacier--------------------------------------------------------------
+
+
+class GlacierListVaultsIB(InstanceBuilder):
+    def _fill_instance(self) -> Iterable[Entity]:
+        return [
+            Str("VaultARN"),
+            Str("VaultName"),
+            Str("CreationDate"),
+            Str("LastInventoryDate"),
+            Int("NumberOfArchives"),
+            Int("SizeInBytes"),
+        ]
+
+
+class GlacierListTagsInstancesIB(DictInstanceBuilder):
+    def _key(self):
+        return Str("Tag")
+
+    def _value(self):
+        return Str("Value")

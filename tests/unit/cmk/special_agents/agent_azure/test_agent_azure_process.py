@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping, Sequence, Tuple, Type
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cmk.utils.http_proxy_config import NoProxyConfig
+
 from cmk.special_agents.agent_azure import (
+    _AuthorityURLs,
+    ApiError,
     Args,
     AzureResource,
     AzureSection,
@@ -17,34 +24,65 @@ from cmk.special_agents.agent_azure import (
     LabelsSection,
     MgmtApiClient,
     process_resource,
+    process_resource_health,
     process_vm,
     Section,
+    TagsImportPatternOption,
+    usage_details,
     write_group_info,
+    write_remaining_reads,
+    write_section_ad,
 )
 
 pytestmark = pytest.mark.checks
 
 
-class MockMgmtApiClient:
+class MockMgmtApiClient(MgmtApiClient):
     def __init__(
         self,
         resource_groups: Sequence[Mapping[str, Any]],
         vmviews: Mapping[str, Mapping[str, Mapping[str, Sequence[Mapping[str, str]]]]],
         ratelimit: float,
+        usage_data: Sequence[object] | None = None,
+        usage_details_exception: Exception | None = None,
+        resource_health: object | None = None,
+        resource_health_exception: Exception | None = None,
     ) -> None:
         self.resource_groups = resource_groups
         self.vmviews = vmviews
         self.rate_limit = ratelimit
+        self.usage_data = usage_data if usage_data else []
+        self.usage_details_exception = usage_details_exception
+        self.resource_health = resource_health
+        self.resource_health_exception = resource_health_exception
+
+        super().__init__(
+            _AuthorityURLs("login-url", "resource-url", "base-url"),
+            NoProxyConfig(),
+            "mock_subscription",
+        )
 
     def resourcegroups(self) -> Sequence[Mapping[str, Any]]:
         return self.resource_groups
 
-    def vmview(self, group_name: str, vm_name: str) -> Mapping[str, Sequence[Mapping[str, str]]]:
-        return self.vmviews[group_name][vm_name]
+    def vmview(self, group: str, name: str) -> Mapping[str, Sequence[Mapping[str, str]]]:
+        return self.vmviews[group][name]
 
     @property
     def ratelimit(self) -> float:
         return self.rate_limit
+
+    def usagedetails(self) -> Sequence[object]:
+        if self.usage_details_exception is not None:
+            raise self.usage_details_exception
+
+        return self.usage_data
+
+    def resource_health_view(self) -> object:
+        if self.resource_health_exception is not None:
+            raise self.resource_health_exception
+
+        return self.resource_health
 
 
 @pytest.mark.parametrize(
@@ -54,8 +92,8 @@ class MockMgmtApiClient:
             MockMgmtApiClient(
                 [],
                 {
-                    "BurningMan": {
-                        "MyVM": {
+                    "burningman": {
+                        "myvm": {
                             "statuses": [
                                 {
                                     "code": "ProvisioningState/succeeded",
@@ -71,18 +109,18 @@ class MockMgmtApiClient:
             ),
             {
                 "id": "myid",
-                "name": "MyVM",
+                "name": "myvm",
                 "type": "Microsoft.Compute/virtualMachines",
                 "location": "westeurope",
                 "tags": {"my-unique-tag": "unique", "tag4all": "True"},
-                "group": "BurningMan",
+                "group": "burningman",
             },
             Args(piggyback_vms="self"),
             {
-                "group": "BurningMan",
+                "group": "burningman",
                 "id": "myid",
                 "location": "westeurope",
-                "name": "MyVM",
+                "name": "myvm",
                 "specific_info": {
                     "statuses": [
                         {
@@ -103,13 +141,13 @@ class MockMgmtApiClient:
                 "my-unique-tag": "unique",
                 "tag4all": "True",
             },
-            ["MyVM"],
+            ["myvm"],
         ),
         (
             MockMgmtApiClient(
                 [],
                 {
-                    "BurningMan": {
+                    "burningman": {
                         "MyVM": {
                             "statuses": [
                                 {
@@ -130,11 +168,11 @@ class MockMgmtApiClient:
                 "type": "Microsoft.Compute/virtualMachines",
                 "location": "westeurope",
                 "tags": {"my-unique-tag": "unique", "tag4all": "True"},
-                "group": "BurningMan",
+                "group": "burningman",
             },
             Args(piggyback_vms="grouphost"),
             {
-                "group": "BurningMan",
+                "group": "burningman",
                 "id": "myid",
                 "location": "westeurope",
                 "name": "MyVM",
@@ -158,19 +196,19 @@ class MockMgmtApiClient:
                 "my-unique-tag": "unique",
                 "tag4all": "True",
             },
-            ["BurningMan"],
+            ["burningman"],
         ),
     ],
 )
-def test_process_vm(  # type:ignore[no-untyped-def]
+def test_process_vm(
     mgmt_client: MgmtApiClient,
     vmach_info: Mapping[str, Any],
     args: Args,
     expected_info: Mapping[str, Any],
     expected_tags: Mapping[str, str],
     expected_piggyback_targets: Sequence[str],
-):
-    vmach = AzureResource(vmach_info)
+) -> None:
+    vmach = AzureResource(vmach_info, TagsImportPatternOption.import_all)
     process_vm(mgmt_client, vmach, args)
 
     assert vmach.info == expected_info
@@ -190,29 +228,30 @@ def test_process_vm(  # type:ignore[no-untyped-def]
                     "location": "westeurope",
                     "tags": {"my-unique-tag": "unique", "tag4all": "True"},
                     "group": "BurningMan",
-                }
+                },
+                TagsImportPatternOption.import_all,
             ),
             {
-                "BurningMan": {
+                "burningman": {
                     "my-resource-tag": "my-resource-value",
-                    "resource_group": "BurningMan",
+                    "resource_group": "burningman",
                 }
             },
             (
                 [
-                    '{"my-unique-tag": "unique", "tag4all": "True", "my-resource-tag": "my-resource-value", "resource_group": "BurningMan"}\n'
+                    '{"group_name": "burningman", "vm_instance": true}\n',
+                    '{"my-unique-tag": "unique", "tag4all": "True", "my-resource-tag": "my-resource-value", "resource_group": "burningman"}\n',
                 ],
                 ["MyVM"],
             ),
         )
     ],
 )
-def test_get_vm_labels_section(  # type:ignore[no-untyped-def]
-    vm: AzureResource, group_tags: GroupLabels, expected_result: Tuple[Sequence[str], Sequence[str]]
-):
+def test_get_vm_labels_section(
+    vm: AzureResource, group_tags: GroupLabels, expected_result: tuple[Sequence[str], Sequence[str]]
+) -> None:
     labels_section = get_vm_labels_section(vm, group_tags)
 
-    assert labels_section
     assert labels_section._cont == expected_result[0]
     assert labels_section._piggytargets == expected_result[1]
 
@@ -220,11 +259,11 @@ def test_get_vm_labels_section(  # type:ignore[no-untyped-def]
 @pytest.mark.parametrize(
     "mgmt_client, resource_info, group_tags, args, expected_result",
     [
-        (
+        pytest.param(
             MockMgmtApiClient(
                 [],
                 {
-                    "BurningMan": {
+                    "burningman": {
                         "MyVM": {
                             "statuses": [
                                 {
@@ -248,36 +287,42 @@ def test_get_vm_labels_section(  # type:ignore[no-untyped-def]
                 "group": "BurningMan",
             },
             {
-                "BurningMan": {
+                "burningman": {
                     "my-resource-tag": "my-resource-value",
-                    "resource_group": "BurningMan",
+                    "resource_group": "burningman",
                 }
             },
-            Args(piggyback_vms="self", debug=False),
+            Args(
+                piggyback_vms="self",
+                debug=False,
+                services=["Microsoft.Compute/virtualMachines"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
             [
                 (
                     LabelsSection,
                     ["MyVM"],
                     [
-                        '{"my-unique-tag": "unique", "tag4all": "True", "my-resource-tag": "my-resource-value", "resource_group": "BurningMan"}\n'
+                        '{"group_name": "burningman", "vm_instance": true}\n',
+                        '{"my-unique-tag": "unique", "tag4all": "True", "my-resource-tag": "my-resource-value", "resource_group": "burningman"}\n',
                     ],
                 ),
-                (AzureSection, [""], ["remaining-reads|2.0\n"]),
                 (
                     AzureSection,
                     ["MyVM"],
                     [
                         "Resource\n",
-                        '{"id": "myid", "name": "MyVM", "type": "Microsoft.Compute/virtualMachines", "location": "westeurope", "tags": {"my-unique-tag": "unique", "tag4all": "True"}, "group": "BurningMan", "specific_info": {"statuses": [{"code": "ProvisioningState/succeeded", "level": "Info", "displayStatus": "Provisioning succeeded", "time": "2019-11-25T07:38:14.6999403+00:00"}]}}\n',
+                        '{"id": "myid", "name": "MyVM", "type": "Microsoft.Compute/virtualMachines", "location": "westeurope", "tags": {"my-unique-tag": "unique", "tag4all": "True"}, "group": "burningman", "specific_info": {"statuses": [{"code": "ProvisioningState/succeeded", "level": "Info", "displayStatus": "Provisioning succeeded", "time": "2019-11-25T07:38:14.6999403+00:00"}]}}\n',
                     ],
                 ),
             ],
+            id="vm_with_labels",
         ),
-        (
+        pytest.param(
             MockMgmtApiClient(
                 [],
                 {
-                    "BurningMan": {
+                    "burningman": {
                         "MyVM": {
                             "statuses": [
                                 {
@@ -303,34 +348,83 @@ def test_get_vm_labels_section(  # type:ignore[no-untyped-def]
             {
                 "BurningMan": {
                     "my-resource-tag": "my-resource-value",
-                    "resource_group": "BurningMan",
+                    "cmk/azure/resource_group": "BurningMan",
                 }
             },
-            Args(piggyback_vms="grouphost", debug=False),
+            Args(
+                piggyback_vms="grouphost",
+                debug=False,
+                services=["Microsoft.Compute/virtualMachines"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
             [
-                (AzureSection, [""], ["remaining-reads|2.0\n"]),
                 (
                     AzureSection,
-                    ["BurningMan"],
+                    ["burningman"],
                     [
                         "Resource\n",
-                        '{"id": "myid", "name": "MyVM", "type": "Microsoft.Compute/virtualMachines", "location": "westeurope", "tags": {"my-unique-tag": "unique", "tag4all": "True"}, "group": "BurningMan", "specific_info": {"statuses": [{"code": "ProvisioningState/succeeded", "level": "Info", "displayStatus": "Provisioning succeeded", "time": "2019-11-25T07:38:14.6999403+00:00"}]}}\n',
+                        '{"id": "myid", "name": "MyVM", "type": "Microsoft.Compute/virtualMachines", "location": "westeurope", "tags": {"my-unique-tag": "unique", "tag4all": "True"}, "group": "burningman", "specific_info": {"statuses": [{"code": "ProvisioningState/succeeded", "level": "Info", "displayStatus": "Provisioning succeeded", "time": "2019-11-25T07:38:14.6999403+00:00"}]}}\n',
                     ],
                 ),
             ],
+            id="vm",
+        ),
+        pytest.param(
+            MockMgmtApiClient(
+                [],
+                {
+                    "burningman": {
+                        "myvm": {
+                            "statuses": [
+                                {
+                                    "code": "ProvisioningState/succeeded",
+                                    "level": "Info",
+                                    "displayStatus": "Provisioning succeeded",
+                                    "time": "2019-11-25T07:38:14.6999403+00:00",
+                                }
+                            ]
+                        }
+                    }
+                },
+                2.0,
+            ),
+            {
+                "id": "myid",
+                "name": "MyVM",
+                "type": "Microsoft.Compute/virtualMachines",
+                "location": "westeurope",
+                "tags": {"my-unique-tag": "unique", "tag4all": "True"},
+                "group": "BurningMan",
+            },
+            {
+                "BurningMan": {
+                    "my-resource-tag": "my-resource-value",
+                    "cmk/azure/resource_group": "BurningMan",
+                }
+            },
+            Args(
+                piggyback_vms="grouphost",
+                debug=False,
+                services=[""],
+                tag_key_pattern=TagsImportPatternOption.ignore_all,
+            ),
+            [],
+            id="vm_disabled_service",
         ),
     ],
 )
-def test_process_resource(  # type:ignore[no-untyped-def]
+@patch("cmk.special_agents.agent_azure.gather_metrics", return_value=None)
+def test_process_resource(
+    mock_gather_metrics: MagicMock,
     mgmt_client: MgmtApiClient,
     resource_info: Mapping[str, Any],
     group_tags: GroupLabels,
     args: Args,
-    expected_result: Sequence[Tuple[Type[Section], Sequence[str], Sequence[str]]],
-):
-    resource = AzureResource(resource_info)
-    function_args = (mgmt_client, resource, group_tags, args)
-    sections = process_resource(function_args)
+    expected_result: Sequence[tuple[type[Section], Sequence[str], Sequence[str]]],
+) -> None:
+    resource = AzureResource(resource_info, args.tag_key_pattern)
+    sections = process_resource(mgmt_client, resource, group_tags, args)
+    assert len(sections) == len(expected_result)
     for section, expected_section in zip(sections, expected_result):
         assert isinstance(section, expected_section[0])
         assert section._piggytargets == expected_section[1]
@@ -344,20 +438,15 @@ def test_process_resource(  # type:ignore[no-untyped-def]
             MockMgmtApiClient(
                 [{"name": "BurningMan", "tags": {"my-resource-tag": "my-resource-value"}}], {}, 2.0
             ),
-            ["BurningMan"],
-            {
-                "BurningMan": {
-                    "my-resource-tag": "my-resource-value",
-                    "resource_group": "BurningMan",
-                }
-            },
+            ["burningman"],
+            {"burningman": {"my-resource-tag": "my-resource-value"}},
         )
     ],
 )
-def test_get_group_labels(  # type:ignore[no-untyped-def]
+def test_get_group_labels(
     mgmt_client: MgmtApiClient, monitored_groups: Sequence[str], expected_result: GroupLabels
-):
-    group_tags = get_group_labels(mgmt_client, monitored_groups)
+) -> None:
+    group_tags = get_group_labels(mgmt_client, monitored_groups, TagsImportPatternOption.import_all)
     assert group_tags == expected_result
 
 
@@ -365,7 +454,7 @@ def test_get_group_labels(  # type:ignore[no-untyped-def]
     "monitored_groups, monitored_resources, group_tags, expected_result",
     [
         (
-            ["BurningMan"],
+            ["burningman"],
             [
                 AzureResource(
                     {
@@ -375,34 +464,443 @@ def test_get_group_labels(  # type:ignore[no-untyped-def]
                         "location": "westeurope",
                         "tags": {"my-unique-tag": "unique", "tag4all": "True"},
                         "group": "BurningMan",
-                    }
+                    },
+                    TagsImportPatternOption.import_all,
                 ),
             ],
             {
-                "BurningMan": {
+                "burningman": {
                     "my-resource-tag": "my-resource-value",
-                    "resource_group": "BurningMan",
+                    "cmk/azure/resource_group": "BurningMan",
                 }
             },
-            "<<<<BurningMan>>>>\n"
-            "<<<labels:sep(0)>>>\n"
-            '{"my-resource-tag": "my-resource-value", "resource_group": "BurningMan"}\n'
+            "<<<<burningman>>>>\n"
+            "<<<azure_labels:sep(0)>>>\n"
+            '{"group_name": "burningman"}\n'
+            '{"my-resource-tag": "my-resource-value", "cmk/azure/resource_group": "BurningMan"}\n'
             "<<<<>>>>\n"
             "<<<<>>>>\n"
             "<<<azure_agent_info:sep(124)>>>\n"
-            'monitored-groups|["BurningMan"]\n'
+            'monitored-groups|["burningman"]\n'
             'monitored-resources|["MyVM"]\n'
             "<<<<>>>>\n",
         )
     ],
 )
-def test_write_group_info(  # type:ignore[no-untyped-def]
+def test_write_group_info(
     monitored_groups: Sequence[str],
     monitored_resources: Sequence[AzureResource],
     group_tags: GroupLabels,
     expected_result: Sequence[str],
-    capsys,
-):
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     write_group_info(monitored_groups, monitored_resources, group_tags)
     captured = capsys.readouterr()
     assert captured.out == expected_result
+
+
+@pytest.mark.parametrize(
+    "enabled_services",
+    [
+        [],
+        ["users_count"],
+        ["users_count", "ad_connect", "non_existing_service"],
+    ],
+)
+def test_write_section_ad(enabled_services: list[str]) -> None:
+    graph_client = MagicMock()
+    graph_client.users.return_value = {"key": "users_data"}
+    graph_client.organization.return_value = {"key": "organization_data"}
+    azure_section = MagicMock()
+    write_section_ad(graph_client, azure_section, Args(services=enabled_services))
+
+    if "users_count" in enabled_services:
+        graph_client.users.assert_called()
+    else:
+        graph_client.users.assert_not_called()
+
+    if "ad_connect" in enabled_services:
+        graph_client.organization.assert_called()
+    else:
+        graph_client.organization.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "args, usage_data, exception, expected_result",
+    [
+        pytest.param(
+            Args(debug=False, services=[], tag_key_pattern=TagsImportPatternOption.import_all),
+            None,
+            None,
+            "",
+            id="usage section not enabled",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            None,
+            ApiError("offer MS-AZR-0145P"),
+            "",
+            id="api error no consumption offer",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            None,
+            ApiError("Customer does not have the privilege to see the cost (Request ID: xxxx)"),
+            "",
+            id="api error customer not privileged",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            None,
+            ApiError("unknown offer"),
+            "<<<<>>>>\n"
+            "<<<azure_agent_info:sep(124)>>>\n"
+            'agent-bailout|[2, "Usage client: unknown offer"]\n'
+            "<<<<>>>>\n"
+            "<<<<test1>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<test2>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<>>>>\n",
+            id="api error unknown offer",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            None,
+            Exception(),
+            "<<<<>>>>\n"
+            "<<<azure_agent_info:sep(124)>>>\n"
+            'agent-bailout|[2, "Usage client: "]\n'
+            "<<<<>>>>\n"
+            "<<<<test1>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<test2>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "<<<<>>>>\n",
+            id="exception in the api call",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            [],
+            None,
+            "<<<<>>>>\n"
+            "<<<azure_agent_info:sep(124)>>>\n"
+            'agent-bailout|[0, "Usage client: Azure API did not return any usage details"]\n'
+            "<<<<>>>>\n",
+            id="empty usage data",
+        ),
+        pytest.param(
+            Args(
+                debug=False,
+                services=["usage_details"],
+                tag_key_pattern=TagsImportPatternOption.import_all,
+            ),
+            [
+                {
+                    "id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071",
+                    "name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-6",
+                    "type": "Microsoft.CostManagement/query",
+                    "location": None,
+                    "sku": None,
+                    "eTag": None,
+                    "properties": {
+                        "Cost": 7.349267385987696,
+                        "CostUSD": 7.97158038308434,
+                        "ResourceType": "microsoft.network/applicationgateways",
+                        "ResourceGroupName": "test1",
+                        "Tags": [],
+                        "Currency": "EUR",
+                    },
+                },
+                {
+                    "id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071",
+                    "name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-8",
+                    "type": "Microsoft.CostManagement/query",
+                    "location": None,
+                    "sku": None,
+                    "eTag": None,
+                    "properties": {
+                        "Cost": 0.5107556132017598,
+                        "CostUSD": 0.5539016353215431,
+                        "ResourceType": "microsoft.network/loadbalancers",
+                        "ResourceGroupName": "test1",
+                        "Tags": [],
+                        "Currency": "EUR",
+                    },
+                },
+                {
+                    "id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071",
+                    "name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-13",
+                    "type": "Microsoft.CostManagement/query",
+                    "location": None,
+                    "sku": None,
+                    "eTag": None,
+                    "properties": {
+                        "Cost": 0.12006320596267346,
+                        "CostUSD": 0.1315116481025144,
+                        "ResourceType": "microsoft.recoveryservices/vaults",
+                        "ResourceGroupName": "test1",
+                        "Tags": [],
+                        "Currency": "EUR",
+                    },
+                },
+            ],
+            None,
+            "<<<<test1>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-6", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 7.349267385987696, "CostUSD": 7.97158038308434, "ResourceType": "microsoft.network/applicationgateways", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": '
+            '"subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-6", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 7.349267385987696, "CostUSD": 7.97158038308434, "ResourceType": "microsoft.network/applicationgateways", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n"
+            "<<<<test1>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-8", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 0.5107556132017598, "CostUSD": 0.5539016353215431, "ResourceType": "microsoft.network/loadbalancers", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-8", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 0.5107556132017598, "CostUSD": 0.5539016353215431, "ResourceType": "microsoft.network/loadbalancers", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n"
+            "<<<<test1>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-13", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 0.12006320596267346, "CostUSD": 0.1315116481025144, "ResourceType": "microsoft.recoveryservices/vaults", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n"
+            "<<<azure_usagedetails:sep(124)>>>\n"
+            "Resource\n"
+            '{"id": "subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/providers/Microsoft.CostManagement/query/b2ce4915-8c0d-4af7-8979-c561d83a1071", '
+            '"name": "b2ce4915-8c0d-4af7-8979-c561d83a1071-13", "type": "Microsoft.Consumption/usageDetails", "location": null, "sku": null, "eTag": '
+            'null, "properties": {"Cost": 0.12006320596267346, "CostUSD": 0.1315116481025144, "ResourceType": "microsoft.recoveryservices/vaults", '
+            '"ResourceGroupName": "test1", "Tags": [], "Currency": "EUR"}, "group": "test1", "tags": {}, "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa", "provider": "Microsoft.CostManagement"}\n'
+            "<<<<>>>>\n",
+            id="no errors, usage data exists",
+        ),
+    ],
+)
+def test_usage_details(
+    args: Args,
+    usage_data: Sequence[object],
+    exception: Exception,
+    expected_result: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mgmt_client = MockMgmtApiClient(
+        [], {}, 0, usage_data=usage_data, usage_details_exception=exception
+    )
+    monitored_groups = ["test1", "test2"]
+
+    usage_details(mgmt_client, monitored_groups, args)
+
+    captured = capsys.readouterr()
+    assert captured.out == expected_result
+
+
+@pytest.mark.parametrize(
+    "monitored_resources,resource_health,expected_output",
+    [
+        pytest.param(
+            [
+                AzureResource(
+                    {
+                        "id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourceGroups/test1/providers/Microsoft.Compute/virtualMachines/VM-test-1",
+                        "name": "VM-test-1",
+                        "type": "Microsoft.Compute/virtualMachines",
+                        "location": "uksouth",
+                        "zones": ["1"],
+                        "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa",
+                        "group": "test1",
+                        "provider": "Microsoft.Compute",
+                    },
+                    TagsImportPatternOption.import_all,
+                )
+            ],
+            {
+                "value": [
+                    {
+                        "id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourcegroups/test1/providers/microsoft.compute/virtualmachines/vm-test-1/providers/Microsoft.ResourceHealth/availabilityStatuses/current",
+                        "name": "current",
+                        "type": "Microsoft.ResourceHealth/AvailabilityStatuses",
+                        "location": "uksouth",
+                        "properties": {
+                            "availabilityState": "Available",
+                            "title": "Available",
+                            "summary": "There aren't any known Azure platform problems affecting this virtual machine.",
+                            "reasonType": "",
+                            "category": "Not Applicable",
+                            "context": "Not Applicable",
+                            "occuredTime": "2023-02-09T16: 19: 01Z",
+                            "reasonChronicity": "Persistent",
+                            "reportedTime": "2023-02-22T15: 21: 41.7883795Z",
+                        },
+                    }
+                ]
+            },
+            "<<<<test1>>>>\n"
+            "<<<azure_resource_health:sep(124)>>>\n"
+            '{"id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourcegroups/test1/providers/microsoft.compute/virtualmachines/vm-test-1/providers/Microsoft.ResourceHealth/availabilityStatuses/current", "name": "virtualmachines/vm-test-1", "availabilityState": "Available", "summary": "There aren\'t any known Azure platform problems affecting this virtual machine.", "reasonType": "", "occuredTime": "2023-02-09T16: 19: 01Z", "tags": {}}\n'
+            "<<<<>>>>\n",
+            id="virtual_machine",
+        ),
+        pytest.param(
+            [
+                AzureResource(
+                    {
+                        "id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourceGroups/test1/providers/Microsoft.Compute/virtualMachines/VM-test-1",
+                        "name": "VM-test-1",
+                        "type": "Microsoft.Compute/virtualMachines",
+                        "location": "uksouth",
+                        "zones": ["1"],
+                        "subscription": "4db89361-bcd9-4353-8edb-33f49608d4fa",
+                        "group": "test1",
+                        "provider": "Microsoft.Compute",
+                        "tags": {"tag1": "value1"},
+                    },
+                    TagsImportPatternOption.import_all,
+                )
+            ],
+            {
+                "value": [
+                    {
+                        "id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourcegroups/test1/providers/microsoft.compute/virtualmachines/vm-test-1/providers/Microsoft.ResourceHealth/availabilityStatuses/current",
+                        "name": "current",
+                        "type": "Microsoft.ResourceHealth/AvailabilityStatuses",
+                        "location": "uksouth",
+                        "properties": {
+                            "availabilityState": "Available",
+                            "title": "Available",
+                            "summary": "There aren't any known Azure platform problems affecting this virtual machine.",
+                            "reasonType": "",
+                            "category": "Not Applicable",
+                            "context": "Not Applicable",
+                            "occuredTime": "2023-02-09T16: 19: 01Z",
+                            "reasonChronicity": "Persistent",
+                            "reportedTime": "2023-02-22T15: 21: 41.7883795Z",
+                        },
+                    }
+                ]
+            },
+            "<<<<test1>>>>\n"
+            "<<<azure_resource_health:sep(124)>>>\n"
+            '{"id": "/subscriptions/4db89361-bcd9-4353-8edb-33f49608d4fa/resourcegroups/test1/providers/microsoft.compute/virtualmachines/vm-test-1/providers/Microsoft.ResourceHealth/availabilityStatuses/current", "name": "virtualmachines/vm-test-1", "availabilityState": "Available", "summary": "There aren\'t any known Azure platform problems affecting this virtual machine.", "reasonType": "", "occuredTime": "2023-02-09T16: 19: 01Z", "tags": {"tag1": "value1"}}\n'
+            "<<<<>>>>\n",
+            id="virtual_machine_import_tags",
+        ),
+        pytest.param(
+            [],
+            {"value": []},
+            "",
+            id="no_resource",
+        ),
+    ],
+)
+def test_process_resource_health(
+    capsys: pytest.CaptureFixture[str],
+    monitored_resources: Sequence[AzureResource],
+    resource_health: object,
+    expected_output: str,
+) -> None:
+    mgmt_client = MockMgmtApiClient([], {}, 0, resource_health=resource_health)
+
+    sections = list(
+        process_resource_health(
+            mgmt_client,
+            monitored_resources,
+            Args(debug=True, services=["Microsoft.Compute/virtualMachines"]),
+        )
+    )
+
+    for section in sections:
+        section.write()
+
+    captured = capsys.readouterr()
+    assert captured.out == expected_output
+
+
+def test_process_resource_health_request_error(capsys: pytest.CaptureFixture[str]) -> None:
+    mgmt_client = MockMgmtApiClient(
+        [], {}, 0, resource_health_exception=Exception("Request failed")
+    )
+
+    list(process_resource_health(mgmt_client, [], Args(debug=False)))
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "<<<<>>>>\n"
+        "<<<azure_agent_info:sep(124)>>>\n"
+        'agent-bailout|[2, "Management client: Request failed"]\n'
+        "<<<<>>>>\n"
+    )
+
+
+def test_process_resource_health_request_error_debug(capsys: pytest.CaptureFixture[str]) -> None:
+    mgmt_client = MockMgmtApiClient(
+        [], {}, 0, resource_health_exception=Exception("Request failed")
+    )
+
+    with pytest.raises(Exception, match="Request failed"):
+        list(process_resource_health(mgmt_client, [], Args(debug=True)))
+
+
+@pytest.mark.parametrize(
+    "rate_limit,expected_output",
+    [
+        (
+            10000,
+            "<<<<>>>>\n<<<azure_agent_info:sep(124)>>>\nremaining-reads|10000\n<<<<>>>>\n",
+        ),
+        (
+            None,
+            "<<<<>>>>\n<<<azure_agent_info:sep(124)>>>\nremaining-reads|None\n<<<<>>>>\n",
+        ),
+    ],
+)
+def test_write_remaining_reads(
+    capsys: pytest.CaptureFixture[str], rate_limit: int | None, expected_output: str
+) -> None:
+    write_remaining_reads(rate_limit)
+
+    captured = capsys.readouterr()
+    assert captured.out == expected_output

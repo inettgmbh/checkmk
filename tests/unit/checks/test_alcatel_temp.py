@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Mapping
+
 import pytest
 
-from tests.testlib import Check
+from cmk.agent_based.v2 import StringTable
+
+from .checktestlib import Check
 
 pytestmark = pytest.mark.checks
 
@@ -17,7 +21,9 @@ pytestmark = pytest.mark.checks
         ([["0", "29"]], "CPU", {}),
     ],
 )
-def test_inventory_function(info, item_expected, data_expected) -> None:
+def test_inventory_function(
+    info: StringTable, item_expected: str, data_expected: Mapping[object, object]
+) -> None:
     """
     Verifies if the item is detected corresponding to info content.
     """

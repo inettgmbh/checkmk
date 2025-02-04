@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import re
 from functools import lru_cache
-from html import escape as html_escape
-from typing import Callable, TYPE_CHECKING, Union
 
-from cmk.gui.utils import is_allowed_url
+from cmk.utils.escaping import escape, escape_permissive
+
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.speaklater import LazyString
 
@@ -26,23 +25,10 @@ from cmk.gui.utils.speaklater import LazyString
 
 # TODO: Figure out if this should actually be HTMLTagValue or HTMLContent or...
 # All the HTML-related types are slightly chaotic...
-EscapableEntity = Union[None, int, HTML, str, LazyString]
-
-_UNESCAPER_TEXT = re.compile(
-    r"&lt;(/?)(h1|h2|b|tt|i|u|br(?: /)?|nobr(?: /)?|pre|sup|p|li|ul|ol)&gt;"
-)
-_CLOSING_A = re.compile(r"&lt;/a&gt;")
-_A_HREF = re.compile(
-    r"&lt;a href=(?:(?:&quot;|&#x27;)(.*?)(?:&quot;|&#x27;))(?: target=(?:(?:&quot;|&#x27;)(.*?)(?:&quot;|&#x27;)))?&gt;"
-)
+EscapableEntity = int | HTML | str | LazyString | None
 
 _COMMENT_RE = re.compile("(<!--.*?-->)")
 _TAG_RE = re.compile(r"(<[^>]+?>)")
-
-
-def escape_to_html(value: str) -> HTML:
-    """Escape HTML and return as HTML object"""
-    return HTML(html_escape(value))
 
 
 def escape_to_html_permissive(value: str, escape_links: bool = True) -> HTML:
@@ -60,19 +46,13 @@ def escape_to_html_permissive(value: str, escape_links: bool = True) -> HTML:
     >>> escape_to_html_permissive('<a href="mailto:security@checkmk.com">no closing a', escape_links=False)
     HTML("<a href="mailto:security@checkmk.com">no closing a")
     """
-    return HTML(escape_text(value, escape_links=escape_links))
-
-
-# Workaround for a mypy / typing bug: lru_cache breaks type checking
-# See https://github.com/python/mypy/issues/5107
-if TYPE_CHECKING:
-    escape_attribute: Callable[[EscapableEntity], str]
+    return HTML.without_escaping(escape_text(value, escape_links=escape_links))
 
 
 # TODO: Cleanup the accepted types!
 # TODO: The name of the function is missleading. This does not care about HTML tag attribute
 # escaping.
-@lru_cache(maxsize=8192)  # type: ignore[no-redef]
+@lru_cache(maxsize=8192)
 def escape_attribute(value: EscapableEntity) -> str:
     """Escape HTML attributes.
 
@@ -96,7 +76,7 @@ def escape_attribute(value: EscapableEntity) -> str:
 
     """
     if isinstance(value, str):
-        return html_escape(value, quote=True)
+        return escape(value)
     if isinstance(value, HTML):
         return str(value)  # HTML code which must not be escaped
     if value is None:
@@ -104,11 +84,11 @@ def escape_attribute(value: EscapableEntity) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, LazyString):
-        return html_escape(str(value), quote=True)
+        return escape(str(value))
     raise TypeError(f"Unsupported type {type(value)}")
 
 
-def escape_text(text: EscapableEntity, escape_links: bool = False) -> str:
+def escape_text(value: EscapableEntity, escape_links: bool = False) -> str:
     """Escape HTML text
 
     We only strip some tags and allow some simple tags
@@ -148,46 +128,20 @@ def escape_text(text: EscapableEntity, escape_links: bool = False) -> str:
         'Hello this &lt;a href=&quot;http://some.site&quot;&gt;is dog&lt;/a&gt;!'
     """
 
-    if isinstance(text, HTML):
-        return str(text)
+    if isinstance(value, HTML):
+        return str(value)
 
-    text = escape_attribute(text)
-    text = _UNESCAPER_TEXT.sub(r"<\1\2>", text)
-    if not escape_links:
-        text = _unescape_link(text)
-    return text.replace("&amp;nbsp;", "&nbsp;")
-
-
-def _unescape_link(escaped_str: str) -> str:
-    """helper for escape_text to unescape links
-
-    all `</a>` tags are unescaped, even the ones with no opening...
-
-    >>> _unescape_link('&lt;/a&gt;')
-    '</a>'
-    >>> _unescape_link('foo&lt;a href=&quot;&quot;&gt;bar&lt;/a&gt;foobar')
-    'foo&lt;a href=&quot;&quot;&gt;bar</a>foobar'
-    >>> _unescape_link('foo&lt;a href=&quot;mailto:security@checkmk.com&quot;&gt;bar')
-    'foo<a href="mailto:security@checkmk.com">bar'
-    """
-    escaped_str = _CLOSING_A.sub(r"</a>", escaped_str)
-    for a_href in _A_HREF.finditer(escaped_str):
-        href = a_href.group(1)
-
-        if not href:
-            continue
-        if not is_allowed_url(href, cross_domain=True, schemes=["http", "https", "mailto"]):
-            continue  # Do not unescape links containing disallowed URLs
-
-        target = a_href.group(2)
-
-        if target:
-            unescaped_tag = '<a href="%s" target="%s">' % (href, target)
-        else:
-            unescaped_tag = '<a href="%s">' % href
-
-        escaped_str = escaped_str.replace(a_href.group(0), unescaped_tag)
-    return escaped_str
+    if value is None:
+        text = ""
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    elif isinstance(value, LazyString):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise TypeError(f"Unsupported type {type(value)}")
+    return escape_permissive(text, escape_links=escape_links)
 
 
 def strip_scripts(ht: str) -> str:
@@ -259,12 +213,12 @@ def strip_tags(ht: EscapableEntity) -> str:
 
         Even HTML objects get stripped.
 
-        >>> strip_tags(HTML('<a href="https://example.com">click here</a>'))
+        >>> strip_tags(HTML.without_escaping('<a href="https://example.com">click here</a>'))
         'click here'
 
         Everything we don't know about won't get stripped.
 
-        >>> strip_tags(object())  # type: ignore  # doctest: +ELLIPSIS
+        >>> strip_tags(object())  # type: ignore[arg-type]  # doctest: +ELLIPSIS
         '<object object at ...>'
 
     Returns:

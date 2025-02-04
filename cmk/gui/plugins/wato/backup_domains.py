@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import cmk.utils.paths
 
 from cmk.gui.i18n import _
-from cmk.gui.watolib.snapshots import backup_domains
+from cmk.gui.watolib.backup_snapshots import backup_domains
 
 backup_domains.update(
     {
         "check_mk": {
             "group": _("Configuration"),
             "title": _(
-                "Hosts, Services, Groups, Timeperiods, Business Intelligence and Monitoring Configuration"
+                "Hosts, Services, Groups, Time Periods, Business Intelligence and Monitoring Configuration"
             ),
             "prefix": cmk.utils.paths.default_config_dir,
             "paths": [
@@ -32,7 +32,7 @@ backup_domains.update(
         },
         "authorization_v1": {
             "group": _("Configuration"),
-            "title": _("Local Authentication Data"),
+            "title": _("Local authentication data"),
             "prefix": cmk.utils.paths.omd_root,
             "paths": [
                 ("file", "etc/htpasswd"),

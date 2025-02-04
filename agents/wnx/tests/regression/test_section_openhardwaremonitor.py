@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -54,7 +53,7 @@ def wait_agent():
 @pytest.fixture(name="expected_output")
 def expected_output_engine():
     re_str = (
-        r"^\d+,[^,]+,(\/\w+)+,(Power|Clock|Load|Data|Temperature)," r"\d+\.\d{6},\b(?:OK|Timeout)\b"
+        r"^\d+,[^,]+,(\/\w+)+,(Power|Clock|Load|Data|Temperature),\d+\.\d{6},\b(?:OK|Timeout)\b"
     )
     if not Globals.alone:
         re_str += r"|" + re.escape(r"<<<systemtime>>>") + r"|\d+"
@@ -70,9 +69,7 @@ def manage_ohm_binaries():
     if platform.system() == "Windows":
         binaries = ["OpenHardwareMonitorCLI.exe", "OpenHardwareMonitorLib.dll"]
 
-        source_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "files\\ohm\cli"
-        )
+        source_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "files\\ohm\\cli")
         target_dir = os.path.join(user_dir, "bin")
 
         it_utils.make_dir(target_dir)
@@ -86,7 +83,7 @@ def manage_ohm_binaries():
         it_utils.remove_files(target_dir, binaries)
 
 
-def test_section_openhardwaremonitor(  # type:ignore[no-untyped-def]
+def test_section_openhardwaremonitor(  # type: ignore[no-untyped-def]
     request, testconfig, expected_output, actual_output, testfile
 ) -> None:
     required_lines = 2

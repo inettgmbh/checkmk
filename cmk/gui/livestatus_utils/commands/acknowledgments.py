@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-"""This module contains helpers to trigger acknowledgments.
-"""
-from livestatus import SiteId
+"""This module contains helpers to trigger acknowledgments."""
+
+from livestatus import MultiSiteConnection, SiteId
 
 from cmk.utils.livestatus_helpers import tables
 from cmk.utils.livestatus_helpers.queries import detailed_connection, Query
 from cmk.utils.livestatus_helpers.tables import Hosts
+from cmk.utils.user import UserId
 
 from cmk.gui.livestatus_utils.commands.downtimes import QueryException
 from cmk.gui.livestatus_utils.commands.lowlevel import send_command
@@ -16,18 +17,18 @@ from cmk.gui.logged_in import user as _user
 
 
 def acknowledge_service_problem(
-    connection,
+    connection: MultiSiteConnection,
     host_name: str,
     service_description: str,
     sticky: bool = False,
     notify: bool = False,
     persistent: bool = False,
-    user: str = "",
+    user: UserId = UserId.builtin(),
     comment: str = "",
-):
+) -> None:
     """Acknowledge the current problem for the given service.
 
-    When acknowledging a problem, furhter notifications for the service are disabled, as
+    When acknowledging a problem, further notifications for the service are disabled, as
     long as the service doesn't change state. At state change, notifications are re-enabled.
 
     Args:
@@ -38,7 +39,7 @@ def acknowledge_service_problem(
             The host-name for which this acknowledgement is for.
 
         service_description:
-            The service description of the service, whose problems shall be acknowledged.
+            The service name of the service, whose problems shall be acknowledged.
 
         sticky:
             If set, only a state-change of the service to an OK state will discard the
@@ -58,19 +59,17 @@ def acknowledge_service_problem(
 
         >>> from cmk.gui.livestatus_utils.testing import simple_expect
         >>> from cmk.gui.utils.script_helpers import application_and_request_context
-        >>> from cmk.gui.logged_in import SuperUserContext
-        >>> from cmk.gui.config import load_config
+        >>> from cmk.gui.livestatus_utils.testing import mock_site
 
         >>> cmd = "COMMAND [...] ACKNOWLEDGE_SVC_PROBLEM;example.com;drain;1;0;0;;"
-        >>> with simple_expect() as live, application_and_request_context(), SuperUserContext():
-        ...     load_config()
+        >>> with simple_expect() as live:
         ...     _ = live.expect_query("GET hosts\\nColumns: name\\nFilter: name = example.com")
         ...     _ = live.expect_query(cmd, match_type="ellipsis")
         ...     acknowledge_service_problem(live, 'example.com', 'drain')
 
         Not authenticated users can't call this function:
 
-            >>> with application_and_request_context():
+            >>> with mock_site(), application_and_request_context():
             ...     acknowledge_service_problem(live, 'example.com', 'drain')   # doctest: +ELLIPSIS
             Traceback (most recent call last):
             ...
@@ -99,14 +98,14 @@ def acknowledge_service_problem(
 
 
 def acknowledge_servicegroup_problem(
-    connection,
+    connection: MultiSiteConnection,
     servicegroup_name: str,
     sticky: bool = False,
     notify: bool = False,
     persistent: bool = False,
-    user: str = "",
+    user: UserId = UserId.builtin(),
     comment: str = "",
-):
+) -> None:
     """Acknowledge the problems of the current services of the service group
 
     When acknowledging a problem, further notifications for the respective services are disabled, as
@@ -151,7 +150,6 @@ def acknowledge_servicegroup_problem(
     for entry in group_entries:
         site_id = entry["site"]
         for host_name, service_description in entry["members"]:
-
             send_command(
                 connection,
                 "ACKNOWLEDGE_SVC_PROBLEM",
@@ -169,14 +167,14 @@ def acknowledge_servicegroup_problem(
 
 
 def acknowledge_host_problem(
-    connection,
-    host_name,
+    connection: MultiSiteConnection,
+    host_name: str,
     sticky: bool = False,
     notify: bool = False,
     persistent: bool = False,
-    user: str = "",
+    user: UserId = UserId.builtin(),
     comment: str = "",
-):
+) -> None:
     """Acknowledge the current problem for the given host.
 
     When acknowledging a problem, notifications for the host are disabled, as long as the
@@ -207,19 +205,17 @@ def acknowledge_host_problem(
 
         >>> from cmk.gui.livestatus_utils.testing import simple_expect
         >>> from cmk.gui.utils.script_helpers import application_and_request_context
-        >>> from cmk.gui.logged_in import SuperUserContext
-        >>> from cmk.gui.config import load_config
+        >>> from cmk.gui.livestatus_utils.testing import mock_site
 
         >>> cmd = "COMMAND [...] ACKNOWLEDGE_HOST_PROBLEM;example.com;1;0;0;;"
-        >>> with simple_expect() as live, application_and_request_context(), SuperUserContext():
-        ...     load_config()
+        >>> with simple_expect() as live:
         ...     _ = live.expect_query("GET hosts\\nColumns: name\\nFilter: name = example.com")
         ...     _ = live.expect_query(cmd, match_type="ellipsis")
         ...     acknowledge_host_problem(live, 'example.com')
 
         Not authenticated users can't call this function:
 
-            >>> with application_and_request_context():
+            >>> with mock_site(), application_and_request_context():
             ...     acknowledge_host_problem(live, 'example.com')   # doctest: +ELLIPSIS
             Traceback (most recent call last):
             ...
@@ -249,14 +245,14 @@ def acknowledge_host_problem(
 
 
 def acknowledge_hostgroup_problem(
-    connection,
+    connection: MultiSiteConnection,
     hostgroup_name: str,
     sticky: bool = False,
     notify: bool = False,
     persistent: bool = False,
-    user: str = "",
+    user: UserId = UserId.builtin(),
     comment: str = "",
-):
+) -> None:
     """Acknowledge the problems of the current hosts of the host group
 
     When acknowledging a problem, further notifications for the respective services are disabled, as
@@ -315,7 +311,7 @@ def acknowledge_hostgroup_problem(
             )
 
 
-def _query_site(connection, host_name: str) -> SiteId:
+def _query_site(connection: MultiSiteConnection, host_name: str) -> SiteId:
     with detailed_connection(connection) as conn:
         site_id = Query([Hosts.name], Hosts.name.equals(host_name)).first_value(conn)
         if not isinstance(site_id, str):

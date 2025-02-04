@@ -3,28 +3,24 @@
 
 #include "pch.h"
 
-#include "test_tools.h"
+#include "watest/test_tools.h"
 
 #include <shellapi.h>
 
 #include <filesystem>
 #include <random>
-#include <ranges>
 #include <string>
-#include <string_view>
 
-#include "algorithm"  // for remove_if
-#include "cfg.h"
+#include "algorithm"            // for remove_if
 #include "corecrt_terminate.h"  // for terminate
-#include "exception"            // for terminate
-#include "firewall.h"
 #include "fmt/format.h"
-#include "install_api.h"  // for terminate
-#include "on_start.h"
+#include "fmt/xchar.h"
 #include "tools/_misc.h"
-#include "tools/_tgt.h"          // for IsDebug
-#include "yaml-cpp/emitter.h"    // for Emitter
-#include "yaml-cpp/node/emit.h"  // for operator<<
+#include "wnx/cfg.h"
+#include "wnx/cfg_details.h"
+#include "wnx/firewall.h"
+#include "wnx/install_api.h"  // for terminate
+#include "wnx/on_start.h"
 #include "yaml-cpp/node/node.h"  // for Node
 
 namespace fs = std::filesystem;
@@ -35,14 +31,13 @@ namespace tst {
 
 void AllowReadWriteAccess(const fs::path &path,
                           std::vector<std::wstring> &commands) {
-    const std::vector<std::wstring_view> command_templates = {
-        L"icacls \"{}\" /inheritance:d /c",  // disable inheritance
-        L"icacls \"{}\" /grant:r *S-1-5-32-545:(OI)(CI)(RX) /c"};  // read/exec
-
-    for (const auto &t : command_templates) {
-        auto cmd = fmt::format(t.data(), path.wstring());
-        commands.emplace_back(cmd);
-    }
+    // disable inheritance
+    commands.emplace_back(
+        fmt::format(L"icacls \"{}\" /inheritance:d /c", path.wstring()));
+    // read/exec
+    commands.emplace_back(
+        fmt::format(L"icacls \"{}\" /grant:r *S-1-5-32-545:(OI)(CI)(RX) /c",
+                    path.wstring()));
     XLOG::l.i("Protect file from User write '{}'", path);
 }
 
@@ -55,10 +50,9 @@ std::string GetFabricYmlContent() {
     return fabric_yaml_content;
 }
 
-class TestEnvironment : public ::testing::Environment {
+class TestEnvironment final : public ::testing::Environment {
 public:
     static constexpr std::string_view temp_test_prefix_{"tmp_watest"};
-    ~TestEnvironment() override = default;
 
     void SetUp() override {
         if (fs::path base_dir =
@@ -74,7 +68,7 @@ public:
     }
 
     void TearDown() override {
-        if (temp_dir_.u8string().find(temp_test_prefix_)) {
+        if (wtools::ToStr(temp_dir_).find(temp_test_prefix_)) {
             std::error_code ec;
             fs::remove_all(temp_dir_, ec);
             if (ec) {
@@ -157,6 +151,10 @@ fs::path MakePathToCapTestFiles(const std::wstring &root) {
     return r.lexically_normal();
 }
 
+std::string GetUnitTestName() {
+    return ::testing::UnitTest::GetInstance()->current_test_info()->name();
+}
+
 void SafeCleanTempDir() {
     fs::path temp_dir = cma::cfg::GetTempDir();
     if (temp_dir.wstring().find(L"\\tmp", 0) == std::wstring::npos) {
@@ -169,23 +167,6 @@ void SafeCleanTempDir() {
         XLOG::l("error removing '{}' with {} ", temp_dir, ec.message());
     }
     fs::create_directory(temp_dir);
-}
-
-void SafeCleanTmpxDir() {
-    if (very_temp != "tmpx") {
-        XLOG::l.crit(
-            "Recursive folder remove is allowed only for very temporary folders");
-        std::terminate();
-        return;
-    }
-
-    // clean
-    std::error_code ec;
-    fs::remove_all(very_temp, ec);
-    if (ec) {
-        XLOG::l("error removing '{}' with {} ", wtools::ToUtf8(very_temp),
-                ec.message());
-    }
 }
 
 void SafeCleanTempDir(std::string_view sub_dir) {
@@ -250,7 +231,7 @@ void ChangeSectionMode(std::string_view value, bool update_global,
     PutInternalArray(groups::kGlobal, section_del, del);
 
     if (update_global) {
-        groups::global.loadFromMainConfig();
+        groups::g_global.loadFromMainConfig();
     }
 }
 
@@ -308,7 +289,7 @@ std::wstring GenerateRandomFileName() noexcept {
     std::random_device rd;
     std::mt19937 generator(rd());
 
-    std::uniform_int_distribution<> dist(
+    std::uniform_int_distribution dist(
         0, static_cast<int>(possible_characters.size()) - 1);
     std::wstring ret;
     constexpr size_t kMaxLen{12};
@@ -404,7 +385,7 @@ bool TempCfgFs::loadContent(std::string_view content) {
 void TempCfgFs::allowUserAccess() const {
     std::vector<std::wstring> commands;
     tst::AllowReadWriteAccess(base_, commands);
-    wtools::ExecuteCommandsSync(L"all", commands);
+    wtools::ExecuteCommands(L"all", commands, wtools::ExecuteMode::sync);
 }
 
 [[nodiscard]] bool TempCfgFs::createFile(const fs::path &filepath,
@@ -462,7 +443,7 @@ bool WaitForSuccess(std::chrono::milliseconds ms, WaitForSuccessMode mode,
     auto success = false;
 
     for (int i = 0; i < count; i++) {
-        if ((mode == WaitForSuccessMode::indicate) && (i % 10 == 9)) {
+        if (mode == WaitForSuccessMode::indicate && i % 10 == 9) {
             xlog::sendStringToStdio(".", xlog::internal::Colors::yellow);
         }
         if (predicat()) {

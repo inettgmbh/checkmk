@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -8,7 +8,6 @@ from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     rulespec_registry,
     RulespecGroupCheckParametersEnvironment,
-    Transform,
 )
 from cmk.gui.valuespec import Dictionary, Integer, TextInput, Tuple
 
@@ -19,23 +18,20 @@ def _item_spec_ups_out_load():
     )
 
 
-def _parameter_valuespec_ups_out_load():
-    return Transform(
-        Dictionary(
-            elements=[
-                (
-                    "levels",
-                    Tuple(
-                        elements=[
-                            Integer(title=_("warning at"), unit="%", default_value=85),
-                            Integer(title=_("critical at"), unit="%", default_value=90),
-                        ],
-                    ),
-                )
-            ],
-            optional_keys=False,
-        ),
-        forth=lambda v: v if isinstance(v, dict) else {"levels": v},
+def _parameter_valuespec_ups_out_load() -> Dictionary:
+    return Dictionary(
+        elements=[
+            (
+                "levels",
+                Tuple(
+                    elements=[
+                        Integer(title=_("warning at"), unit="%", default_value=85),
+                        Integer(title=_("critical at"), unit="%", default_value=90),
+                    ],
+                ),
+            )
+        ],
+        optional_keys=False,
     )
 
 

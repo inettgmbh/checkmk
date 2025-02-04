@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Generator
 
 import pytest
+from pytest_mock import MockerFixture
 
-import cmk.utils.tags as tags
+from cmk.utils import tags
+from cmk.utils.tags import TagGroupID, TagID
 
 import cmk.gui.watolib.tags
 import cmk.gui.watolib.utils
@@ -57,7 +58,7 @@ def _tag_test_cfg():
 
 
 @pytest.fixture()
-def test_cfg() -> Generator:
+def test_cfg() -> Iterator[tags.TagConfig]:
     multisite_dir = Path(cmk.gui.watolib.utils.multisite_dir())
     tags_mk = multisite_dir / "tags.mk"
     hosttags_mk = multisite_dir / "hosttags.mk"
@@ -83,13 +84,13 @@ wato_tags = %s
         tags_mk.unlink()
 
 
-def test_tag_config_load(test_cfg) -> None:  # type:ignore[no-untyped-def]
+def test_tag_config_load(request_context: None, test_cfg: tags.TagConfig) -> None:
     assert len(test_cfg.tag_groups) == 2
     assert len(test_cfg.aux_tag_list.get_tags()) == 1
 
 
-@pytest.mark.usefixtures("test_cfg")
-def test_tag_config_save(mocker) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context", "test_cfg")
+def test_tag_config_save(mocker: MockerFixture) -> None:
     export_mock = mocker.patch.object(cmk.gui.watolib.tags, "_export_hosttags_to_php")
 
     config_file = TagConfigFile()
@@ -99,10 +100,10 @@ def test_tag_config_save(mocker) -> None:  # type:ignore[no-untyped-def]
     cfg.insert_tag_group(
         tags.TagGroup.from_config(
             {
-                "id": "tgid2",
+                "id": TagGroupID("tgid2"),
                 "topic": "Topics",
                 "title": "titlor",
-                "tags": [{"id": "tgid2", "title": "tagid2", "aux_tags": []}],
+                "tags": [{"id": TagID("tgid2"), "title": "tagid2", "aux_tags": []}],
             }
         )
     )

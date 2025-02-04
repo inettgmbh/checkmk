@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,16 +8,16 @@
 # This script extracts data of the hardware inventory to csv files
 
 # TODO: Fix the horrible mix between local/global naming.
-# pylint: disable=redefined-outer-name
+
 
 import hashlib
 import os
 import re
 import sys
 import time
-from typing import Any, Dict
+from typing import Any
 
-relations = {
+relations: dict[str, dict[str, Any]] = {
     "devices": {
         "columns": (
             ("@hostname", "import_id"),  # special functions start with "@"
@@ -93,7 +92,7 @@ relations = {
         },
         "converter": {},
     },
-}  # type: Dict[str, Dict[str, Any]]
+}
 
 omd_root = os.environ["OMD_ROOT"]
 
@@ -142,7 +141,6 @@ def filt_it(package, relation):
             for item in field.split("."):
                 value = package[item]
                 if type(value) in (str, int, float) and re.search(should_be, value):
-
                     return False
     return True
 
@@ -228,7 +226,7 @@ for hostname in os.listdir(inv_dir):
         continue
     fn = inv_dir + hostname
     if os.path.isfile(fn):
-        a = eval(open(fn, "r").read())
+        a = eval(open(fn).read())
         all_data[hostname] = a
         inventory_date[hostname] = os.path.getmtime(fn)
 
@@ -242,7 +240,7 @@ for ofs in relations:
     list_start = is_list(elements)
     if list_start == "":
         for hostname in all_data:
-            print("creating relation %s for %s" % (ofs, hostname))
+            print("creating relation {} for {}".format(ofs, hostname))
             items = []
             for field in elements:
                 items.append(no_list_get(hostname, field))
@@ -250,7 +248,7 @@ for ofs in relations:
         out_rel.close()
     else:
         for hostname in all_data:
-            print("creating relation %s for %s" % (ofs, hostname))
+            print("creating relation {} for {}".format(ofs, hostname))
             subtree = all_data[hostname]
             for item in list_start.split("."):
                 try:

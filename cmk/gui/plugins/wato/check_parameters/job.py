@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -46,12 +46,12 @@ def _parameter_valuespec_job():
                     valuespec=Tuple(
                         orientation="horizontal",
                         elements=[
-                            Integer(title=_("Exit code")),
+                            Integer(title=_("Exit code"), default_value=0),
                             MonitoringState(
                                 title=_("Resulting state"),
+                                default_value=0,
                             ),
                         ],
-                        default_value=(0, 0),
                     ),
                     title=_("Explicit mapping of job exit codes to states"),
                     help=_(

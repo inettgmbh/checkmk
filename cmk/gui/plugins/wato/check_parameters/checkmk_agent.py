@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Union
 
-from cmk.utils.version import parse_check_mk_version
+from cmk.ccc.version import parse_check_mk_version
 
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
@@ -18,10 +17,10 @@ from cmk.gui.valuespec import (
     CascadingDropdown,
     Dictionary,
     FixedValue,
+    Migrate,
     MonitoringState,
     RegExp,
     TextInput,
-    Transform,
     Tuple,
 )
 
@@ -33,19 +32,19 @@ def _validate_version(value: str, varprefix: str) -> None:
         raise MKUserError(varprefix, _("Can't parse version %r") % value)
 
 
-def _transform_version_spec(
-    param: Union[str, tuple[str, str], tuple[str, dict[str, str]]]
+def _migrate_version_spec(
+    param: str | tuple[str, str] | tuple[str, dict[str, str]],
 ) -> tuple[str, dict[str, str]]:
     """
-    >>> _transform_version_spec(('at_least', {'build': '1.1.1'}))
+    >>> _migrate_version_spec(('at_least', {'build': '1.1.1'}))
     ('at_least', {'build': '1.1.1'})
-    >>> _transform_version_spec(("specific", "2.1.0b2"))
+    >>> _migrate_version_spec(("specific", "2.1.0b2"))
     ('specific', {'literal': '2.1.0b2'})
-    >>> _transform_version_spec("1.2.3")
+    >>> _migrate_version_spec("1.2.3")
     ('specific', {'literal': '1.2.3'})
-    >>> _transform_version_spec("site")
+    >>> _migrate_version_spec("site")
     ('site', {})
-    >>> _transform_version_spec("ignore")
+    >>> _migrate_version_spec("ignore")
     ('ignore', {})
 
     """
@@ -62,14 +61,18 @@ def _transform_version_spec(
 
 def _parameter_valuespec_checkmk_agent():
     return Dictionary(
+        ignored_keys=[
+            # this key is set as a default, and postprocessed by the backend.
+            "only_from",
+        ],
         elements=[
             (
                 "agent_version",
-                Transform(
+                Migrate(
                     valuespec=CascadingDropdown(
                         title=_("Check version of Checkmk agent"),
                         help=_(
-                            "Here you can make sure that all of your Check_MK agents are running"
+                            "Here you can make sure that all of your Checkmk agents are running"
                             " one specific version. Agents running "
                             " a different version return a non-OK state."
                         ),
@@ -124,7 +127,7 @@ def _parameter_valuespec_checkmk_agent():
                     ),
                     # In the past, this was a OptionalDropdownChoice() which values could be strings:
                     # ignore, site or a custom string representing a version number.
-                    forth=_transform_version_spec,
+                    migrate=_migrate_version_spec,
                 ),
             ),
             (
@@ -180,9 +183,21 @@ def _parameter_valuespec_checkmk_agent():
                 ),
             ),
             (
+                "error_deployment_disabled_for_hostname",
+                MonitoringState(
+                    title=_("State if agent deployment is disabled for host"),
+                    help=_(
+                        "This is only relevant when agent updates are globally enabled."
+                        " Otherwise, configured host conditions are not tested and won't yield"
+                        " an error message."
+                    ),
+                    default_value=1,
+                ),
+            ),
+            (
                 "versions_plugins",
                 Dictionary(
-                    title=_("Agent plugins: versions"),
+                    title=_("Agent plug-ins: versions"),
                     optional_keys=False,
                     elements=[
                         (
@@ -191,7 +206,7 @@ def _parameter_valuespec_checkmk_agent():
                                 title=_("Required minimal versions"),
                                 help=_(
                                     "You can configure lower thresholds for the versions of the "
-                                    "currently deployed agent plugins."
+                                    "currently deployed agent plug-ins."
                                 ),
                                 elements=[
                                     TextInput(title=_("Warning at"), validate=_validate_version),
@@ -204,7 +219,7 @@ def _parameter_valuespec_checkmk_agent():
                             MonitoringState(
                                 title=_("Monitoring state in case of version parsing failure"),
                                 help=_(
-                                    "The monitoring state in case the version of an agent plugin "
+                                    "The monitoring state in case the version of an agent plug-in "
                                     "is unparsable."
                                 ),
                                 default_value=3,
@@ -250,13 +265,13 @@ def _parameter_valuespec_checkmk_agent():
             (
                 "exclude_pattern_plugins",
                 RegExp(
-                    title=_("Agent plugins: Regular expression to exclude plugins"),
+                    title=_("Agent plug-ins: Regular expression to exclude plugins"),
                     mode=RegExp.infix,
                     help=_(
-                        "Plugins matching this pattern will be excluded from the comparison with "
+                        "Plug-ins matching this pattern will be excluded from the comparison with "
                         "the required versions specified in '%s' and from the duplicates check."
                     )
-                    % _("Agent plugins: versions"),
+                    % _("Agent plug-ins: versions"),
                 ),
             ),
             (

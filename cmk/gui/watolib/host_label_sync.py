@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Synchronize discovered host labels from remote site to central site"""
@@ -7,38 +7,36 @@
 from __future__ import annotations
 
 import ast
+import os
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from livestatus import SiteConfiguration, SiteId
 
-import cmk.utils.paths
-import cmk.utils.store as store
-from cmk.utils.labels import (
-    get_host_labels_entry_of_host,
-    get_updated_host_label_files,
-    save_updated_host_label_files,
-    UpdatedHostLabelsEntry,
-)
-from cmk.utils.type_defs import HostName
+from cmk.ccc import store
+from cmk.ccc.exceptions import MKGeneralException
 
-import cmk.gui.background_job as background_job
-import cmk.gui.gui_background_job as gui_background_job
-import cmk.gui.log as log
-import cmk.gui.pages
-from cmk.gui.config import load_config
-from cmk.gui.context import RequestContext
-from cmk.gui.exceptions import MKGeneralException, MKUserError
+import cmk.utils.paths
+from cmk.utils.hostaddress import HostName
+from cmk.utils.labels import DiscoveredHostLabelsStore
+
+from cmk.gui.config import active_config
+from cmk.gui.cron import CronJob, CronJobRegistry
+from cmk.gui.exceptions import MKUserError
 from cmk.gui.http import request
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
 from cmk.gui.site_config import get_site_config, has_wato_slave_sites, wato_slave_sites
-from cmk.gui.utils.script_helpers import make_request_context
-from cmk.gui.watolib.automation_commands import automation_command_registry, AutomationCommand
-from cmk.gui.watolib.automations import do_remote_automation
+from cmk.gui.utils.request_context import copy_request_context
+from cmk.gui.watolib.automation_commands import AutomationCommand
+from cmk.gui.watolib.automations import do_remote_automation, MKAutomationException
 from cmk.gui.watolib.hosts_and_folders import Host
+from cmk.gui.watolib.paths import wato_var_dir
+
+UpdatedHostLabelsEntry = tuple[str, float, str]
 
 
 @dataclass
@@ -46,7 +44,7 @@ class SiteResult:
     site_id: SiteId
     success: bool
     error: str
-    updated_host_labels: List[UpdatedHostLabelsEntry]
+    updated_host_labels: list[UpdatedHostLabelsEntry]
 
 
 @dataclass
@@ -58,10 +56,10 @@ class EnforcedHostRequest:
 @dataclass
 class SiteRequest:
     newest_host_labels: float
-    enforce_host: Optional[EnforcedHostRequest]
+    enforce_host: EnforcedHostRequest | None
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "SiteRequest":
+    def deserialize(cls, serialized: dict[str, Any]) -> SiteRequest:
         enforce_host = (
             EnforcedHostRequest(**serialized["enforce_host"])
             if serialized["enforce_host"]
@@ -80,13 +78,13 @@ class SiteRequest:
                     )
                     % (enforce_host.host_name, enforce_host.site_id)
                 )
-            host.need_permission("read")
+            host.permissions.need_permission("read")
 
         newest_host_labels = serialized["newest_host_labels"]
         assert isinstance(newest_host_labels, float)
         return cls(newest_host_labels, enforce_host)
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         return {
             "newest_host_labels": self.newest_host_labels,
             "enforce_host": asdict(self.enforce_host) if self.enforce_host else None,
@@ -95,12 +93,23 @@ class SiteRequest:
 
 @dataclass
 class DiscoveredHostLabelSyncResponse:
-    updated_host_labels: List[UpdatedHostLabelsEntry]
+    updated_host_labels: list[UpdatedHostLabelsEntry]
+
+
+def register(cron_job_registry: CronJobRegistry) -> None:
+    cron_job_registry.register(
+        CronJob(
+            name="execute_host_label_sync_job",
+            callable=execute_host_label_sync_job,
+            interval=timedelta(minutes=1),
+            run_in_thread=True,
+        )
+    )
 
 
 def execute_host_label_sync(host_name: HostName, site_id: SiteId) -> None:
     """Contacts the given remote site to synchronize the labels of the given host"""
-    site_spec = get_site_config(site_id)
+    site_spec = get_site_config(active_config, site_id)
     result = _execute_site_sync(
         site_id,
         site_spec,
@@ -112,61 +121,35 @@ def execute_host_label_sync(host_name: HostName, site_id: SiteId) -> None:
     save_updated_host_label_files(result.updated_host_labels)
 
 
-def execute_host_label_sync_job() -> Optional[DiscoveredHostLabelSyncJob]:
+def execute_host_label_sync_job() -> None:
     """This function is called by the GUI cron job once a minute.
     Errors are logged to var/log/web.log."""
     if not has_wato_slave_sites():
-        return None
+        return
 
-    job = DiscoveredHostLabelSyncJob()
-    job.set_function(job.do_sync)
-
-    try:
-        job.start()
-    except background_job.BackgroundJobAlreadyRunning:
-        logger.debug("Another synchronization job is already running: Skipping this sync")
-
-    return job
+    DiscoveredHostLabelSyncJob().do_sync()
 
 
-@gui_background_job.job_registry.register
-class DiscoveredHostLabelSyncJob(gui_background_job.GUIBackgroundJob):
+class DiscoveredHostLabelSyncJob:
     """This job synchronizes the discovered host labels from remote sites to the central site
 
-    Currently they are only needed for the agent bakery, but may be used in other places in the
+    Currently they are only needed for the Agent Bakery, but may be used in other places in the
     future.
     """
 
-    job_prefix = "discovered_host_label_sync"
-
-    @classmethod
-    def gui_title(cls) -> str:
-        return _("Discovered host label synchronization")
-
-    def __init__(self) -> None:
-        super().__init__(
-            job_id=self.job_prefix,
-            title=self.gui_title(),
-            stoppable=False,
-        )
-
-    def do_sync(self, job_interface: background_job.BackgroundProcessInterface) -> None:
-        job_interface.send_progress_update(_("Synchronization started..."))
+    def do_sync(self) -> None:
+        logger.info("Synchronization started...")
         self._execute_sync()
-        job_interface.send_result_message(_("The synchronization finished."))
+        logger.info("The synchronization finished.")
 
     def _execute_sync(self) -> None:
         newest_host_labels = self._load_newest_host_labels_per_site()
 
-        with (request_context := make_request_context()):  # pylint: disable=superfluous-parens
-            load_config()
-
         with ThreadPool(20) as pool:
             results = pool.map(
-                self._execute_site_sync_bg,
+                copy_request_context(self._execute_site_sync_bg),
                 [
                     (
-                        request_context,
                         site_id,
                         site_spec,
                         SiteRequest(newest_host_labels.get(site_id, 0.0), None),
@@ -179,19 +162,16 @@ class DiscoveredHostLabelSyncJob(gui_background_job.GUIBackgroundJob):
 
     def _execute_site_sync_bg(
         self,
-        args: Tuple[
-            RequestContext,
+        args: tuple[
             SiteId,
             SiteConfiguration,
             SiteRequest,
         ],
     ) -> SiteResult:
-        log.init_logging()  # NOTE: We run in a subprocess!
-        with args[0]:
-            return _execute_site_sync(*args[1:])
+        return _execute_site_sync(*args)
 
     def _process_site_sync_results(
-        self, newest_host_labels: Dict[SiteId, float], results: List[SiteResult]
+        self, newest_host_labels: dict[SiteId, float], results: list[SiteResult]
     ) -> None:
         """Persist the sync results received from the remote site on the central site"""
         for site_result in results:
@@ -208,14 +188,14 @@ class DiscoveredHostLabelSyncJob(gui_background_job.GUIBackgroundJob):
 
     @staticmethod
     def newest_host_labels_per_site_path() -> Path:
-        return Path(cmk.utils.paths.var_dir) / "wato" / "newest_host_labels_per_site.mk"
+        return wato_var_dir() / "newest_host_labels_per_site.mk"
 
-    def _load_newest_host_labels_per_site(self) -> Dict[SiteId, float]:
+    def _load_newest_host_labels_per_site(self) -> dict[SiteId, float]:
         return store.load_object_from_file(
             DiscoveredHostLabelSyncJob.newest_host_labels_per_site_path(), default={}
         )
 
-    def _save_newest_host_labels_per_site(self, newest_host_labels: Dict[SiteId, float]) -> None:
+    def _save_newest_host_labels_per_site(self, newest_host_labels: dict[SiteId, float]) -> None:
         store.save_object_to_file(
             DiscoveredHostLabelSyncJob.newest_host_labels_per_site_path(), newest_host_labels
         )
@@ -229,16 +209,16 @@ def _execute_site_sync(
         logger.debug(_("[%s] Starting sync for site"), site_id)
 
         # timeout=100: Use a value smaller than the default apache request timeout
-        result = DiscoveredHostLabelSyncResponse(
-            **do_remote_automation(
-                site_spec,
-                "discovered-host-label-sync",
-                [
-                    ("request", repr(site_request.serialize())),
-                ],
-                timeout=100,
-            )
+        raw_result = do_remote_automation(
+            site_spec,
+            "discovered-host-label-sync",
+            [
+                ("request", repr(site_request.serialize())),
+            ],
+            timeout=100,
         )
+        assert isinstance(raw_result, dict)
+        result = DiscoveredHostLabelSyncResponse(**raw_result)
 
         logger.debug(_("[%s] Finished sync for site"), site_id)
         return SiteResult(
@@ -247,8 +227,17 @@ def _execute_site_sync(
             error="",
             updated_host_labels=result.updated_host_labels,
         )
+
+    except MKAutomationException as e:
+        return SiteResult(
+            site_id=site_id,
+            success=False,
+            error=str(e),
+            updated_host_labels=[],
+        )
+
     except Exception as e:
-        logger.error("Exception (%s, discovered_host_label_sync)", site_id, exc_info=True)
+        logger.error("Failed to get discovered host labels from site %s: %s", site_id, e)
         return SiteResult(
             site_id=site_id,
             success=False,
@@ -257,8 +246,35 @@ def _execute_site_sync(
         )
 
 
-@automation_command_registry.register
-class AutomationDiscoveredHostLabelSync(AutomationCommand):
+def get_host_labels_entry_of_host(host_name: HostName) -> UpdatedHostLabelsEntry:
+    """Returns the host labels entry of the given host"""
+    path = DiscoveredHostLabelsStore(host_name).file_path
+    with path.open() as f:
+        return (path.name, path.stat().st_mtime, f.read())
+
+
+def save_updated_host_label_files(updated_host_labels: list[UpdatedHostLabelsEntry]) -> None:
+    """Persists the data previously read by get_updated_host_label_files()"""
+    for file_name, mtime, content in updated_host_labels:
+        file_path = cmk.utils.paths.discovered_host_labels_dir / file_name
+        store.save_text_to_file(file_path, content)
+        os.utime(file_path, (mtime, mtime))
+
+
+def get_updated_host_label_files(newer_than: float) -> list[UpdatedHostLabelsEntry]:
+    """Returns the host label file content + meta data which are newer than the given timestamp"""
+    updated_host_labels = []
+    for path in sorted(cmk.utils.paths.discovered_host_labels_dir.glob("*.mk")):
+        mtime = path.stat().st_mtime
+        if path.stat().st_mtime <= newer_than:
+            continue  # Already known to central site
+
+        with path.open() as f:
+            updated_host_labels.append((path.name, mtime, f.read()))
+    return updated_host_labels
+
+
+class AutomationDiscoveredHostLabelSync(AutomationCommand[SiteRequest]):
     """Called by execute_site_sync to perform the sync with a remote site"""
 
     def command_name(self) -> str:
@@ -270,7 +286,7 @@ class AutomationDiscoveredHostLabelSync(AutomationCommand):
             raise MKUserError("request", _('The parameter "%s" is missing.') % "request")
         return SiteRequest.deserialize(ast.literal_eval(ascii_input))
 
-    def execute(self, api_request: SiteRequest) -> Dict[str, Any]:
+    def execute(self, api_request: SiteRequest) -> dict[str, Any]:
         if api_request.enforce_host:
             try:
                 response = DiscoveredHostLabelSyncResponse(

@@ -20,14 +20,16 @@ powershell Write-Host "Cleaning environment phase 1" -foreground Cyan
 powershell Write-Host "cabs" -foreground white
 del /Q python-3.cab
 del /Q python-3.8.cab
-del /Q python-3.4.cab
 powershell Write-Host "root files" -foreground white
-del /Q *.*
+del /Q *.txt
+del /Q Pipfile.*
 powershell Write-Host "root folders" -foreground white
 rd /q /s libs
 rd /q /s tools
 rd /q /s include
-rd /q /s DLLs
+del /Q DLLs/*.ico
+del /Q DLLs/*.cat
+del /Q DLLs/*.cat
 rd /q /s scripts
 powershell Write-Host "pycaches" -foreground white
 del /Q Lib\__pycache__\*.*

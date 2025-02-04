@@ -11,10 +11,15 @@ cd %build_msi% 2> nul  || powershell Write-Host "cannot find a python sources" -
 powershell Write-Host "Starting build" -foreground Green
 set GIT=c:\Program Files\git\cmd\git.exe
 if not exist "%GIT%" powershell Write-Host "You should install Git as %GIT%" -Foreground Red && exit /b 3
-set HOST_PYTHON=c:\python310\python.exe
-if not exist "%HOST_PYTHON%" powershell Write-Host "You should install Python as %HOST_PYTHON%" -Foreground Red && exit /b 4
+for /f %%i in ('where python') do set HOST_PYTHON=%%i
+if "%HOST_PYTHON%" == "" powershell Write-Host "Python not found" -Foreground Red && exit /b 4
+powershell Write-Host "Using python %HOST_PYTHON%" -Foreground Green
 set
 @echo call buildrelease.bat  -o %build_dir% -b -x86 --skip-nuget --skip-pgo --skip-zip
+
+:: we do not need doc anyway, build of the doc may lead to error
+copy /Y %cur_dir%\patches\doc.wxs doc\doc.wxs
+# del /Q bundle\packagegroups\doc.wxs
 if "%PY_VER%" == "3.6" (
   :: 3.6 cant build doc
   powershell Write-Host "Creating empty %chm_368%" -foreground white

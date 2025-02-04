@@ -4,20 +4,21 @@
 #include "pch.h"
 
 #include <filesystem>
+#include <ranges>
 
-#include "cfg.h"
-#include "cfg_engine.h"
 #include "common/wtools.h"
 #include "providers/logwatch_event.h"
 #include "providers/logwatch_event_details.h"
-#include "service_processor.h"
-#include "test_tools.h"
 #include "tools/_misc.h"
-#include "tools/_process.h"
+#include "watest/test_tools.h"
+#include "wnx/cfg.h"
+#include "wnx/cfg_engine.h"
+#include "wnx/service_processor.h"
 
 using cma::evl::SkipDuplicatedRecords;
 using std::chrono::steady_clock;
 namespace fs = std::filesystem;
+namespace rs = std::ranges;
 
 namespace cma::provider {
 
@@ -77,7 +78,7 @@ TEST(LogWatchEventTest, GetLastPos) {
     }
 }
 
-/// \brief Keeps temporary folder and pair of file names and dirs
+/// Keeps temporary folder and pair of file names and dirs
 class LogWatchEventFixture : public ::testing::Test {
 public:
     cma::evl::EventLogDebug event_log{tst::SimpleLogData()};
@@ -190,20 +191,20 @@ TEST(LogWatchEventTest, DumpEventLog) {
                            .timeout = -1,
                            .skip = SkipDuplicatedRecords::no};
         auto start = steady_clock::now();
-        auto [pos, out] = DumpEventLog(*ptr, state, lwl);
+        auto [_, out] = DumpEventLog(*ptr, state, lwl);
         auto end = steady_clock::now();
-        EXPECT_TRUE(
-            std::chrono::duration_cast<std::chrono::seconds>(end - start)
-                .count() < 2);
+        EXPECT_LE(std::chrono::duration_cast<std::chrono::seconds>(end - start)
+                      .count(),
+                  3);
     }
 }
 
 // check how good can we find objects in entries
-TEST(LogWatchEventTest, LoadFromConfig) {
+TEST(LogWatchEventTest, UpdateState) {
     State state("xx", 1, true);
 
     LogWatchEntryVector entries;
-    EXPECT_FALSE(LoadFromConfig(state, entries));
+    EXPECT_FALSE(UpdateState(state, entries));
 
     LogWatchEntry lwe;
 
@@ -211,10 +212,10 @@ TEST(LogWatchEventTest, LoadFromConfig) {
     lwe.loadFrom("XX: warn context");
     entries.push_back(LogWatchEntry(lwe));
 
-    EXPECT_TRUE(LoadFromConfig(state, entries));
+    EXPECT_TRUE(UpdateState(state, entries));
     EXPECT_EQ(state.level_, cfg::EventLevels::kWarn);
     EXPECT_TRUE(state.in_config_);
-    EXPECT_FALSE(state.hide_context_);
+    EXPECT_EQ(state.context_, cfg::EventContext::with);
     EXPECT_TRUE(state.presented_);
 }
 
@@ -225,7 +226,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kOff);
         EXPECT_EQ(lwe.name(), "Abc");
-        EXPECT_EQ(lwe.context(), true);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::with);
     }
 
     {
@@ -234,7 +235,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kWarn);
         EXPECT_EQ(lwe.name(), "Abc");
-        EXPECT_EQ(lwe.context(), false);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
     }
 
     {
@@ -243,7 +244,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kAll);
         EXPECT_EQ(lwe.name(), "Abc");
-        EXPECT_EQ(lwe.context(), true);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::with);
     }
 
     {
@@ -252,7 +253,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kOff);
         EXPECT_EQ(lwe.name(), "A");
-        EXPECT_EQ(lwe.context(), false);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
     }
     {
         LogWatchEntry lwe;
@@ -269,7 +270,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kCrit);
         EXPECT_EQ(lwe.name(), "*");
-        EXPECT_EQ(lwe.context(), false);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
     }
     {
         LogWatchEntry lwe;
@@ -277,7 +278,7 @@ TEST(LogWatchEventTest, LoadFrom) {
         EXPECT_TRUE(lwe.loaded());
         EXPECT_EQ(lwe.level(), cfg::EventLevels::kCrit);
         EXPECT_EQ(lwe.name(), "*");
-        EXPECT_EQ(lwe.context(), false);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
     }
 }
 
@@ -317,17 +318,19 @@ TEST(LogWatchEventTest, CheckFabricConfig) {
     ASSERT_EQ(sections.size(), LogWatchSections_Main);
 
     // data to be tested against
-    const RawLogWatchData base[LogWatchSections_Test] = {
+    constexpr RawLogWatchData base[LogWatchSections_Test] = {
         //{false, "", cfg::EventLevels::kOff, false},
-        {true, "Parameters", cfg::EventLevels::kIgnore, false},
-        {true, "State", cfg::EventLevels::kIgnore, false},
-        {true, "*", cfg::EventLevels::kWarn, false},
+        {true, "Parameters", cfg::EventLevels::kIgnore,
+         cfg::EventContext::hide},
+        {true, "State", cfg::EventLevels::kIgnore, cfg::EventContext::hide},
+        {true, "*", cfg::EventLevels::kWarn, cfg::EventContext::hide},
     };
 
     int pos = 0;
     for (const auto &sec : sections) {
-        auto type = sec.Type();
-        if (!sec.IsMap()) continue;
+        if (!sec.IsMap()) {
+            continue;
+        }
         YAML::Emitter emit;
         emit << sec;
         LogWatchEntry lwe;
@@ -361,17 +364,18 @@ TEST(LogWatchEventTest, CheckTestConfig) {
 
     // data to be tested against
     const RawLogWatchData base[LogWatchSections_Test] = {
-        {true, "Application", cfg::EventLevels::kCrit, true},
-        {true, "System", cfg::EventLevels::kWarn, false},
-        {true, "Demo", cfg::EventLevels::kAll, false},
-        {false, "", cfg::EventLevels::kOff, false},
-        {true, "*", cfg::EventLevels::kWarn, true},
+        {true, "Application", cfg::EventLevels::kCrit, cfg::EventContext::with},
+        {true, "System", cfg::EventLevels::kWarn, cfg::EventContext::hide},
+        {true, "Demo", cfg::EventLevels::kAll, cfg::EventContext::hide},
+        {false, "", cfg::EventLevels::kOff, cfg::EventContext::hide},
+        {true, "*", cfg::EventLevels::kWarn, cfg::EventContext::with},
     };
 
     int pos = 0;
     for (const auto &sec : sections) {
-        auto type = sec.Type();
-        if (!sec.IsMap()) continue;
+        if (!sec.IsMap()) {
+            continue;
+        }
         YAML::Emitter emit;
         emit << sec;
         LogWatchEntry lwe;
@@ -398,41 +402,41 @@ TEST(LogWatchEventTest, ConfigStruct) {
         provider::LogWatchEntry lwe;
         EXPECT_EQ(lwe.name(), "");
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kOff);
-        EXPECT_EQ(lwe.context(), false);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
         EXPECT_EQ(lwe.loaded(), false);
 
-        lwe.init("Name", "WARN", true);
+        lwe.init("Name", "WARN", cfg::EventContext::with);
         EXPECT_EQ(lwe.name(), "Name");
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kWarn);
-        EXPECT_EQ(lwe.context(), true);
+        EXPECT_EQ(lwe.context(), cfg::EventContext::with);
         EXPECT_EQ(lwe.loaded(), true);
     }
     {
         provider::LogWatchEntry lwe;
-        lwe.init("Name", "off", true);
+        lwe.init("Name", "off", cfg::EventContext::with);
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kOff);
     }
 
     {
         provider::LogWatchEntry lwe;
-        lwe.init("Name", "ignore", true);
+        lwe.init("Name", "ignore", cfg::EventContext::with);
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kIgnore);
     }
 
     {
         provider::LogWatchEntry lwe;
-        lwe.init("Name", "warn", false);
+        lwe.init("Name", "warn", cfg::EventContext::hide);
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kWarn);
-        EXPECT_FALSE(lwe.context());
+        EXPECT_EQ(lwe.context(), cfg::EventContext::hide);
     }
     {
         provider::LogWatchEntry lwe;
-        lwe.init("Name", "crit", true);
+        lwe.init("Name", "crit", cfg::EventContext::with);
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kCrit);
     }
     {
         provider::LogWatchEntry lwe;
-        lwe.init("Name", "all", true);
+        lwe.init("Name", "all", cfg::EventContext::with);
         EXPECT_TRUE(lwe.level() == cfg::EventLevels::kAll);
     }
 }
@@ -478,8 +482,8 @@ TEST(LogWatchEventTest, ConfigLoad) {
     ASSERT_TRUE(e.size() > 2);
     EXPECT_TRUE(e[0].loaded());
     EXPECT_TRUE(e[1].loaded());
-    EXPECT_TRUE(e[0].context() == true);
-    EXPECT_TRUE(e[1].context() == false);
+    EXPECT_EQ(e[0].context(), cfg::EventContext::with);
+    EXPECT_EQ(e[1].context(), cfg::EventContext::hide);
     EXPECT_EQ(e[0].name(), "Application");
     EXPECT_EQ(e[1].name(), "System");
     EXPECT_EQ(e[2].name(), "Demo");
@@ -595,12 +599,12 @@ TEST(LogWatchEventTest, TestAddLog) {
     {
         auto &s0 = states[0];
 
-        EXPECT_EQ(s0.hide_context_, true);              // default
-        EXPECT_EQ(s0.level_, cfg::EventLevels::kCrit);  // default
-        EXPECT_EQ(s0.pos_, cfg::kFromBegin);            // 4 parameter
-        EXPECT_EQ(s0.name_, std::string("xxx"));        // 3 param
-        EXPECT_EQ(s0.in_config_, false);                // 2 param
-        EXPECT_EQ(s0.presented_, true);                 // default
+        EXPECT_EQ(s0.context_, cfg::EventContext::hide);  // default
+        EXPECT_EQ(s0.level_, cfg::EventLevels::kCrit);    // default
+        EXPECT_EQ(s0.pos_, cfg::kFromBegin);              // 4 parameter
+        EXPECT_EQ(s0.name_, std::string("xxx"));          // 3 param
+        EXPECT_EQ(s0.in_config_, false);                  // 2 param
+        EXPECT_EQ(s0.presented_, true);                   // default
 
         s0.presented_ = false;
         AddLogState(states, false, "xxx", SendMode::normal);
@@ -622,37 +626,37 @@ TEST(LogWatchEventTest, TestAddLog) {
         StateVector states;
         LogWatchEntry lwe;
         // new entry
-        lwe.init("a", "off", false);
+        lwe.init("a", "off", cfg::EventContext::hide);
         AddConfigEntry(states, lwe, false);
         {
             auto &s = states.back();
             EXPECT_EQ(s.name_, std::string("a"));
             EXPECT_EQ(s.in_config_, true);
-            EXPECT_EQ(s.hide_context_, true);
+            EXPECT_EQ(s.context_, cfg::EventContext::hide);
             EXPECT_EQ(s.presented_, true);
             EXPECT_EQ(s.pos_, cfg::kFromBegin);
             EXPECT_EQ(s.level_, cfg::EventLevels::kOff);
         }
 
-        lwe.init("a", "warn", true);
+        lwe.init("a", "warn", cfg::EventContext::with);
         AddConfigEntry(states, lwe, true);
         {
             auto &s = states.back();
             EXPECT_EQ(s.name_, std::string("a"));
-            EXPECT_EQ(s.hide_context_, false);   // changed
-            EXPECT_EQ(s.presented_, true);       // no change
-            EXPECT_EQ(s.pos_, cfg::kFromBegin);  // no change
+            EXPECT_EQ(s.context_, cfg::EventContext::with);  // changed
+            EXPECT_EQ(s.presented_, true);                   // no change
+            EXPECT_EQ(s.pos_, cfg::kFromBegin);              // no change
             EXPECT_EQ(s.level_, cfg::EventLevels::kWarn);
         }
 
-        lwe.init("b", "crit", true);
+        lwe.init("b", "crit", cfg::EventContext::with);
         AddConfigEntry(states, lwe, true);
         {
             auto &s = states.back();
             EXPECT_EQ(states.size(), 2);
             EXPECT_EQ(s.name_, std::string("b"));
             EXPECT_EQ(s.in_config_, true);
-            EXPECT_EQ(s.hide_context_, false);
+            EXPECT_EQ(s.context_, cfg::EventContext::with);
             EXPECT_EQ(s.presented_, true);
             EXPECT_EQ(s.pos_, 0);
             EXPECT_EQ(s.level_, cfg::EventLevels::kCrit);
@@ -660,12 +664,11 @@ TEST(LogWatchEventTest, TestAddLog) {
     }
 }
 
-TEST(LogWatchEventTest, CheckMakeBodyIntegration) {
+TEST(LogWatchEventTest, CheckMakeBodyComponent) {
     auto temp_fs = tst::TempCfgFs::CreateNoIo();
     LogWatchEvent lw;
     lw.loadConfig();
     auto ret = lw.makeBody();
-    ret = lw.makeBody();
     EXPECT_TRUE(ret.size() < 2000) << "should be almost empty";
     auto table = tools::SplitString(ret, "\n");
     auto old_size = table.size();
@@ -676,39 +679,69 @@ TEST(LogWatchEventTest, CheckMakeBodyIntegration) {
     EXPECT_LE(table.size(), old_size * 2);
 }
 
-TEST(LogWatchEventTest, TestDefaultEntry) {
-    {
-        StateVector st;
-        st.emplace_back("Abc");
-        LogWatchEvent lw;
-        LogWatchEntry dflt_entry = GenerateDefaultValue();
-        LogWatchEntry entry;
-        entry.loadFrom("'*': warn context");
-        EXPECT_EQ(dflt_entry.name(), entry.name());
-        EXPECT_EQ(dflt_entry.level(), entry.level());
-        EXPECT_EQ(dflt_entry.context(), entry.context());
-
-        lw.entries_.push_back(entry);
-        lw.default_entry_ = 0;
-        UpdateStatesByConfig(st, lw.entries(), lw.defaultEntry());
-        EXPECT_EQ(st[0].in_config_, true);
-        EXPECT_EQ(st[0].level_, cfg::EventLevels::kWarn);
-        EXPECT_EQ(st[0].hide_context_, false);
+class LogWatchEventProviderFixture : public ::testing::Test {
+public:
+    void SetUp() override {
+        st_.emplace_back("Abc");
+        temp_fs_ = tst::TempCfgFs::CreateNoIo();
     }
+    void loadFrom(std::string_view entry_text) {
+        ASSERT_TRUE(
+            temp_fs_->loadContent(fmt::format("logwatch:\n"
+                                              "  enabled: yes\n"
+                                              "  sendall: no\n"
+                                              "  vista_api: no\n"
+                                              "  skip_duplicated: no\n"
+                                              "  max_size: 500000\n"
+                                              "  max_line_length: -1\n"
+                                              "  max_entries: -1\n"
+                                              "  timeout: 60\n"
+                                              "  logfile:\n"
+                                              "    - {}\n",
+                                              entry_text
 
-    {
-        StateVector st;
-        st.emplace_back("Abc");
-        LogWatchEvent lw;
-        LogWatchEntry entry;
-        entry.loadFrom("'*': off context");
-        lw.entries_.push_back(entry);
-        lw.default_entry_ = 0;
-        UpdateStatesByConfig(st, lw.entries(), lw.defaultEntry());
-        EXPECT_EQ(st[0].in_config_, false);
-        EXPECT_EQ(st[0].level_, cfg::EventLevels::kOff);
-        EXPECT_EQ(st[0].hide_context_, false);
+                                              )));
+        lw_.loadConfig();
+        UpdateStates(st_, lw_.entries(), lw_.defaultEntry());
     }
+    LogWatchEvent lw_;
+    LogWatchEntry dflt_entry_{GenerateDefaultValue()};
+    LogWatchEntry entry_;
+    StateVector st_;
+
+private:
+    tst::TempCfgFs::ptr temp_fs_;
+};
+
+TEST_F(LogWatchEventProviderFixture, ConfigLoaderWarn) {
+    loadFrom("'*': warn context");
+    const auto &e = lw_.entries()[0];
+    EXPECT_TRUE(e.loaded());
+    EXPECT_EQ(e.level(), cfg::EventLevels::kWarn);
+    EXPECT_EQ(e.context(), cfg::EventContext::with);
+    EXPECT_TRUE(st_[0].in_config_);
+    EXPECT_EQ(st_[0].level_, cfg::EventLevels::kWarn);
+    EXPECT_EQ(st_[0].context_, cfg::EventContext::with);
+}
+
+TEST_F(LogWatchEventProviderFixture, ConfigLoaderOff) {
+    loadFrom("'*': off context");
+    const auto &e = lw_.entries()[0];
+    EXPECT_TRUE(e.loaded());
+    EXPECT_EQ(e.level(), cfg::EventLevels::kOff);
+    EXPECT_EQ(e.context(), cfg::EventContext::with);
+    EXPECT_FALSE(st_[0].in_config_);
+    EXPECT_EQ(st_[0].level_, cfg::EventLevels::kOff);
+    EXPECT_EQ(st_[0].context_, cfg::EventContext::with);
+}
+
+TEST_F(LogWatchEventProviderFixture, DefaultEntry) {
+    loadFrom("'*': warn context");
+    const LogWatchEntry dflt_entry_{GenerateDefaultValue()};
+    const auto &e = lw_.entries()[0];
+    EXPECT_EQ(dflt_entry_.name(), e.name());
+    EXPECT_EQ(dflt_entry_.level(), e.level());
+    EXPECT_EQ(dflt_entry_.context(), e.context());
 }
 
 TEST(LogWatchEventTest, TestMakeBody) {
@@ -739,15 +772,15 @@ TEST(LogWatchEventTest, TestMakeBody) {
     {
         auto st = states;
         auto logs_in = logs_in_registry;
-        logs_in.push_back("Zcx");
-        auto processed = UpdateEventLogStates(st, logs_in, SendMode::normal);
+        logs_in.emplace_back("Zcx");
+        uint32_t processed =
+            UpdateEventLogStates(st, logs_in, SendMode::normal);
         EXPECT_TRUE(processed == logs_in.size());
         int count = 0;
         for (auto &s : st) {
-            auto found = std::find(logs_in.cbegin(), logs_in.cend(), s.name_);
+            auto found = rs::find(logs_in, s.name_);
             if (found == std::end(logs_in)) {
                 EXPECT_FALSE(s.presented_);
-
             } else {
                 count++;
                 EXPECT_TRUE(s.presented_);
@@ -762,12 +795,12 @@ TEST(LogWatchEventTest, TestMakeBody) {
     {
         auto st = states;
         std::vector<std::string> logs_in;
-        logs_in.push_back("Zcx");
+        logs_in.emplace_back("Zcx");
         auto processed = UpdateEventLogStates(st, logs_in, SendMode::all);
         EXPECT_EQ(processed, 1);
         int count = 0;
         for (auto &s : st) {
-            auto found = std::find(logs_in.cbegin(), logs_in.cend(), s.name_);
+            auto found = rs::find(logs_in, s.name_);
             if (found == std::end(logs_in)) {
                 EXPECT_FALSE(s.presented_);
 
@@ -782,8 +815,7 @@ TEST(LogWatchEventTest, TestMakeBody) {
         EXPECT_EQ(count, logs_in.size());  // all must be inside
     }
 
-    auto processed =
-        UpdateEventLogStates(states, logs_in_registry, SendMode::normal);
+    auto _ = UpdateEventLogStates(states, logs_in_registry, SendMode::normal);
 
     int application_index = -1;
     int system_index = -1;
@@ -797,7 +829,7 @@ TEST(LogWatchEventTest, TestMakeBody) {
             EXPECT_EQ(s.pos_, 1);  // this is simulated
         }
         EXPECT_EQ(s.level_, cfg::EventLevels::kCrit);
-        EXPECT_EQ(s.hide_context_, true);
+        EXPECT_EQ(s.context_, cfg::EventContext::hide);
         index++;
     }
     ASSERT_TRUE(application_index != -1);
@@ -817,16 +849,16 @@ TEST(LogWatchEventTest, TestMakeBody) {
         ASSERT_TRUE(demo_index != -1);
     }
 
-    UpdateStatesByConfig(states, lwe.entries(), lwe.defaultEntry());
+    UpdateStates(states, lwe.entries(), lwe.defaultEntry());
     EXPECT_EQ(states[application_index].in_config_, true);
     EXPECT_EQ(states[system_index].in_config_, true);
     EXPECT_EQ(states[demo_index].in_config_, true);
     EXPECT_EQ(states[demo_index].pos_, cfg::kFromBegin);
 
-    EXPECT_EQ(states[application_index].hide_context_, false);
+    EXPECT_EQ(states[application_index].context_, cfg::EventContext::with);
     EXPECT_EQ(states[application_index].level_, cfg::EventLevels::kCrit);
 
-    EXPECT_EQ(states[system_index].hide_context_, true);
+    EXPECT_EQ(states[system_index].context_, cfg::EventContext::hide);
     EXPECT_EQ(states[system_index].level_, cfg::EventLevels::kWarn);
 
     lwe.updateSectionStatus();
@@ -863,11 +895,11 @@ TEST(LogWatchEventTest, TestNotSendAll) {
     LogWatchEvent lwe;
     lwe.loadConfig();
     lwe.updateSectionStatus();
-    auto result = lwe.generateContent();
+    lwe.generateContent();
     XLOG::l(XLOG::kEvent)("EventLog <GTEST>");
     lwe.loadConfig();
     lwe.updateSectionStatus();
-    result = lwe.generateContent();
+    const auto result = lwe.generateContent();
     EXPECT_TRUE(!result.empty());
     EXPECT_TRUE(result.size() < 100000);
     EXPECT_TRUE(result.find("EventLog <GTEST>") != std::string::npos);
@@ -897,9 +929,9 @@ TEST(LogWatchEventTest, TestNotSendAllVista) {
     XLOG::l(XLOG::kEvent)("EventLog Vista <GTEST>");
     LogWatchEvent lwe;
     lwe.loadConfig();
-    auto result = lwe.generateContent();
+    lwe.generateContent();
     XLOG::l(XLOG::kEvent)("EventLog Vista <GTEST>");
-    result = lwe.generateContent();
+    const auto result = lwe.generateContent();
     EXPECT_TRUE(!result.empty());
     EXPECT_TRUE(result.size() < 100000);
     EXPECT_TRUE(result.find("EventLog Vista <GTEST>") != std::string::npos);

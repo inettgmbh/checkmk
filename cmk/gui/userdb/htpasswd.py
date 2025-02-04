@@ -1,74 +1,26 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from pathlib import Path
-from typing import Optional
-
-# TODO: Import errors from passlib are suppressed right now since now
-# stub files for mypy are not available.
-from passlib.context import CryptContext  # type: ignore[import]
-from passlib.hash import bcrypt  # type: ignore[import]
 
 import cmk.utils.paths
-import cmk.utils.store as store
-from cmk.utils.type_defs import UserId
+from cmk.utils.user import UserId
 
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.plugins.userdb.utils import (
+from cmk.gui.type_defs import UserSpec
+from cmk.gui.userdb import (
     CheckCredentialsResult,
-    user_connector_registry,
+    ConnectorType,
+    HtpasswdUserConnectionConfig,
     UserConnector,
 )
-from cmk.gui.type_defs import UserSpec
+from cmk.gui.utils.htpasswd import Htpasswd
 
-crypt_context = CryptContext(
-    schemes=[
-        "bcrypt",
-        # Kept for compatibility with Checkmk < 2.1
-        "sha256_crypt",
-        # Kept for compatibility with Checkmk < 1.6
-        # htpasswd has still md5 as default, also the docs include the "-m" param
-        "md5_crypt",
-        "apr_md5_crypt",
-        "des_crypt",
-    ]
-)
-
-
-class Htpasswd:
-    """Thin wrapper for loading and saving the htpasswd file"""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__()
-        self._path = path
-
-    def load(self) -> dict[UserId, str]:
-        """Loads the contents of a valid htpasswd file into a dictionary and returns the dictionary"""
-        entries = {}
-
-        with self._path.open(encoding="utf-8") as f:
-            for l in f:
-                if ":" not in l:
-                    continue
-
-                user_id, pw_hash = l.split(":", 1)
-                entries[UserId(user_id)] = pw_hash.rstrip("\n")
-
-        return entries
-
-    def exists(self, user_id: str) -> bool:
-        """Whether or not a user exists according to the htpasswd file"""
-        return user_id in self.load()
-
-    def save(self, entries: dict[UserId, str]) -> None:
-        """Save the dictionary entries (unicode username and hash) to the htpasswd file"""
-        output = (
-            "\n".join(f"{username}:{hash_}" for username, hash_ in sorted(entries.items())) + "\n"
-        )
-        store.save_text_to_file("%s" % self._path, output)
+from cmk.crypto import password_hashing
+from cmk.crypto.password import Password
 
 
 # Checkmk supports different authentication frontends for verifying the
@@ -84,42 +36,43 @@ class Htpasswd:
 #
 # See:
 # - https://httpd.apache.org/docs/2.4/misc/password_encryptions.html
-# - https://passlib.readthedocs.io/en/stable/lib/passlib.apache.html
 #
-# NOTE: The time for hashing is *exponential* in the number of rounds, so this
-# can get *very* slow! On a laptop with a i9-9880H CPU, the runtime is roughly
-# 43 microseconds * 2**rounds, so for 12 rounds this takes about 0.176s.
-# Nevertheless, the rounds a.k.a. workfactor should be more than 10 for security
-# reasons. It defaults to 12, but let's be explicit.
-def hash_password(password: str, *, rounds: Optional[int] = None) -> str:
-    return bcrypt.using(rounds=12 if rounds is None else rounds).hash(password)
+def hash_password(password: Password) -> password_hashing.PasswordHash:
+    """Hash a password
 
-
-# NOTE: The same warning regarding runtime is applicable here, the runtime for
-# verification is roughly the same as for the hashing above.
-def check_password(password: str, pwhash: str) -> bool:
+    Invalid inputs raise MKUserError.
+    """
     try:
-        return crypt_context.verify(password, pwhash)
+        return password_hashing.hash_password(password)
+
+    except password_hashing.PasswordTooLongError:
+        raise MKUserError(
+            None, "Passwords over 72 bytes would be truncated and are therefore not allowed!"
+        )
     except ValueError:
-        # ValueError("hash could not be identified")
-        # Is raised in case of locked users because we prefix the hashes with
-        # a "!" sign in this situation.
-        return False
+        raise MKUserError(None, "Password could not be hashed.")
 
 
-@user_connector_registry.register
-class HtpasswdUserConnector(UserConnector):
+class HtpasswdUserConnector(UserConnector[HtpasswdUserConnectionConfig]):
     @classmethod
     def type(cls) -> str:
+        return ConnectorType.HTPASSWD
+
+    @property
+    def id(self) -> str:
         return "htpasswd"
 
     @classmethod
     def title(cls) -> str:
-        return _("Apache Local Password File (htpasswd)")
+        return _("Apache local password file (htpasswd)")
 
     @classmethod
     def short_title(cls) -> str:
         return _("htpasswd")
+
+    def __init__(self, cfg: HtpasswdUserConnectionConfig) -> None:
+        super().__init__(cfg)
+        self._htpasswd = Htpasswd(Path(cmk.utils.paths.htpasswd_file))
 
     #
     # USERDB API METHODS
@@ -128,30 +81,24 @@ class HtpasswdUserConnector(UserConnector):
     def is_enabled(self) -> bool:
         return True
 
-    def check_credentials(self, user_id: UserId, password: str) -> CheckCredentialsResult:
-        users = self._get_htpasswd().load()
-        if user_id not in users:
-            return None  # not existing user, skip over
+    def check_credentials(self, user_id: UserId, password: Password) -> CheckCredentialsResult:
+        if not (pw_hash := self._htpasswd.get_hash(user_id)):
+            return None  # not user in htpasswd, skip so other connectors can try
 
-        if self._is_automation_user(user_id):
-            raise MKUserError(None, _("Automation user rejected"))
+        if pw_hash.startswith("!"):
+            raise MKUserError(None, _("User is locked"))
 
-        if self._password_valid(users[user_id], password):
-            return user_id
-        return False
-
-    # ? the exact type of user_id is unclear, str, maybe, based on the line "if user_id not in users" ?
-    def _is_automation_user(self, user_id: UserId) -> bool:
-        return Path(cmk.utils.paths.var_dir, "web", str(user_id), "automation.secret").is_file()
-
-    def _password_valid(self, pwhash: str, password: str) -> bool:
-        return check_password(password, pwhash)
+        try:
+            password_hashing.verify(password, pw_hash)
+        except (password_hashing.PasswordInvalidError, ValueError):
+            return False
+        return user_id
 
     def save_users(self, users: dict[UserId, UserSpec]) -> None:
         # Apache htpasswd. We only store passwords here. During
         # loading we created entries for all admin users we know. Other
         # users from htpasswd are lost. If you start managing users with
-        # WATO, you should continue to do so or stop doing to for ever...
+        # Setup, you should continue to do so or stop doing to for ever...
         # Locked accounts get a '!' before their password. This disable it.
         entries = {}
 
@@ -161,9 +108,8 @@ class HtpasswdUserConnector(UserConnector):
                 continue
 
             if user.get("password"):
-                entries[uid] = "%s%s" % ("!" if user.get("locked", False) else "", user["password"])
+                entries[uid] = password_hashing.PasswordHash(
+                    "{}{}".format("!" if user["locked"] else "", user["password"])
+                )
 
-        self._get_htpasswd().save(entries)
-
-    def _get_htpasswd(self) -> Htpasswd:
-        return Htpasswd(Path(cmk.utils.paths.htpasswd_file))
+        self._htpasswd.save_all(entries)

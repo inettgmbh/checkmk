@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -10,11 +10,11 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import TextInput, Transform
+from cmk.gui.valuespec import Migrate, TextInput
 
 
-def _transform_valuespec_sansymphony_pool(params):
-    """Transform to Checkmk version 2.2"""
+def _migrate_valuespec_sansymphony_pool(params):
+    """Migrate to Checkmk version 2.2"""
     if isinstance(params, tuple):
         return {
             "levels": (float(params[0]), float(params[1])),
@@ -23,14 +23,14 @@ def _transform_valuespec_sansymphony_pool(params):
 
 
 def _parameter_valuespec_sansymphony_pool():
-    return Transform(
+    return Migrate(
         valuespec=vs_filesystem(
             elements=[
                 FilesystemElements.levels_percent,
                 FilesystemElements.magic_factor,
             ]
         ),
-        forth=_transform_valuespec_sansymphony_pool,
+        migrate=_migrate_valuespec_sansymphony_pool,
     )
 
 

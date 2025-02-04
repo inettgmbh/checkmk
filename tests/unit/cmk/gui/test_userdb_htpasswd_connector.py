@@ -1,90 +1,107 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import warnings
 from pathlib import Path
 
 import pytest
-from _pytest.monkeypatch import MonkeyPatch
-from passlib.hash import bcrypt  # type: ignore[import]
+from pytest import MonkeyPatch
 
-from cmk.utils.type_defs import UserId
+from cmk.utils.user import UserId
 
-from cmk.gui.userdb import htpasswd
+from cmk.gui.exceptions import MKUserError
+from cmk.gui.userdb import CheckCredentialsResult, htpasswd
+
+from cmk.crypto import password_hashing
+from cmk.crypto.password import Password
 
 
-@pytest.fixture(name="htpasswd_file")
-def htpasswd_file_fixture(tmp_path: Path) -> Path:
+@pytest.fixture(name="htpasswd_file", autouse=True)
+def htpasswd_file_fixture(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     htpasswd_file_path = tmp_path / "htpasswd"
-    htpasswd_file_path.write_text(
-        "\n".join(
-            sorted(
-                [
-                    # Pre 1.6 hashing formats (see cmk.gui.userdb.htpasswd for more details)
-                    "bärnd:$apr1$/FU.SwEZ$Ye0XG1Huf2j7Jws7KD.h2/",
-                    "cmkadmin:NEr3kqi287FQc",
-                    "harry:$1$478020$ldQUQ3RIwRYk5wjKfsWPD.",
-                    # A disabled user
-                    "locked:!NEr3kqi287FQc",
-                    # A >= 1.6 sha256 hashed password
-                    "sha256user:$5$rounds=535000$5IFtH0zYpQ6STBre$Nkem2taHfBFswWj3xERRpmEI.20G5is0VBcPpUuf3J2",
-                    # A >= 2.1 bcrypt hashed password
-                    "bcrypt_user:$2b$12$3xoc9iu.EiyGVVPlDMC21esAiZqef9e6sogmM4UCi4s8qSvmvJWVC",
-                ]
-            )
-        )
-        + "\n",
-        encoding="utf-8",
+    # HtpasswdUserConnector will use this path:
+    monkeypatch.setattr("cmk.utils.paths.htpasswd_file", htpasswd_file_path)
+
+    hashes = [
+        # all hashes below belong to the password "cmk"
+        "$cmk@dmin$:$2y$04$XZECL0BqDf8Er3iygLfRBO7wwg8igYcI4K49Jtn8AnJMJaP2Lx/ki",
+        "bärnd:$2y$04$71x8EVHr7c8FP8HJ/PWN7uM27SC0Z89waQCaiYovaiSAslb1sh2sO",
+        "locked_bärnd:!$2y$04$71x8EVHr7c8FP8HJ/PWN7uM27SC0Z89waQCaiYovaiSAslb1sh2sO",
+        # sha256_crypt hashes (of "cmk"), which are no longer supported
+        "legacy_hash:$5$kNFothH2RmxLOgvZ$zYYzORO.TxsYwbWvdXdQURuNlO2yFBmEZaRk2QxT1dC",
+        "locked_legacy_hash:!$5$kNFothH2RmxLOgvZ$zYYzORO.TxsYwbWvdXdQURuNlO2yFBmEZaRk2QxT1dC",
+    ]
+
+    htpasswd_file_path.write_text("\n".join(sorted(hashes)) + "\n", encoding="utf-8")
+
+    return htpasswd_file_path
+
+
+@pytest.mark.parametrize("password", ["blä", "😀", "😀" * 18, "a" * 71])
+def test_hash_password(password: str) -> None:
+    hashed_pw = htpasswd.hash_password(Password(password))
+    password_hashing.verify(Password(password), hashed_pw)
+
+
+def test_truncation_error() -> None:
+    """Bcrypt doesn't allow passwords longer than 72 bytes"""
+
+    with pytest.raises(MKUserError):
+        htpasswd.hash_password(Password("A" * 72 + "foo"))
+
+    with pytest.raises(MKUserError):
+        htpasswd.hash_password(Password("😀" * 19))
+
+
+@pytest.mark.parametrize(
+    # uids/passwords correspond to users from the htpasswd_file_fixture
+    "uid,password,expect",
+    [
+        # valid
+        (UserId("$cmk@dmin$"), Password("cmk"), UserId("$cmk@dmin$")),
+        (UserId("bärnd"), Password("cmk"), UserId("bärnd")),
+        # wrong password
+        (UserId("bärnd"), Password("foo"), False),
+        # unsupported hash
+        (UserId("legacy_hash"), Password("cmk"), False),
+        # user not in htpasswd (potentially other connector)
+        (UserId("unknown"), Password("cmk"), None),
+        # check that PWs too long for bcrypt are handled gracefully and don't raise
+        (UserId("bärnd"), Password("A" * 100), False),
+    ],
+)
+def test_user_connector_verify_password(
+    uid: UserId, password: Password, expect: CheckCredentialsResult
+) -> None:
+    assert (
+        htpasswd.HtpasswdUserConnector(
+            {
+                "type": "htpasswd",
+                "id": "htpasswd",
+                "disabled": False,
+            }
+        ).check_credentials(uid, password)
+        == expect
     )
-    return Path(htpasswd_file_path)
 
 
-def test_htpasswd_exists(htpasswd_file: Path) -> None:
-    assert htpasswd.Htpasswd(htpasswd_file).exists("cmkadmin")
-    assert htpasswd.Htpasswd(htpasswd_file).exists("locked")
-    assert not htpasswd.Htpasswd(htpasswd_file).exists("not-existing")
-    assert not htpasswd.Htpasswd(htpasswd_file).exists("")
-    assert htpasswd.Htpasswd(htpasswd_file).exists("bärnd")
-
-
-def test_htpasswd_load(htpasswd_file: Path) -> None:
-    credentials = htpasswd.Htpasswd(htpasswd_file).load()
-    assert credentials[UserId("cmkadmin")] == "NEr3kqi287FQc"
-    assert isinstance(credentials[UserId("cmkadmin")], str)
-    assert credentials[UserId("bärnd")] == "$apr1$/FU.SwEZ$Ye0XG1Huf2j7Jws7KD.h2/"
-
-
-def test_htpasswd_save(htpasswd_file: Path) -> None:
-    credentials = htpasswd.Htpasswd(htpasswd_file).load()
-
-    saved_file = htpasswd_file.with_suffix(".saved")
-    htpasswd.Htpasswd(saved_file).save(credentials)
-
-    assert htpasswd_file.open(encoding="utf-8").read() == saved_file.open(encoding="utf-8").read()
-
-
-def test_hash_password() -> None:
-    # Suppress this warning from passlib code. We can not do anything about this and it clutters our
-    # unit test log
-    # tests/unit/cmk/gui/test_userdb_htpasswd_connector.py::test_hash_password
-    # (...)/handlers/bcrypt.py:378: DeprecationWarning: NotImplemented should not be used in a boolean context
-    # if not result:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        hashed_pw = htpasswd.hash_password("blä")
-    assert bcrypt.verify("blä", hashed_pw)
-
-
-def test_user_connector_verify_password(htpasswd_file: Path, monkeypatch: MonkeyPatch) -> None:
-    c = htpasswd.HtpasswdUserConnector({})
-    monkeypatch.setattr(c, "_get_htpasswd", lambda: htpasswd.Htpasswd(htpasswd_file))
-
-    assert c.check_credentials(UserId("cmkadmin"), "cmk") == "cmkadmin"
-    assert c.check_credentials(UserId("bärnd"), "cmk") == "bärnd"
-    assert c.check_credentials(UserId("sha256user"), "cmk") == "sha256user"
-    assert c.check_credentials(UserId("harry"), "cmk") == "harry"
-    assert c.check_credentials(UserId("bcrypt_user"), "cmk") == "bcrypt_user"
-    assert c.check_credentials(UserId("dingeling"), "aaa") is None
-    assert c.check_credentials(UserId("locked"), "locked") is False
+@pytest.mark.parametrize(
+    "uid,password",
+    [
+        (UserId("locked_bärnd"), Password("cmk")),
+        (UserId("locked_legacy_hash"), Password("cmk")),
+    ],
+)
+def test_user_connector_verify_password_locked_users(
+    uid: UserId,
+    password: Password,
+) -> None:
+    with pytest.raises(MKUserError, match="User is locked"):
+        htpasswd.HtpasswdUserConnector(
+            {
+                "type": "htpasswd",
+                "id": "htpasswd",
+                "disabled": False,
+            }
+        ).check_credentials(uid, password)

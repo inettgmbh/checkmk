@@ -1,97 +1,151 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import traceback
 
-from tests.testlib import compare_html
+import pytest
+from werkzeug.test import create_environ
+
+from tests.unit.cmk.gui.compare_html import compare_html
 
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.html import html
+from cmk.gui.http import Request
 from cmk.gui.logged_in import LoggedInUser, user
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.output_funnel import output_funnel
+from cmk.gui.utils.urls import makeuri_contextless
 from cmk.gui.utils.user_errors import user_errors
 
 
-def test_render_help_empty(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_render_help_empty() -> None:
     assert html.have_help is False
-    assert html.render_help(None) == HTML("")
+    assert html.render_help(None) == HTML.empty()
     assert isinstance(html.render_help(None), HTML)
     assert html.have_help is False
 
-    assert html.render_help("") == HTML("")
+    assert html.render_help("") == HTML.empty()
     assert isinstance(html.render_help(""), HTML)
-    assert html.render_help("    ") == HTML("")
+    assert html.render_help("    ") == HTML.empty()
     assert isinstance(html.render_help("    "), HTML)
 
 
-def test_render_help_html(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_html_form_context():
+    with html.output_funnel.plugged():
+        with html.form_context("foo", method="POST"):
+            html.upload_file("bar")
+        output = html.output_funnel.drain()
+
+    assert output.startswith(
+        """
+<form id="form_foo" name="foo" action="index.py" method="POST" enctype="multipart/form-data" class="foo">
+        """.strip()
+    )
+    # Skipping comparing CSRF token fields
+    assert output.endswith(
+        """<input type="file" name="bar" /><input type="submit" name="_save" class="hidden_submit" /></form>"""
+    )
+
+
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_render_help_html() -> None:
     assert html.have_help is False
     assert compare_html(
-        html.render_help(HTML("<abc>")), HTML('<div style="display:none" class="help"><abc></div>')
+        html.render_help(HTML.without_escaping("<abc>")),
+        HTML.without_escaping(
+            '<div style="display:none;" class="help"><div class="info_icon"><img '
+            'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+            'class="help_text"><abc></div></div>'
+        ),
     )
     assert html.have_help is True
 
 
-def test_render_help_text(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_render_help_text() -> None:
     assert compare_html(
-        html.render_help("äbc"), HTML('<div style="display:none" class="help">äbc</div>')
+        html.render_help("äbc"),
+        HTML.without_escaping(
+            '<div style="display:none;" class="help"><div class="info_icon"><img '
+            'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+            'class="help_text">äbc</div></div>'
+        ),
     )
 
 
-def test_render_help_visible(request_context, monkeypatch) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_render_help_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(LoggedInUser, "show_help", property(lambda s: True))
     assert user.show_help is True
     assert compare_html(
-        html.render_help("äbc"), HTML('<div style="display:block" class="help">äbc</div>')
-    )
-
-
-def test_add_manual_link(request_context) -> None:  # type:ignore[no-untyped-def]
-    assert user.language is None
-    assert compare_html(
-        html.render_help("[intro_welcome|Welcome]"),
-        HTML(
-            '<div style="display:none" class="help"><a href="https://docs.checkmk.com/master/en/intro_welcome.html" target="_blank">Welcome</a></div>'
+        html.render_help("äbc"),
+        HTML.without_escaping(
+            '<div style="display:flex;" class="help"><div class="info_icon"><img '
+            'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+            'class="help_text">äbc</div></div>'
         ),
     )
 
 
-def test_add_manual_link_localized(  # type:ignore[no-untyped-def]
-    request_context, monkeypatch
-) -> None:
-    monkeypatch.setattr(user, "language", lambda: "de")
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_add_manual_link() -> None:
+    assert user.language == "en"
     assert compare_html(
-        html.render_help("[intro_welcome|Welcome]"),
-        HTML(
-            '<div style="display:none" class="help"><a href="https://docs.checkmk.com/master/de/intro_welcome.html" target="_blank">Welcome</a></div>'
+        html.render_help("[welcome|Welcome]"),
+        HTML.without_escaping(
+            '<div style="display:none;" class="help"><div class="info_icon"><img '
+            'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+            'class="help_text"><a href="https://docs.checkmk.com/master/en/welcome.html" '
+            'target="_blank">Welcome</a></div></div>'
         ),
     )
 
 
-def test_add_manual_link_anchor(  # type:ignore[no-untyped-def]
-    request_context, monkeypatch
-) -> None:
-    monkeypatch.setattr(user, "language", lambda: "de")
-    assert compare_html(
-        html.render_help("[graphing#rrds|RRDs]"),
-        HTML(
-            '<div style="display:none" class="help"><a href="https://docs.checkmk.de/master/de/graphing.html#rrds" target="_blank">RRDs</a></div>'
-        ),
-    )
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_add_manual_link_localized(monkeypatch: pytest.MonkeyPatch) -> None:
+    with monkeypatch.context() as m:
+        m.setattr(user, "language", lambda: "de")
+        assert compare_html(
+            html.render_help("[welcome|Welcome]"),
+            HTML.without_escaping(
+                '<div style="display:none;" class="help"><div class="info_icon"><img '
+                'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+                'class="help_text"><a href="https://docs.checkmk.com/master/de/welcome.html" '
+                'target="_blank">Welcome</a></div></div>'
+            ),
+        )
 
 
-def test_user_error(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_add_manual_link_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    with monkeypatch.context() as m:
+        m.setattr(user, "language", lambda: "de")
+        assert compare_html(
+            html.render_help("[graphing#rrds|RRDs]"),
+            HTML.without_escaping(
+                '<div style="display:none;" class="help"><div class="info_icon"><img '
+                'src="themes/facelift/images/icon_info.svg" class="icon"></div><div '
+                'class="help_text"><a href="https://docs.checkmk.com/master/de/graphing.html#rrds" '
+                'target="_blank">RRDs</a></div></div>'
+            ),
+        )
+
+
+@pytest.mark.usefixtures("request_context")
+def test_user_error() -> None:
     with output_funnel.plugged():
         html.user_error(MKUserError(None, "asd <script>alert(1)</script> <br> <b>"))
         c = output_funnel.drain()
     assert c == '<div class="error">asd &lt;script&gt;alert(1)&lt;/script&gt; <br> <b></div>'
 
 
-def test_show_user_errors(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_show_user_errors() -> None:
     assert not user_errors
     user_errors.add(MKUserError(None, "asd <script>alert(1)</script> <br> <b>"))
     assert user_errors
@@ -102,9 +156,9 @@ def test_show_user_errors(request_context) -> None:  # type:ignore[no-untyped-de
     assert c == '<div class="error">asd &lt;script&gt;alert(1)&lt;/script&gt; <br> <b></div>'
 
 
-def test_HTMLWriter(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_HTMLWriter() -> None:
     with output_funnel.plugged():
-
         with output_funnel.plugged():
             html.open_div()
             text = output_funnel.drain()
@@ -113,7 +167,7 @@ def test_HTMLWriter(request_context) -> None:  # type:ignore[no-untyped-def]
         with output_funnel.plugged():
             # html.open_div().write("test").close_div()
             html.open_div()
-            html.write_text("test")
+            html.write_text_permissive("test")
             html.close_div()
             assert compare_html(output_funnel.drain(), "<div>test</div>")
 
@@ -145,30 +199,32 @@ def test_HTMLWriter(request_context) -> None:  # type:ignore[no-untyped-def]
             try:
                 assert HTMLWriter.render_a(
                     "test",
-                    href=str("www.test.case"),
-                    id_=str("something"),
-                    class_=str("test_%s") % a,
+                    href="www.test.case",
+                    id_="something",
+                    class_="test_%s" % a,
                 )
-            except Exception as e:
+            except Exception:
                 traceback.print_exc()
-                print(e)
 
 
-def test_multiclass_call(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_multiclass_call() -> None:
     with output_funnel.plugged():
         html.div("", class_="1", css="3", cssclass="4", **{"class": "2"})
         written_text = "".join(output_funnel.drain())
     assert compare_html(written_text, '<div class="1 3 4 2"></div>')
 
 
-def test_exception_handling(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_exception_handling() -> None:
     try:
         raise Exception("Test")
     except Exception as e:
         assert compare_html(HTMLWriter.render_div(str(e)), "<div>%s</div>" % e)
 
 
-def test_text_input(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_text_input() -> None:
     with output_funnel.plugged():
         html.text_input("tralala")
         written_text = "".join(output_funnel.drain())
@@ -192,14 +248,15 @@ def test_text_input(request_context) -> None:  # type:ignore[no-untyped-def]
         )
 
     with output_funnel.plugged():
-        html.text_input("blabla", placeholder="placido", data_world="welt", data_max_labels=42)
+        html.text_input("blabla", placeholder="placido", data_attrs={"data-foo": "42"})
         written_text = "".join(output_funnel.drain())
         assert compare_html(
             written_text, '<input style="" name="tralala" type="text" class="text" value=\'\' />'
         )
 
 
-def test_render_a(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_render_a() -> None:
     a = HTMLWriter.render_a("bla", href="blu", class_=["eee"], target="_blank")
     assert compare_html(a, '<a href="blu" target="_blank" class="eee">bla</a>')
 
@@ -214,3 +271,20 @@ def test_render_a(request_context) -> None:  # type:ignore[no-untyped-def]
         '<a href="b&lt;script&gt;alert(1)&lt;/script&gt;lu" target="_blank" '
         'class="eee">b&lt;script&gt;alert(1)&lt;/script&gt;la</a>',
     )
+
+
+def test_render_a_href_must_be_first_attribute_when_rendered() -> None:
+    a = HTMLWriter.render_a("link", target="_blank", href="wato.py")
+    assert str(a) == '<a href="wato.py" target="_blank">link</a>'
+
+
+def test_render_a_with_query_params() -> None:
+    a = HTMLWriter.render_a("link", href="wato.py?bar=val&foo=val")
+    assert str(a) == '<a href="wato.py?bar=val&foo=val">link</a>'
+
+
+def test_render_a_with_makeuri_contextless() -> None:
+    request = Request(create_environ())
+    uri = makeuri_contextless(request, [("foo", "val"), ("bar", "val")], filename="wato.py")
+    a = HTMLWriter.render_a("link", href=uri)
+    assert str(a) == '<a href="wato.py?bar=val&foo=val">link</a>'

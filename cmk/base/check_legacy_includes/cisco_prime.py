@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Cisco Prime API response parser
@@ -7,9 +7,12 @@ see https://solutionpartner.cisco.com/media/prime-infrastructure-api-reference-v
 """
 
 import json
+from collections.abc import Mapping
+
+from cmk.agent_based.v2 import StringTable
 
 
-def parse_cisco_prime(key, info):
+def parse_cisco_prime(key: str, info: StringTable) -> Mapping[str, Mapping[str, object]]:
     """Parse JSON and return queryResponse/entity entry (a list of dicts)
     The JSON outputs of agent_cisco_prime provides the following structure:
 

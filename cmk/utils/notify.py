@@ -1,159 +1,50 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import dataclasses
+import logging
 import os
 import subprocess
-import uuid
+from collections.abc import Mapping
 from logging import Logger
 from pathlib import Path
-from typing import Literal, NewType, Optional, TypedDict, Union
 
-import cmk.utils.defines
-from cmk.utils import store
-from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.i18n import _
+from cmk.ccc.exceptions import MKGeneralException
+from cmk.ccc.i18n import _
+from cmk.ccc.store import load_object_from_file, save_object_to_file
 
-# NOTE: Keep in sync with values in MonitoringLog.cc.
-MAX_COMMENT_LENGTH = 2000
-MAX_PLUGIN_OUTPUT_LENGTH = 1000
+from cmk.utils.config_path import VersionedConfigPath
+from cmk.utils.hostaddress import HostName
+from cmk.utils.labels import Labels
+from cmk.utils.notify_types import NotificationContext as NotificationContext
+from cmk.utils.paths import core_helper_config_dir
+from cmk.utils.servicename import ServiceName
+from cmk.utils.tags import TagGroupID, TagID
 
-# 0 -> OK
-# 1 -> temporary issue
-# 2 -> permanent issue
-NotificationResultCode = NewType("NotificationResultCode", int)
-NotificationPluginName = NewType("NotificationPluginName", str)
-# This is the origin raw notification context as produced by the monitoring core before it is being
-# processed by the the rule based notfication logic which may create multiple specific notification
-# contexts out of the raw notification context and the matching notification rule.
-# TODO: Consolidate with cmk.base.events.EventContext
-RawNotificationContext = NewType("RawNotificationContext", dict[str, str])
-# TODO: Consolidate with cmk.base.notify.PluginContext
-NotificationContext = NewType("NotificationContext", dict[str, str])
+logger = logging.getLogger("cmk.utils.notify")
 
 
-class NotificationResult(TypedDict, total=False):
-    plugin: NotificationPluginName
-    status: NotificationResultCode
-    output: list[str]
-    forward: bool
-    context: NotificationContext
-
-
-class NotificationForward(TypedDict):
-    forward: Literal[True]
-    # TODO: Enable once RawNotificationContext has been consolidated with cmk.base.events.EventContext
-    # context: RawNotificationContext
-    context: dict[str, str]
-
-
-class NotificationViaPlainMail(TypedDict):
-    plugin: None
-    # TODO: Enable once NotificationContext has been consolidated with cmk.base.notify.PluginContext
-    # context: NotificationContext
-    context: dict[str, str]
-
-
-class NotificationViaPlugin(TypedDict):
-    plugin: str
-    # TODO: Enable once NotificationContext has been consolidated with cmk.base.notify.PluginContext
-    # context: NotificationContext
-    context: dict[str, str]
-
-
-def _state_for(exit_code: NotificationResultCode) -> str:
-    return cmk.utils.defines.service_state_name(exit_code, "UNKNOWN")
+@dataclasses.dataclass(frozen=True)
+class NotificationHostConfig:
+    host_labels: Labels
+    service_labels: Mapping[ServiceName, Labels]
+    tags: Mapping[TagGroupID, TagID]
 
 
 def find_wato_folder(context: NotificationContext) -> str:
-    for tag in context.get("HOSTTAGS", "").split():
-        if tag.startswith("/wato/"):
-            return tag[6:].rstrip("/")
-    return ""
-
-
-def notification_message(plugin: NotificationPluginName, context: NotificationContext) -> str:
-    contact = context["CONTACTNAME"]
-    hostname = context["HOSTNAME"]
-    service = context.get("SERVICEDESC")
-    if service:
-        what = "SERVICE NOTIFICATION"
-        spec = "%s;%s" % (hostname, service)
-        state = context["SERVICESTATE"]
-        output = context["SERVICEOUTPUT"]
-    else:
-        what = "HOST NOTIFICATION"
-        spec = hostname
-        state = context["HOSTSTATE"]
-        output = context["HOSTOUTPUT"]
-    # NOTE: There are actually 3 more additional fields, which we don't use: author, comment and long plugin output.
-    return "%s: %s;%s;%s;%s;%s" % (
-        what,
-        contact,
-        spec,
-        state,
-        plugin,
-        output[:MAX_PLUGIN_OUTPUT_LENGTH],
+    return next(
+        (
+            tag[6:].rstrip("/")
+            for tag in context.get("HOSTTAGS", "").split()
+            if tag.startswith("/wato/")
+        ),
+        "",
     )
 
 
-def notification_progress_message(
-    plugin: NotificationPluginName,
-    context: NotificationContext,
-    exit_code: NotificationResultCode,
-    output: str,
-) -> str:
-    contact = context["CONTACTNAME"]
-    hostname = context["HOSTNAME"]
-    service = context.get("SERVICEDESC")
-    if service:
-        what = "SERVICE NOTIFICATION PROGRESS"
-        spec = "%s;%s" % (hostname, service)
-    else:
-        what = "HOST NOTIFICATION PROGRESS"
-        spec = hostname
-    state = _state_for(exit_code)
-    return "%s: %s;%s;%s;%s;%s" % (
-        what,
-        contact,
-        spec,
-        state,
-        plugin,
-        output[:MAX_PLUGIN_OUTPUT_LENGTH],
-    )
-
-
-def notification_result_message(
-    plugin: NotificationPluginName,
-    context: NotificationContext,
-    exit_code: NotificationResultCode,
-    output: list[str],
-) -> str:
-    contact = context["CONTACTNAME"]
-    hostname = context["HOSTNAME"]
-    service = context.get("SERVICEDESC")
-    if service:
-        what = "SERVICE NOTIFICATION RESULT"
-        spec = "%s;%s" % (hostname, service)
-    else:
-        what = "HOST NOTIFICATION RESULT"
-        spec = hostname
-    state = _state_for(exit_code)
-    comment = " -- ".join(output)
-    short_output = output[-1] if output else ""
-    return "%s: %s;%s;%s;%s;%s;%s" % (
-        what,
-        contact,
-        spec,
-        state,
-        plugin,
-        short_output[:MAX_PLUGIN_OUTPUT_LENGTH],
-        comment[:MAX_COMMENT_LENGTH],
-    )
-
-
-def ensure_utf8(logger: Optional[Logger] = None) -> None:
+def ensure_utf8(logger_: Logger | None = None) -> None:
     # Make sure that mail(x) is using UTF-8. Otherwise we cannot send notifications
     # with non-ASCII characters. Unfortunately we do not know whether C.UTF-8 is
     # available. If e.g. mail detects a non-Ascii character in the mail body and
@@ -161,51 +52,76 @@ def ensure_utf8(logger: Optional[Logger] = None) -> None:
     # Our resultion in future: use /usr/sbin/sendmail directly.
     # Our resultion in the present: look with locale -a for an existing UTF encoding
     # and use that.
-    proc: subprocess.Popen = subprocess.Popen(  # pylint:disable=consider-using-with
+    with subprocess.Popen(
         ["locale", "-a"],
         close_fds=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-    )
-    locales_list: list[str] = []
-    std_out: bytes = proc.communicate()[0]
-    exit_code: int = proc.returncode
-    error_msg: str = _("Command 'locale -a' could not be executed. Exit code of command was")
-    not_found_msg: str = _(
-        "No UTF-8 encoding found in your locale -a! Please install appropriate locales."
-    )
-    if exit_code != 0:
-        if not logger:
-            raise MKGeneralException("%s: %r. %s" % (error_msg, exit_code, not_found_msg))
-        logger.info("%s: %r" % (error_msg, exit_code))
-        logger.info(not_found_msg)
-        return
+    ) as proc:
+        std_out = proc.communicate()[0]
+        exit_code = proc.returncode
+        error_msg = _("Command 'locale -a' could not be executed. Exit code of command was")
+        not_found_msg = _(
+            "No UTF-8 encoding found in your locale -a! Please install appropriate locales."
+        )
+        if exit_code != 0:
+            if not logger_:
+                raise MKGeneralException(f"{error_msg}: {exit_code!r}. {not_found_msg}")
+            logger_.info(f"{error_msg}: {exit_code!r}")
+            logger_.info(not_found_msg)
+            return
 
-    locales_list = std_out.decode("utf-8", "ignore").split("\n")
-    for encoding in locales_list:
-        el: str = encoding.lower()
-        if "utf8" in el or "utf-8" in el or "utf.8" in el:
-            encoding = encoding.strip()
-            os.putenv("LANG", encoding)
-            if logger:
-                logger.debug("Setting locale for mail to %s.", encoding)
-            break
-    else:
-        if not logger:
-            raise MKGeneralException(not_found_msg)
-        logger.info(not_found_msg)
-
-    return
+        locales_list = std_out.decode("utf-8", "ignore").split("\n")
+        for encoding in locales_list:
+            el: str = encoding.lower()
+            if "utf8" in el or "utf-8" in el or "utf.8" in el:
+                encoding = encoding.strip()
+                os.putenv("LANG", encoding)
+                if logger_:
+                    logger_.debug("Setting locale for mail to %s.", encoding)
+                break
+        else:
+            if not logger_:
+                raise MKGeneralException(not_found_msg)
+            logger_.info(not_found_msg)
 
 
-def create_spoolfile(
-    logger: Logger,
-    spool_dir: Path,
-    data: Union[
-        NotificationForward, NotificationResult, NotificationViaPlainMail, NotificationViaPlugin
-    ],
+def write_notify_host_file(
+    config_path: VersionedConfigPath,
+    config_per_host: Mapping[HostName, NotificationHostConfig],
 ) -> None:
-    spool_dir.mkdir(parents=True, exist_ok=True)
-    file_path = spool_dir / str(uuid.uuid4())
-    logger.info("Creating spoolfile: %s", file_path)
-    store.save_object_to_file(file_path, data, pretty=True)
+    notify_config_path: Path = _get_host_file_path(config_path)
+    for host, labels in config_per_host.items():
+        host_path = notify_config_path / host
+        save_object_to_file(
+            host_path,
+            dataclasses.asdict(
+                NotificationHostConfig(
+                    host_labels=labels.host_labels,
+                    service_labels={k: v for k, v in labels.service_labels.items() if v.values()},
+                    tags=labels.tags,
+                )
+            ),
+        )
+
+
+def read_notify_host_file(
+    host_name: HostName,
+) -> NotificationHostConfig:
+    host_file_path: Path = _get_host_file_path(host_name=host_name)
+    return NotificationHostConfig(
+        **load_object_from_file(
+            path=host_file_path,
+            default={"host_labels": {}, "service_labels": {}, "tags": {}},
+        )
+    )
+
+
+def _get_host_file_path(
+    config_path: VersionedConfigPath | None = None,
+    host_name: HostName | None = None,
+) -> Path:
+    root_path = Path(config_path) if config_path else core_helper_config_dir / Path("latest")
+    if host_name:
+        return root_path / "notify" / "host_config" / host_name
+    return root_path / "notify" / "host_config"

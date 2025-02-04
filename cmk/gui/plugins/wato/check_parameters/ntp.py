@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -12,44 +12,33 @@ from cmk.gui.plugins.wato.utils import (
     RulespecGroupCheckParametersDiscovery,
     RulespecGroupCheckParametersOperatingSystem,
 )
-from cmk.gui.valuespec import (
-    Age,
-    Dictionary,
-    DropdownChoice,
-    Float,
-    Integer,
-    TextInput,
-    Transform,
-    Tuple,
-)
+from cmk.gui.valuespec import Age, Dictionary, DropdownChoice, Float, Integer, TextInput, Tuple
 
 
-def _valuespec_ntp_rules():
-    return Transform(
-        valuespec=Dictionary(
-            title=_("NTP discovery"),
-            elements=[
-                (
-                    "mode",
-                    DropdownChoice(
-                        choices=[
-                            ("summary", "Discover a single summary service"),
-                            ("single", "Discover one service for every peer"),
-                            ("both", "Discover both of the above"),
-                            ("neither", "Discover neither of the above"),
-                        ],
-                        title=_("Single peers or summary"),
-                    ),
-                )
-            ],
-        )
+def _valuespec_ntp_rules() -> Dictionary:
+    return Dictionary(
+        title=_("NTP discovery"),
+        elements=[
+            (
+                "mode",
+                DropdownChoice(
+                    choices=[
+                        ("summary", "Discover a single summary service"),
+                        ("single", "Discover one service for every peer"),
+                        ("both", "Discover both of the above"),
+                        ("neither", "Discover neither of the above"),
+                    ],
+                    title=_("Single peers or summary"),
+                ),
+            )
+        ],
     )
 
 
 rulespec_registry.register(
     HostRulespec(
         group=RulespecGroupCheckParametersDiscovery,
-        match_type="merged",
+        match_type="dict",
         name="ntp_discovery",
         valuespec=_valuespec_ntp_rules,
     )
@@ -83,15 +72,12 @@ def _ntp_params():
     )
 
 
-def _parameter_valuespec_ntp_peer():
-    return Transform(
-        valuespec=Dictionary(
-            elements=[
-                ("ntp_levels", _ntp_params()),
-            ],
-            ignored_keys=["alert_delay"],  # be compatible to ntp_time defaults
-        ),
-        forth=_transform_forth,
+def _parameter_valuespec_ntp_peer() -> Dictionary:
+    return Dictionary(
+        elements=[
+            ("ntp_levels", _ntp_params()),
+        ],
+        ignored_keys=["alert_delay"],  # be compatible to ntp_time defaults
     )
 
 
@@ -110,42 +96,33 @@ rulespec_registry.register(
 )
 
 
-def _parameter_valuespec_ntp_time():
-    return Transform(
-        valuespec=Dictionary(
-            elements=[
-                (
-                    "ntp_levels",
-                    _ntp_params(),
+def _parameter_valuespec_ntp_time() -> Dictionary:
+    return Dictionary(
+        elements=[
+            (
+                "ntp_levels",
+                _ntp_params(),
+            ),
+            (
+                "alert_delay",
+                Tuple(
+                    title=_("Phases without synchronization"),
+                    elements=[
+                        Age(
+                            title=_("Warning at"),
+                            display=["hours", "minutes"],
+                            default_value=300,
+                        ),
+                        Age(
+                            title=_("Critical at"),
+                            display=["hours", "minutes"],
+                            default_value=3600,
+                        ),
+                    ],
                 ),
-                (
-                    "alert_delay",
-                    Tuple(
-                        title=_("Phases without synchronization"),
-                        elements=[
-                            Age(
-                                title=_("Warning at"),
-                                display=["hours", "minutes"],
-                                default_value=300,
-                            ),
-                            Age(
-                                title=_("Critical at"),
-                                display=["hours", "minutes"],
-                                default_value=3600,
-                            ),
-                        ],
-                    ),
-                ),
-            ],
-        ),
-        forth=_transform_forth,
+            ),
+        ],
     )
-
-
-def _transform_forth(params):
-    if isinstance(params, dict):
-        return params
-    return {"ntp_levels": params}
 
 
 rulespec_registry.register(

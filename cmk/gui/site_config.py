@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,10 +9,11 @@ import os
 
 from livestatus import SiteConfiguration, SiteConfigurations, SiteId
 
-import cmk.utils.paths
-from cmk.utils.site import omd_site
+from cmk.ccc.site import omd_site
 
-from cmk.gui.config import active_config
+import cmk.utils.paths
+
+from cmk.gui.config import active_config, Config
 
 
 def sitenames() -> list[SiteId]:
@@ -22,19 +23,20 @@ def sitenames() -> list[SiteId]:
 # TODO: Cleanup: Make clear that this function is used by the status GUI (and not WATO)
 # and only returns the currently enabled sites. Or should we redeclare the "disabled" state
 # to disable the sites at all?
-# TODO: Rename this!
-def allsites() -> SiteConfigurations:
+def enabled_sites() -> SiteConfigurations:
     return SiteConfigurations(
         {
-            name: get_site_config(name)  #
+            name: get_site_config(active_config, name)  #
             for name in sitenames()
-            if not get_site_config(name).get("disabled", False)
+            if not get_site_config(active_config, name).get("disabled", False)
         }
     )
 
 
 def configured_sites() -> SiteConfigurations:
-    return SiteConfigurations({site_id: get_site_config(site_id) for site_id in sitenames()})
+    return SiteConfigurations(
+        {site_id: get_site_config(active_config, site_id) for site_id in sitenames()}
+    )
 
 
 def has_wato_slave_sites() -> bool:
@@ -53,29 +55,37 @@ def _has_distributed_wato_file() -> bool:
 
 
 def get_login_sites() -> list[SiteId]:
-    """Returns the WATO slave sites a user may login and the local site"""
+    """Returns the Setup slave sites a user may login and the local site"""
     return get_login_slave_sites() + [omd_site()]
 
 
 # TODO: All site listing functions should return the same data structure, e.g. a list of
 #       pairs (site_id, site)
 def get_login_slave_sites() -> list[SiteId]:
-    """Returns a list of site ids which are WATO slave sites and users can login"""
+    """Returns a list of site ids which are Setup slave sites and users can login"""
     login_sites = []
     for site_id, site_spec in wato_slave_sites().items():
-        if site_spec.get("user_login", True) and not site_is_local(site_id):
+        if site_spec.get("user_login", True) and not site_is_local(active_config, site_id):
             login_sites.append(site_id)
     return login_sites
 
 
+def is_replication_enabled(site_config: SiteConfiguration) -> bool:
+    return bool(site_config.get("replication"))
+
+
+def get_replication_site_id(site_config: SiteConfiguration) -> str:
+    return replication if (replication := site_config.get("replication")) else ""
+
+
 def wato_slave_sites() -> SiteConfigurations:
     return SiteConfigurations(
-        {site_id: s for site_id, s in active_config.sites.items() if s.get("replication")}
+        {site_id: s for site_id, s in active_config.sites.items() if is_replication_enabled(s)}
     )
 
 
-def get_site_config(site_id: SiteId) -> SiteConfiguration:
-    s: SiteConfiguration = active_config.sites.get(site_id, {})
+def get_site_config(config: Config, site_id: SiteId) -> SiteConfiguration:
+    s: SiteConfiguration = config.sites.get(site_id, {})
     # Now make sure that all important keys are available.
     # Add missing entries by supplying default values.
     s.setdefault("alias", site_id)
@@ -85,8 +95,8 @@ def get_site_config(site_id: SiteId) -> SiteConfiguration:
     return s
 
 
-def site_is_local(site_id: SiteId) -> bool:
-    socket_info = get_site_config(site_id)["socket"]
+def site_is_local(config: Config, site_id: SiteId) -> bool:
+    socket_info = get_site_config(config, site_id)["socket"]
     if isinstance(socket_info, str):
         # Should be unreachable
         return False
@@ -108,4 +118,11 @@ def is_single_local_site() -> bool:
 
     # Also use Multisite mode if the one and only site is not local
     sitename = list(active_config.sites.keys())[0]
-    return site_is_local(sitename)
+    return site_is_local(active_config, sitename)
+
+
+def wato_site_ids() -> list[SiteId]:
+    return [
+        omd_site(),
+        *wato_slave_sites(),
+    ]

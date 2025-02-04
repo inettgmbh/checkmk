@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List, Optional, Pattern
+from collections.abc import Iterable, Sequence
+from re import Pattern
 
-import cmk.utils.debug
+import cmk.ccc.debug
+from cmk.ccc.exceptions import MKGeneralException
+
 import cmk.utils.paths
-from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.regex import regex
+from cmk.utils.regex import combine_patterns, regex
+from cmk.utils.tags import TagID
 
 # Conveniance macros for legacy tuple based host and service rules
 PHYSICAL_HOSTS = ["@physical"]  # all hosts but not clusters
@@ -34,7 +37,7 @@ def get_rule_options(entry):
     return entry, {}
 
 
-def in_extraconf_hostlist(hostlist, hostname):  # pylint: disable=too-many-branches
+def in_extraconf_hostlist(hostlist, hostname):
     """Whether or not the given host matches the hostlist.
 
     Entries in list are hostnames that must equal the hostname.
@@ -56,7 +59,7 @@ def in_extraconf_hostlist(hostlist, hostname):  # pylint: disable=too-many-branc
 
     for hostentry in hostlist:
         if hostentry == "":
-            raise MKGeneralException("Empty hostname in host list %r" % hostlist)
+            raise MKGeneralException("Empty host name in host list %r" % hostlist)
         negate = False
         use_regex = False
         if hostentry[0] == "@":
@@ -89,13 +92,22 @@ def in_extraconf_hostlist(hostlist, hostname):  # pylint: disable=too-many-branc
                 if regex(hostentry).match(hostname) is not None:
                     return not negate
         except MKGeneralException:
-            if cmk.utils.debug.enabled():
+            if cmk.ccc.debug.enabled():
                 raise
 
     return False
 
 
-def hosttags_match_taglist(hosttags, required_tags):
+# Slow variant of checking wether a service is matched by a list
+# of regexes
+def in_extraconf_servicelist(service_patterns: list[str], service: str) -> bool:
+    if optimized_pattern := convert_pattern_list(service_patterns):
+        return optimized_pattern.match(service) is not None
+
+    return False
+
+
+def hosttags_match_taglist(hosttags: Sequence[TagID], required_tags: Iterable[TagID]) -> bool:
     """Check if a host fulfills the requirements of a tag list.
 
     The host must have all tags in the list, except
@@ -104,7 +116,7 @@ def hosttags_match_taglist(hosttags, required_tags):
     for tag in required_tags:
         negate, tag = _parse_negated(tag)
         if tag and tag[-1] == "+":
-            tag = tag[:-1]
+            tag = TagID(tag[:-1])
             matches = False
             for t in hosttags:
                 if t.startswith(tag):
@@ -120,7 +132,7 @@ def hosttags_match_taglist(hosttags, required_tags):
     return True
 
 
-def convert_pattern_list(patterns: List[str]) -> Optional[Pattern[str]]:
+def convert_pattern_list(patterns: list[str]) -> Pattern[str] | None:
     """Compiles a list of service match patterns to a single regex
 
     Reducing the number of individual regex matches improves the performance dramatically.
@@ -129,19 +141,16 @@ def convert_pattern_list(patterns: List[str]) -> Optional[Pattern[str]]:
     if not patterns:
         return None
 
-    pattern_parts = []
+    pattern_parts: list[tuple[bool, str]] = []
 
     for pattern in patterns:
         negate, pattern = _parse_negated(pattern)
         # Skip ALL_SERVICES from end of negated lists
-        if negate:
-            if pattern == ALL_SERVICES[0]:
-                continue
-            pattern_parts.append("(?!%s)" % pattern)
-        else:
-            pattern_parts.append("(?:%s)" % pattern)
+        if negate and pattern == ALL_SERVICES[0]:
+            continue
+        pattern_parts.append((negate, pattern))
 
-    return regex("(?:%s)" % "|".join(pattern_parts))
+    return regex(combine_patterns(pattern_parts))
 
 
 def _parse_negated(pattern):

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import abc
 import itertools
-from typing import Dict, Optional, Tuple, Union
 
 from marshmallow import fields, post_load, pre_dump, ValidationError
 
@@ -42,10 +41,10 @@ class CheckmkTuple:
 
     """
 
-    declared_fields: Dict[str, fields.Field]
+    declared_fields: dict[str, fields.Field]
     # NOTE: actually recursive, but what can you do: mypy doesn't do recursive yet.
-    tuple_fields: Tuple[Union[Tuple[str, ...], str], ...] = ()
-    converter: Tuple[Union[Tuple[Optional[Converter], ...], Optional[Converter]], ...] = ()
+    tuple_fields: tuple[tuple[str, ...] | str, ...] = ()
+    converter: tuple[tuple[Converter | None, ...] | Converter | None, ...] = ()
 
     @post_load
     def to_checkmk_tuple(self, data, **kwargs):

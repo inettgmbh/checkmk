@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 
-from typing import Final
+from collections.abc import Mapping
+from typing import Final, Literal
 
+from cmk.plugins.lib.cisco_ucs import DETECT
 
-def scan_cisco_ucs(oid) -> bool:  # type:ignore[no-untyped-def]
-    return (
-        ".1.3.6.1.4.1.9.1.1682" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.1683" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.1684" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.1685" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.2178" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.2424" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.2492" in oid(".1.3.6.1.2.1.1.2.0")
-        or ".1.3.6.1.4.1.9.1.2493" in oid(".1.3.6.1.2.1.1.2.0")
-    )
-
-
-map_operability: Final = {
+MAP_OPERABILITY: Final[Mapping[str, tuple[Literal[0, 1, 2], str]]] = {
     "0": (2, "unknown"),
     "1": (0, "operable"),
     "2": (2, "inoperable"),
@@ -53,7 +42,7 @@ map_operability: Final = {
     "108": (1, "linkActivateBlocked"),
 }
 
-map_presence: Final = {
+MAP_PRESENCE: Final[Mapping[str, tuple[Literal[0, 1, 2], str]]] = {
     "0": (1, "unknown"),
     "1": (0, "empty"),
     "10": (0, "equipped"),
@@ -75,3 +64,5 @@ map_presence: Final = {
     "104": (2, "equippedDiscError"),
     "105": (1, "equippedDiscUnknown"),
 }
+
+__all__ = ["DETECT", "MAP_OPERABILITY", "MAP_PRESENCE"]

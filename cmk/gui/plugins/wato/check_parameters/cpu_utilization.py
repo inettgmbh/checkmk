@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -14,7 +14,7 @@ from cmk.gui.plugins.wato.utils import (
     TextInput,
 )
 from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
-from cmk.gui.valuespec import Age, Dictionary, DropdownChoice, Integer, Percentage, Transform, Tuple
+from cmk.gui.valuespec import Age, Dictionary, DropdownChoice, Integer, Migrate, Percentage, Tuple
 
 
 def cpu_util_elements():
@@ -24,7 +24,7 @@ def cpu_util_elements():
             Tuple(
                 title=_("Levels over an extended time period on total CPU utilization"),
                 elements=[
-                    Percentage(title=_("High utilization at "), default_value=100.0),
+                    Percentage(title=_("High utilization at "), default_value=100.0, maxvalue=None),
                     Age(title=_("Warning after "), default_value=5 * 60),
                     Age(title=_("Critical after "), default_value=15 * 60),
                 ],
@@ -48,8 +48,8 @@ def cpu_util_elements():
                     "A single thread fully utilizing a single core (potentially due to a bug) "
                     "may go unnoticed when only monitoring the total utilization of the CPU. "
                     "With this configuration, Checkmk will alert if a single core is "
-                    "exceeding a utilization threshold over an extended period of time."
-                    "This is currently only supported on linux and windows agents "
+                    "exceeding a utilization threshold over an extended period of time. "
+                    "This is currently only supported on Linux and Windows agents "
                     "as well as devices monitored through the host-resource mib"
                 ),
             ),
@@ -158,7 +158,7 @@ def cpu_util_elements():
                     "details page, showing utilization of individual cores. "
                     "Please note that this graph may be impractical on "
                     "device with very many cores. "
-                    "This is currently only supported on linux and windows agents "
+                    "This is currently only supported on Linux and Windows agents "
                     "as well as devices monitored through the host-resource mib"
                 ),
                 choices=[
@@ -217,41 +217,15 @@ def _cpu_util_common_elements():
     )
 
 
-def transform_legacy_cpu_utilization_os(params):
-    if "levels" in params:
-        params["util"] = params.pop("levels")
-    return params
-
-
-def _parameter_valuespec_cpu_utilization_os():
-    return Transform(
-        valuespec=_cpu_util_common_elements(),
-        forth=transform_legacy_cpu_utilization_os,
-    )
-
-
 rulespec_registry.register(
     CheckParameterRulespecWithoutItem(
         check_group_name="cpu_utilization_os",
         group=RulespecGroupCheckParametersOperatingSystem,
         match_type="dict",
-        parameter_valuespec=_parameter_valuespec_cpu_utilization_os,
+        parameter_valuespec=_cpu_util_common_elements,
         title=lambda: _("CPU utilization for simple devices"),
     )
 )
-
-
-def transform_cpu_iowait(params):
-    if isinstance(params, tuple):
-        return {"iowait": params}
-    return params
-
-
-def _parameter_valuespec_cpu_iowait():
-    return Transform(
-        valuespec=_cpu_util_common_elements(),
-        forth=transform_cpu_iowait,
-    )
 
 
 rulespec_registry.register(
@@ -259,43 +233,51 @@ rulespec_registry.register(
         check_group_name="cpu_iowait",
         group=RulespecGroupCheckParametersOperatingSystem,
         match_type="dict",
-        parameter_valuespec=_parameter_valuespec_cpu_iowait,
+        parameter_valuespec=_cpu_util_common_elements,
         title=lambda: _("CPU utilization on Linux/UNIX"),
     )
 )
 
 
-def _transform_cpu_utilization(params):
-    if params is None:
+def _cpu_utilization_to_dict(
+    param: tuple[float, float] | dict[str, tuple[float, float]],
+) -> dict[str, tuple[float, float]]:
+    if not param:
         return {}
-    if isinstance(params, tuple):
-        return {"util": params}
-    return params
+    if isinstance(param, dict):
+        if "util" in param:
+            return param
+        if "levels" in param:
+            param["util"] = param.pop("levels")
+            return param
+    if isinstance(param, tuple):
+        return {"util": param}
+    return {}
 
 
-def _parameter_valuespec_cpu_utilization():
-    return Transform(
+def _parameter_valuespec_cpu_utilization() -> Migrate:
+    return Migrate(
         valuespec=Dictionary(
             elements=[
                 (
                     "util",
                     Tuple(
                         elements=[
-                            Percentage(title=_("Warning at a utilization of")),
-                            Percentage(title=_("Critical at a utilization of")),
+                            Percentage(title=_("Warning at a utilization of"), default_value=90.0),
+                            Percentage(title=_("Critical at a utilization of"), default_value=95.0),
                         ],
                         title=_("Alert on excessive CPU utilization"),
                         help=_(
+                            # xgettext: no-python-format
                             "The CPU utilization sums up the percentages of CPU time that is used "
                             "for user processes and kernel routines over all available cores within "
                             "the last check interval. The possible range is from 0% to 100%"
                         ),
-                        default_value=(90.0, 95.0),
                     ),
                 ),
             ]
         ),
-        forth=_transform_cpu_utilization,
+        migrate=_cpu_utilization_to_dict,
     )
 
 

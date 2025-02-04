@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from ast import literal_eval
 from pathlib import Path
-from typing import Optional, Tuple
+from unittest.mock import Mock
 
-# pylint: disable=protected-access
 import pytest
 
-from cmk.utils import store
-from cmk.utils.type_defs import CheckPluginName
+from cmk.ccc import store
 
+from cmk.utils.hostaddress import HostName
+
+from cmk.checkengine.checking import CheckPluginName, ServiceID
+
+from cmk.base.api.agent_based.value_store._api import (
+    _ValueStore,
+    ValueStoreManager,
+)
 from cmk.base.api.agent_based.value_store._utils import (
-    _DiskSyncedMapping,
     _DynamicDiskSyncedMapping,
     _StaticDiskSyncedMapping,
-    _ValueStore,
-    ServiceID,
-    ValueStoreManager,
+    DiskSyncedMapping,
 )
 
 _TEST_KEY = ("check", "item", "user-key")
@@ -27,7 +30,7 @@ _TEST_KEY = ("check", "item", "user-key")
 
 class Test_DynamicDiskSyncedMapping:
     @staticmethod
-    def _get_ddsm() -> _DynamicDiskSyncedMapping[Tuple[str, str, str], object]:
+    def _get_ddsm() -> _DynamicDiskSyncedMapping[tuple[str, str, str], object]:
         return _DynamicDiskSyncedMapping()
 
     def test_init(self) -> None:
@@ -100,7 +103,7 @@ class Test_StaticDiskSyncedMapping:
     @staticmethod
     def _get_sdsm(
         tmp_path: Path,
-    ) -> _StaticDiskSyncedMapping[Tuple[str, Optional[str], str], object]:
+    ) -> _StaticDiskSyncedMapping[tuple[str, str | None, str], object]:
         return _StaticDiskSyncedMapping(
             path=tmp_path / "test-host",
             log_debug=lambda msg: None,
@@ -108,8 +111,7 @@ class Test_StaticDiskSyncedMapping:
             deserializer=literal_eval,
         )
 
-    def test_mapping_features(self, mocker, tmp_path: Path) -> None:  # type:ignore[no-untyped-def]
-
+    def test_mapping_features(self, mocker: Mock, tmp_path: Path) -> None:
         self._mock_load(mocker)
         sdsm = self._get_sdsm(tmp_path)
         assert sdsm.get(("check_no", None, "moo")) is None
@@ -125,8 +127,7 @@ class Test_StaticDiskSyncedMapping:
         ]
         assert len(sdsm) == 2
 
-    def test_store(self, mocker, tmp_path: Path) -> None:  # type:ignore[no-untyped-def]
-
+    def test_store(self, mocker: Mock, tmp_path: Path) -> None:
         self._mock_load(mocker)
         self._mock_store(mocker)
 
@@ -148,15 +149,15 @@ class Test_StaticDiskSyncedMapping:
 
 class Test_DiskSyncedMapping:
     @staticmethod
-    def _get_dsm() -> _DiskSyncedMapping:
-        dynstore: _DynamicDiskSyncedMapping[Tuple[str, str, str], str] = _DynamicDiskSyncedMapping()
+    def _get_dsm() -> DiskSyncedMapping:
+        dynstore: _DynamicDiskSyncedMapping[tuple[str, str, str], str] = _DynamicDiskSyncedMapping()
         dynstore.update(
             {
                 ("dyn", "key", "1"): "dyn-val-1",
                 ("dyn", "key", "2"): "dyn-val-2",
             }
         )
-        return _DiskSyncedMapping(
+        return DiskSyncedMapping(
             dynamic=dynstore,
             static={  # type: ignore[arg-type]
                 ("stat", "key", "1"): "stat-val-1",
@@ -217,13 +218,14 @@ class Test_DiskSyncedMapping:
 class Test_ValueStore:
     @staticmethod
     def _get_store() -> _ValueStore:
+        host_name = HostName("moritz")
         return _ValueStore(
             data={
-                ("moritz", "check1", "item", "key1"): 42,
-                ("moritz", "check2", "item", "key2"): 23,
+                (host_name, "check1", "item", "key1"): "42",
+                (host_name, "check2", "item", "key2"): "23",
             },
             service_id=(CheckPluginName("check1"), "item"),
-            host_name="moritz",
+            host_name=host_name,
         )
 
     def test_separation(self) -> None:
@@ -236,11 +238,17 @@ class Test_ValueStore:
         with pytest.raises(TypeError):
             s_store[2] = "key must be string!"  # type: ignore[index]
 
+    def test_serialization_happens_in_plugin_scope(self) -> None:
+        s_store = self._get_store()
+        s_store["key"] = float("inf")  # gets serialized here
+        with pytest.raises(ValueError):
+            _ = s_store["key"]  # deserialization failes here, not upon loading the store.
+
 
 class TestValueStoreManager:
     @staticmethod
     def test_namespace_context() -> None:
-        vsm = ValueStoreManager("test-host")
+        vsm = ValueStoreManager(HostName("test-host"))
         service_inner = ServiceID(CheckPluginName("unit_test_inner"), None)
         service_outer = ServiceID(CheckPluginName("unit_test_outer"), None)
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping
-from typing import Tuple as TypeTuple
-from typing import Union
+from collections.abc import Mapping
+from typing import Any
+
+from cmk.utils.rulesets.definition import RuleGroup
 
 from cmk.gui.i18n import _
-from cmk.gui.plugins.wato.active_checks.common import RulespecGroupActiveChecks
 from cmk.gui.plugins.wato.utils import HostRulespec, rulespec_registry
 from cmk.gui.valuespec import (
     Alternative,
@@ -18,15 +18,14 @@ from cmk.gui.valuespec import (
     Float,
     Integer,
     ListOfStrings,
+    Migrate,
     TextInput,
-    Transform,
     Tuple,
 )
+from cmk.gui.wato import RulespecGroupActiveChecks
 
 
-def _transform_check_dns_settings(
-    params: Union[Mapping[str, Any], TypeTuple[str, Mapping[str, Any]]]
-) -> Mapping[str, Any]:
+def _migrate(params: Mapping[str, Any] | tuple[str, Mapping[str, Any]]) -> Mapping[str, Any]:
     if isinstance(params, Mapping):
         return params
 
@@ -36,18 +35,18 @@ def _transform_check_dns_settings(
     return {
         "hostname": hostname,
         **(
-            __transform_legacy_optional_params(optional_params)
+            _migrate_legacy_optional_params(optional_params)
             if "expected_address" in optional_params
             else optional_params
         ),
     }
 
 
-def __transform_legacy_optional_params(optional_params: Mapping[str, Any]) -> Mapping[str, Any]:
+def _migrate_legacy_optional_params(optional_params: Mapping[str, Any]) -> Mapping[str, Any]:
     """
-    >>> __transform_legacy_optional_params({'expected_address': '1.2.3.4,C0FE::FE11'})
+    >>> _migrate_legacy_optional_params({'expected_address': '1.2.3.4,C0FE::FE11'})
     {'expect_all_addresses': True, 'expected_addresses_list': ['1.2.3.4', 'C0FE::FE11']}
-    >>> __transform_legacy_optional_params({'expected_address': ['A,B', 'C']})
+    >>> _migrate_legacy_optional_params({'expected_address': ['A,B', 'C']})
     {'expect_all_addresses': True, 'expected_addresses_list': ['A', 'B', 'C']}
 
     """
@@ -64,13 +63,13 @@ def __transform_legacy_optional_params(optional_params: Mapping[str, Any]) -> Ma
 
 
 def _valuespec_active_checks_dns():
-    return Transform(
+    return Migrate(
         valuespec=Dictionary(
             title=_("Check DNS service"),
             help=_(
-                "Check the resolution of a hostname into an IP address by a DNS "
+                "Checks the resolution of a host name into an IP address by a DNS "
                 "server. This check uses <tt>check_dns</tt> from the standard "
-                "Nagios plugins. Note, that check_dns will always be executed in "
+                "Nagios plug-ins. Note, that check_dns will always be executed in "
                 "the monitoring site. By default, the configured host(s) that "
                 "this rule applies to is used as DNS server. This behaviour can "
                 "be configured by using the option <tt>DNS Server</tt>. "
@@ -79,7 +78,7 @@ def _valuespec_active_checks_dns():
                 (
                     "hostname",
                     TextInput(
-                        title=_("Queried Hostname or IP address"),
+                        title=_("Queried host name or IP address"),
                         allow_empty=False,
                         help=_("The name or IPv4 address you want to query"),
                     ),
@@ -87,10 +86,8 @@ def _valuespec_active_checks_dns():
                 (
                     "name",
                     TextInput(
-                        title=_("Alternative Service description"),
-                        help=_(
-                            "The service description will be this name instead <i>DNS Servername</i>"
-                        ),
+                        title=_("Alternative service name"),
+                        help=_("The service name will be this name instead <i>DNS Servername</i>"),
                     ),
                 ),
                 (
@@ -169,7 +166,7 @@ def _valuespec_active_checks_dns():
             ],
             required_keys=["hostname", "server"],
         ),
-        forth=_transform_check_dns_settings,
+        migrate=_migrate,
     )
 
 
@@ -177,7 +174,7 @@ rulespec_registry.register(
     HostRulespec(
         group=RulespecGroupActiveChecks,
         match_type="all",
-        name="active_checks:dns",
+        name=RuleGroup.ActiveChecks("dns"),
         valuespec=_valuespec_active_checks_dns,
     )
 )

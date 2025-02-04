@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Page menu processing
@@ -14,10 +14,9 @@ The hierarchy here is:
 
 import abc
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple, Union
 
-import cmk.gui.utils.escaping as escaping
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.html import html
@@ -25,15 +24,20 @@ from cmk.gui.http import request
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
 from cmk.gui.type_defs import Icon
+from cmk.gui.utils import escaping
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.output_funnel import output_funnel
 from cmk.gui.utils.popups import MethodInline
+from cmk.gui.utils.selection_id import SelectionId
 from cmk.gui.utils.urls import (
     doc_reference_url,
     DocReference,
+    get_confirm_link_title,
     makeuri,
     makeuri_contextless,
     requested_file_with_query,
+    youtube_reference_url,
+    YouTubeReference,
 )
 
 
@@ -41,9 +45,9 @@ from cmk.gui.utils.urls import (
 class Link:
     """Group of attributes used for linking"""
 
-    url: Optional[str] = None
-    target: Optional[str] = None
-    onclick: Optional[str] = None
+    url: str | None = None
+    target: str | None = None
+    onclick: str | None = None
 
 
 class ABCPageMenuItem(abc.ABC):
@@ -79,21 +83,113 @@ def make_javascript_action(javascript: str) -> str:
 
 def make_form_submit_link(form_name: str, button_name: str) -> PageMenuLink:
     return make_javascript_link(
-        "cmk.page_menu.form_submit(%s, %s)" % (json.dumps(form_name), json.dumps(button_name))
+        f"cmk.page_menu.form_submit({json.dumps(form_name)}, {json.dumps(button_name)})"
     )
 
 
 def make_confirmed_form_submit_link(
-    *, form_name: str, button_name: str, message: str
+    *,
+    form_name: str,
+    button_name: str,
+    title: str | None = None,
+    suffix: str | None = None,
+    message: str | None = None,
+    confirm_button: str | None = None,
+    cancel_button: str | None = None,
+    icon: str | None = None,
+    warning: bool = False,
 ) -> PageMenuLink:
     return make_javascript_link(
         "cmk.page_menu.confirmed_form_submit(%s, %s, %s)"
         % (
             json.dumps(form_name),
             json.dumps(button_name),
-            json.dumps(escaping.escape_text(message)),
+            json.dumps(
+                confirmed_form_submit_options(
+                    title, suffix, message, confirm_button, cancel_button, icon, warning
+                )
+            ),
         )
     )
+
+
+def show_success_dialog(
+    title: str,
+    confirm_url: str,
+    message: str | HTML | None = None,
+    confirm_text: str | None = None,
+) -> None:
+    dialog_options = {
+        "title": title,
+        "html": escaping.escape_text(message),
+        "confirmButtonText": confirm_text if confirm_text else _("Confirm"),
+        "customClass": {
+            "confirmButton": "confirm_success",
+            "icon": "confirm_icon" + " confirm_success",
+        },
+        "showCancelButton": False,
+        "iconHtml": "<span>&check;</span>",
+    }
+
+    html.javascript(
+        "cmk.forms.confirm_dialog(%s, ()=>{location.href = %s;})"
+        % (
+            json.dumps(dialog_options),
+            json.dumps(confirm_url),
+        )
+    )
+
+
+def show_confirm_cancel_dialog(
+    title: str,
+    confirm_url: str,
+    cancel_url: str | None = None,
+    message: str | HTML | None = None,
+    confirm_text: str | None = None,
+    show_cancel_button: bool = True,
+) -> None:
+    dialog_options = {
+        "title": title,
+        "html": escaping.escape_text(message),
+        "confirmButtonText": confirm_text if confirm_text else _("Confirm"),
+        "cancelButtonText": _("Cancel"),
+        "customClass": {
+            "confirmButton": "confirm_question",
+            "icon": "confirm_icon" + " confirm_question",
+        },
+        "showCancelButton": show_cancel_button,
+    }
+
+    html.javascript(
+        "cmk.forms.confirm_dialog(%s, ()=>{location.href = %s;}, %s)"
+        % (
+            json.dumps(dialog_options),
+            json.dumps(confirm_url),
+            f"()=>{{location.href = {json.dumps(cancel_url)}}}" if cancel_url else "null",
+        )
+    )
+
+
+def confirmed_form_submit_options(
+    title: str | None = None,
+    suffix: str | None = None,
+    message: str | HTML | None = None,
+    confirm_text: str | None = None,
+    cancel_text: str | None = None,
+    icon: str | None = None,
+    warning: bool = False,
+) -> dict[str, str | dict[str, str]]:
+    return {
+        "title": get_confirm_link_title(title, suffix),
+        "html": escaping.escape_text(message),
+        "confirmButtonText": confirm_text if confirm_text else _("Delete"),
+        "cancelButtonText": cancel_text if cancel_text else _("Cancel"),
+        "icon": "warning" if warning else "question",
+        "customClass": {
+            "confirmButton": "confirm_warning" if warning else "confirm_question",
+            "icon": "confirm_icon" + (" confirm_warning" if warning else " confirm_question"),
+        },
+    }
 
 
 @dataclass
@@ -101,7 +197,7 @@ class PageMenuPopup(ABCPageMenuItem):
     """A link opening a pre-rendered hidden area (not necessarily a popup window)"""
 
     content: HTML
-    css_classes: List[Optional[str]] = field(default_factory=list)
+    css_classes: list[str | None] = field(default_factory=list)
 
 
 @dataclass
@@ -109,14 +205,14 @@ class PageMenuSidePopup(PageMenuPopup):
     """A link opening a pre-rendered popup on the right of the page"""
 
     content: HTML
-    css_classes: List[Optional[str]] = field(default_factory=list)
+    css_classes: list[str | None] = field(default_factory=list)
 
 
 @dataclass
 class PageMenuSearch(ABCPageMenuItem):
     """A text input box right in the menu, primarily for in page quick search"""
 
-    target_mode: Optional[str] = None
+    target_mode: str | None = None
     default_value: str = ""
 
 
@@ -127,16 +223,16 @@ class PageMenuEntry:
     title: str
     icon_name: Icon
     item: ABCPageMenuItem
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
     is_enabled: bool = True
     is_show_more: bool = False
     is_list_entry: bool = True
     is_shortcut: bool = False
     is_suggested: bool = True
-    shortcut_title: Optional[str] = None
-    css_classes: List[Optional[str]] = field(default_factory=list)
-    disabled_tooltip: Optional[str] = None
+    shortcut_title: str | None = None
+    css_classes: list[str | None] = field(default_factory=list)
+    disabled_tooltip: str | None = None
     sort_index: int = 1
 
 
@@ -145,7 +241,9 @@ class PageMenuTopic:
     """A dropdown is populated with multiple topics which hold the actual entries"""
 
     title: str
-    entries: List[PageMenuEntry] = field(default_factory=list)
+    entries: list[PageMenuEntry] = field(default_factory=list)
+    # Added to skip topics from update on service discovery page
+    id_: str | None = None
 
 
 @dataclass
@@ -154,11 +252,11 @@ class PageMenuDropdown:
 
     name: str
     title: str
-    topics: List[PageMenuTopic] = field(default_factory=list)
+    topics: list[PageMenuTopic] = field(default_factory=list)
     is_enabled: bool = True
     # Optional data for the popup. To be used by popup_trigger().
     # It has been added for the "add view to dashboard/report" dropdown.
-    popup_data: Optional[List[Union[str, Dict]]] = None
+    popup_data: list[str | dict] | None = None
 
     @property
     def any_show_more_entries(self) -> bool:
@@ -173,11 +271,12 @@ class PageMenuDropdown:
 class PageMenu:
     """Representing the whole menu of the page"""
 
-    dropdowns: List[PageMenuDropdown] = field(default_factory=list)
-    breadcrumb: Optional[Breadcrumb] = None
-    inpage_search: Optional[PageMenuSearch] = None
+    dropdowns: list[PageMenuDropdown] = field(default_factory=list)
+    breadcrumb: Breadcrumb | None = None
+    inpage_search: PageMenuSearch | None = None
     has_pending_changes: bool = False
-    pending_changes_tooltip: Optional[str] = None
+    pending_changes_tooltip: str | None = None
+    enable_suggestions: bool = True
 
     def __post_init__(self) -> None:
         # Add the display options dropdown
@@ -206,8 +305,7 @@ class PageMenu:
     def _entries(self) -> Iterator[PageMenuEntry]:
         for dropdown in self.dropdowns:
             for topic in dropdown.topics:
-                for entry in topic.entries:
-                    yield entry
+                yield from topic.entries
 
     @property
     def popups(self) -> Iterator[PageMenuEntry]:
@@ -224,7 +322,10 @@ class PageMenu:
                 continue
 
             if entry.is_suggested:
-                has_suggestions = True
+                if self.enable_suggestions:
+                    has_suggestions = True
+                else:
+                    entry.is_suggested = False
 
             shortcuts.append(entry)
 
@@ -242,6 +343,8 @@ class PageMenu:
 
     @property
     def suggestions(self) -> Iterator[PageMenuEntry]:
+        if not self.enable_suggestions:
+            return
         for entry in self.shortcuts:
             if entry.is_suggested:
                 yield entry
@@ -258,13 +361,13 @@ class PageMenu:
             )
         )
 
-    def add_youtube_reference(self, title: str, youtube_id: str) -> None:
+    def add_youtube_reference(self, title: str, youtube_ref: YouTubeReference) -> None:
         help_dropdown = self.get_dropdown_by_name("help", make_help_dropdown())
         help_dropdown.topics[2].entries.append(
             PageMenuEntry(
                 title=title,
                 icon_name="video",
-                item=make_external_link("https://youtu.be/%s" % youtube_id),
+                item=make_external_link(youtube_reference_url(youtube_ref)),
             )
         )
 
@@ -278,38 +381,42 @@ def make_display_options_dropdown() -> PageMenuDropdown:
                 title=_("General display options"),
                 entries=[
                     PageMenuEntry(
-                        title=_("This page without navigation"),
-                        icon_name="frameurl",
+                        title=(_("Show page navigation")),
+                        name="hide_navigation",
+                        icon_name="toggle_on",
                         item=PageMenuLink(
                             Link(
-                                url=makeuri(request, []),
+                                url=(makeuri(request, [])),
                                 target="_top",
                             )
                         ),
+                        css_classes=["hidden"],
                     ),
                     PageMenuEntry(
-                        title=_("This page with navigation"),
-                        icon_name="pageurl",
+                        title=(_("Show page navigation")),
+                        name="show_navigation",
+                        icon_name="toggle_off",
                         item=PageMenuLink(
                             Link(
-                                url=makeuri_contextless(
-                                    request,
-                                    [("start_url", makeuri(request, []))],
-                                    filename="index.py",
+                                url=(
+                                    makeuri_contextless(
+                                        request,
+                                        [("start_url", makeuri(request, []))],
+                                        filename="index.py",
+                                    )
                                 ),
                                 target="_top",
                             )
                         ),
                     ),
                 ],
+                id_="general_display_options",
             ),
         ],
     )
 
 
 def make_help_dropdown() -> PageMenuDropdown:
-    title_show_help = _("Show inline help")
-    title_hide_help = _("Hide inline help")
     return PageMenuDropdown(
         name="help",
         title=_("Help"),
@@ -318,11 +425,9 @@ def make_help_dropdown() -> PageMenuDropdown:
                 title=_("Context sensitive help"),
                 entries=[
                     PageMenuEntry(
-                        title=title_hide_help if user.show_help else title_show_help,
-                        icon_name="help",
-                        item=make_javascript_link(
-                            'cmk.help.toggle("%s", "%s")' % (title_show_help, title_hide_help)
-                        ),
+                        title=_("Show inline help"),
+                        icon_name="toggle_" + ("on" if user.show_help else "off"),
+                        item=make_javascript_link("cmk.help.toggle()"),
                         name="inline_help",
                         is_enabled=False,
                         disabled_tooltip=_("This page does not provide an inline help."),
@@ -370,23 +475,17 @@ def make_up_link(breadcrumb: Breadcrumb) -> PageMenuDropdown:
     )
 
 
-def make_checkbox_selection_json_text() -> Tuple[str, str]:
-    return json.dumps(_("Select all checkboxes")), json.dumps(_("Deselect all checkboxes"))
-
-
 def make_checkbox_selection_topic(selection_key: str, is_enabled: bool = True) -> PageMenuTopic:
-    is_selected = user.get_rowselection(request.var("selection") or "", selection_key)
-    name_selected, name_deselected = make_checkbox_selection_json_text()
+    is_selected = user.get_rowselection(SelectionId.from_request(request), selection_key)
     return PageMenuTopic(
         title=_("Selection"),
         entries=[
             PageMenuEntry(
                 name="checkbox_selection",
                 title=_("Select all checkboxes"),
-                icon_name="checkbox" if is_selected else "checked_checkbox",
+                icon_name="toggle_on" if is_selected else "toggle_off",
                 item=make_javascript_link(
-                    "cmk.selection.toggle_all_rows(this.form, %s, %s);"
-                    % (name_selected, name_deselected)
+                    "cmk.selection.toggle_all_rows(cmk.utils.querySelectorID('main_page_content'));"
                 ),
                 is_enabled=is_enabled,
             ),
@@ -397,14 +496,14 @@ def make_checkbox_selection_topic(selection_key: str, is_enabled: bool = True) -
 def make_simple_form_page_menu(
     title: str,
     breadcrumb: Breadcrumb,
-    form_name: Optional[str] = None,
-    button_name: Optional[str] = None,
-    save_title: Optional[str] = None,
+    form_name: str | None = None,
+    button_name: str | None = None,
+    save_title: str | None = None,
     save_icon: str = "save",
     save_is_enabled: bool = True,
-    add_abort_link: bool = False,
-    abort_url: Optional[str] = None,
-    inpage_search: Optional[PageMenuSearch] = None,
+    add_cancel_link: bool = False,
+    cancel_url: str | None = None,
+    inpage_search: PageMenuSearch | None = None,
 ) -> PageMenu:
     """Factory for creating a simple menu for object edit dialogs that just link back"""
     entries = []
@@ -414,8 +513,8 @@ def make_simple_form_page_menu(
             _make_form_save_link(form_name, button_name, save_title, save_icon, save_is_enabled)
         )
 
-    if add_abort_link:
-        entries.append(_make_form_abort_link(breadcrumb, abort_url))
+    if add_cancel_link:
+        entries.append(_make_form_cancel_link(breadcrumb, cancel_url))
 
     return PageMenu(
         dropdowns=[
@@ -438,7 +537,7 @@ def make_simple_form_page_menu(
 def _make_form_save_link(
     form_name: str,
     button_name: str,
-    save_title: Optional[str] = None,
+    save_title: str | None = None,
     save_icon: str = "save",
     save_is_enabled: bool = True,
 ) -> PageMenuEntry:
@@ -453,17 +552,17 @@ def _make_form_save_link(
     )
 
 
-def _make_form_abort_link(breadcrumb: Breadcrumb, abort_url: Optional[str]) -> PageMenuEntry:
-    if not abort_url:
+def _make_form_cancel_link(breadcrumb: Breadcrumb, cancel_url: str | None) -> PageMenuEntry:
+    if not cancel_url:
         if not breadcrumb or len(breadcrumb) < 2 or not breadcrumb[-2].url:
             raise ValueError("Can not create back link for this page")
-        abort_url = breadcrumb[-2].url
-    assert abort_url is not None
+        cancel_url = breadcrumb[-2].url
+    assert cancel_url is not None
 
     return PageMenuEntry(
-        title=_("Abort"),
-        icon_name="abort",
-        item=make_simple_link(abort_url),
+        title=_("Cancel"),
+        icon_name="cancel",
+        item=make_simple_link(cancel_url),
         is_shortcut=True,
         is_suggested=True,
     )
@@ -487,8 +586,11 @@ class PageMenuRenderer:
             self._show_pending_changes_icon(menu.pending_changes_tooltip)
         html.close_tr()
 
-        self._show_suggestions(menu)
+        if menu.enable_suggestions:
+            self._show_suggestions(menu)
         html.close_table()
+
+        self._javascript()
 
     def _show_dropdowns(self, menu: PageMenu) -> None:
         html.open_td(class_="menues")
@@ -541,7 +643,7 @@ class PageMenuRenderer:
         html.close_div()
 
     def _show_topic(self, topic: PageMenuTopic) -> None:
-        html.open_div(class_="topic")
+        html.open_div(class_="topic", id_=topic.id_)
         html.div(
             topic.title,
             class_=["topic_title"]
@@ -577,7 +679,7 @@ class PageMenuRenderer:
         html.close_td()
 
     def _show_suggestions(self, menu: PageMenu) -> None:
-        entries = menu.suggestions
+        entries = list(menu.suggestions)
         if not entries:
             return
 
@@ -586,7 +688,10 @@ class PageMenuRenderer:
         for entry in entries:
             classes = ["suggestion"]
             classes += self._get_entry_css_classes(entry)
-            html.open_div(class_=classes)
+            html.open_div(
+                class_=classes,
+                title=entry.disabled_tooltip if not entry.is_enabled else None,
+            )
             SuggestedEntryRenderer().show(entry)
             html.close_div()
         html.close_td()
@@ -605,10 +710,13 @@ class PageMenuRenderer:
         inpage_search_form(mode=item.target_mode, default_value=item.default_value)
         html.close_td()
 
-    def _show_pending_changes_icon(self, tooltip: Optional[str]) -> None:
+    def _show_pending_changes_icon(self, tooltip: str | None) -> None:
         html.open_td(class_="icon_container")
         html.icon_button("wato.py?mode=changelog", tooltip if tooltip else "", "pending_changes")
         html.close_td()
+
+    def _javascript(self) -> None:
+        html.javascript("cmk.page_menu.toggle_navigation_page_menu_entry();")
 
 
 class SuggestedEntryRenderer:
@@ -638,9 +746,9 @@ class SuggestedEntryRenderer:
     def _show_link(
         self,
         entry: PageMenuEntry,
-        url: Optional[str],
-        onclick: Optional[str],
-        target: Optional[str],
+        url: str | None,
+        onclick: str | None,
+        target: str | None,
     ) -> None:
         html.open_a(
             href=url,
@@ -649,7 +757,7 @@ class SuggestedEntryRenderer:
             id_=("menu_suggestion_%s" % entry.name if entry.name else None),
         )
         html.icon(entry.icon_name or "trans")
-        html.write_text(entry.shortcut_title or entry.title)
+        html.span(entry.shortcut_title or entry.title)
         html.close_a()
 
 
@@ -680,9 +788,9 @@ class ShortcutRenderer:
     def _show_link(
         self,
         entry: PageMenuEntry,
-        url: Optional[str],
-        onclick: Optional[str],
-        target: Optional[str],
+        url: str | None,
+        onclick: str | None,
+        target: str | None,
     ) -> None:
         classes = ["link", "enabled" if entry.is_enabled else "disabled"]
         if entry.is_suggested:
@@ -730,7 +838,7 @@ class DropdownEntryRenderer:
         )
 
     def _show_link(
-        self, url: str, onclick: Optional[str], target: Optional[str], icon: Icon, title: str
+        self, url: str, onclick: str | None, target: str | None, icon: Icon, title: str
     ) -> None:
         html.open_a(href=url, onclick=onclick, target=target)
         html.icon(icon or "trans")
@@ -739,48 +847,52 @@ class DropdownEntryRenderer:
 
 
 # TODO: Cleanup all calls using title and remove the argument
-def search_form(
-    title: Optional[str] = None, mode: Optional[str] = None, default_value: str = ""
-) -> None:
-    html.begin_form("search", add_transid=False)
-    if title:
-        html.write_text(title + " ")
-    html.text_input("search", size=32, default_value=default_value)
-    html.hidden_fields()
-    if mode:
-        html.hidden_field("mode", mode, add_var=True)
-    html.set_focus("search")
-    html.write_text(" ")
-    html.button("_do_seach", _("Search"))
-    html.end_form()
+def search_form(title: str | None = None, mode: str | None = None, default_value: str = "") -> None:
+    with html.form_context("search", add_transid=False):
+        if title:
+            html.write_text_permissive(title + " ")
+        html.text_input("search", size=32, default_value=default_value)
+        html.hidden_fields()
+        if mode:
+            html.hidden_field("mode", mode, add_var=True)
+        html.set_focus("search")
+        html.write_text_permissive(" ")
+        html.button("_do_seach", _("Search"))
 
 
 # TODO: Mesh this function into one with the above search_form()
-def inpage_search_form(mode: Optional[str] = None, default_value: str = "") -> None:
+def inpage_search_form(mode: str | None = None, default_value: str = "") -> None:
     form_name = "inpage_search_form"
     reset_button_id = "%s_reset" % form_name
     was_submitted = request.get_ascii_input("filled_in") == form_name
-    html.begin_form(form_name, add_transid=False)
-    html.text_input(
-        "search",
-        size=32,
-        default_value=default_value,
-        placeholder=_("Filter"),
-        required=True,
-        title="",
-    )
-    html.hidden_fields()
-    if mode:
-        html.hidden_field("mode", mode, add_var=True)
-    reset_url = request.get_ascii_input_mandatory("reset_url", requested_file_with_query(request))
-    html.hidden_field("reset_url", reset_url, add_var=True)
-    html.button("submit", "", cssclass="submit", help_=_("Apply"))
-    html.buttonlink(reset_url, "", obj_id=reset_button_id, title=_("Reset"))
-    html.end_form()
+    with html.form_context(form_name, add_transid=False):
+        html.text_input(
+            "search",
+            size=32,
+            default_value=default_value,
+            placeholder=_("Find on this page ..."),
+            required=True,
+            title="",
+        )
+        html.hidden_fields()
+        if mode:
+            html.hidden_field("mode", mode, add_var=True)
+        reset_url = request.get_ascii_input_mandatory(
+            "reset_url", requested_file_with_query(request)
+        )
+        html.hidden_field("reset_url", reset_url, add_var=True)
+        html.buttonlink(reset_url, "", obj_id=reset_button_id, title=_("Reset"))
+        html.button("submit", "", cssclass="submit", help_=_("Apply"))
     html.javascript(
-        "cmk.page_menu.inpage_search_init(%s, %s)"
-        % (json.dumps(reset_button_id), json.dumps(was_submitted))
+        f"cmk.page_menu.inpage_search_init({json.dumps(reset_button_id)}, {json.dumps(was_submitted)})"
     )
+
+
+def get_search_expression() -> None | str:
+    search = request.get_str_input("search")
+    if search is not None:
+        search = search.strip().lower()
+    return search
 
 
 class PageMenuPopupsRenderer:
@@ -834,3 +946,15 @@ class PageMenuPopupsRenderer:
             html.final_javascript(
                 "cmk.page_menu.side_popup_add_simplebar_scrollbar(%s);" % json.dumps(popup_id)
             )
+
+
+def doc_reference_to_page_menu(
+    page_menu: PageMenu,
+    page_type: str,
+    plural_title: str,
+) -> None:
+    if DocReference.has_key(doc_reference := page_type.upper()):
+        page_menu.add_doc_reference(
+            title=plural_title,
+            doc_ref=DocReference[doc_reference],
+        )

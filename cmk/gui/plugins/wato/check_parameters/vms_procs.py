@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,18 +9,26 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Integer, Optional, Tuple
+from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
+from cmk.gui.valuespec import Dictionary, Integer, Migrate
 
 
 def _parameter_valuespec_vms_procs():
-    return Optional(
-        valuespec=Tuple(
+    return Migrate(
+        valuespec=Dictionary(
             elements=[
-                Integer(title=_("Warning at"), unit=_("processes"), default_value=100),
-                Integer(title=_("Critical at"), unit=_("processes"), default_value=200),
+                (
+                    "levels_upper",
+                    SimpleLevels(
+                        spec=Integer,
+                        default_levels=(100, 200),
+                        title=_("Impose levels on number of processes"),
+                    ),
+                ),
             ],
+            optional_keys=[],
         ),
-        title=_("Impose levels on number of processes"),
+        migrate=lambda p: p if isinstance(p, dict) else {"levels_upper": p},
     )
 
 

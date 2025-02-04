@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """LDAP configuration and diagnose page"""
 
 import re
-from typing import Collection, Iterable, List, Optional, Type
+from collections.abc import Callable, Collection
+from copy import deepcopy
+from typing import Any, cast
 
-from livestatus import SiteId
-
-import cmk.utils.version as cmk_version
-
-import cmk.gui.userdb as userdb
-import cmk.gui.watolib.changes as _changes
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.config import active_config
+from cmk.gui.customer import customer_api
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
@@ -23,30 +20,19 @@ from cmk.gui.log import logger
 from cmk.gui.page_menu import (
     make_form_submit_link,
     make_simple_form_page_menu,
-    make_simple_link,
     PageMenu,
-    PageMenuDropdown,
     PageMenuEntry,
-    PageMenuSearch,
-    PageMenuTopic,
 )
-from cmk.gui.plugins.userdb.utils import (
-    get_connection,
-    load_connection_config,
-    save_connection_config,
-    UserConnectionSpec,
-)
-from cmk.gui.plugins.wato.utils import (
-    IndividualOrStoredPassword,
-    make_confirm_link,
-    mode_registry,
-    mode_url,
-    redirect,
-    WatoMode,
-)
-from cmk.gui.site_config import get_login_sites
 from cmk.gui.table import table_element
 from cmk.gui.type_defs import ActionResult, PermissionName
+from cmk.gui.userdb import (
+    ACTIVE_DIR,
+    get_connection,
+    get_ldap_connections,
+    LDAPUserConnectionConfig,
+    load_connection_config,
+    save_connection_config,
+)
 from cmk.gui.userdb.ldap_connector import (
     ldap_attr_of_connection,
     ldap_attribute_plugins_elements,
@@ -54,9 +40,11 @@ from cmk.gui.userdb.ldap_connector import (
     LDAPAttributePluginGroupsToRoles,
     LDAPUserConnector,
 )
+from cmk.gui.utils.csrf_token import check_csrf_token
+from cmk.gui.utils.escaping import strip_tags
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.transaction_manager import transactions
-from cmk.gui.utils.urls import DocReference, makeuri_contextless
+from cmk.gui.utils.urls import DocReference
 from cmk.gui.valuespec import (
     Age,
     CascadingDropdown,
@@ -66,22 +54,32 @@ from cmk.gui.valuespec import (
     DropdownChoice,
     FixedValue,
     Float,
+    ID,
     Integer,
     LDAPDistinguishedName,
     ListOfStrings,
+    MigrateNotUpdated,
     rule_option_elements,
     TextInput,
-    Transform,
     Tuple,
+    ValueSpec,
 )
-from cmk.gui.watolib.audit_log import LogMessage
-from cmk.gui.watolib.config_domains import ConfigDomainGUI
-from cmk.gui.watolib.hosts_and_folders import folder_preserving_link, make_action_link
+from cmk.gui.wato.pages.userdb_common import (
+    add_change,
+    add_connections_page_menu,
+    connection_actions,
+    get_affected_sites,
+    render_connections_page,
+)
+from cmk.gui.watolib.mode import mode_url, ModeRegistry, redirect, WatoMode
 
-if cmk_version.is_managed_edition():
-    import cmk.gui.cme.managed as managed  # pylint: disable=no-name-in-module
-else:
-    managed = None  # type: ignore[assignment]
+from ._password_store_valuespecs import MigrateNotUpdatedToIndividualOrStoredPassword
+
+
+def register(mode_registry: ModeRegistry) -> None:
+    mode_registry.register(ModeLDAPConfig)
+    mode_registry.register(ModeEditLDAPConnection)
+
 
 # .
 #   .--Valuespec-----------------------------------------------------------.
@@ -94,11 +92,14 @@ else:
 #   '----------------------------------------------------------------------'
 
 
-class LDAPConnectionValuespec(Transform):
-    def __init__(self, new, connection_id) -> None:
+class LDAPConnectionValuespec(Dictionary):
+    def __init__(self, new: bool, connection_id: str | None) -> None:
         self._new = new
         self._connection_id = connection_id
-        self._connection = get_connection(self._connection_id)
+        connection = get_connection(self._connection_id)
+        if connection is not None and not isinstance(connection, LDAPUserConnector):
+            raise TypeError("connection is not LDAPUserConnector")
+        self._connection = connection
 
         general_elements = self._general_elements()
         connection_elements = self._connection_elements()
@@ -106,7 +107,7 @@ class LDAPConnectionValuespec(Transform):
         group_elements = self._group_elements()
         other_elements = self._other_elements()
 
-        valuespec = Dictionary(
+        super().__init__(
             title=_("LDAP Connection"),
             elements=general_elements
             + connection_elements
@@ -114,11 +115,11 @@ class LDAPConnectionValuespec(Transform):
             + group_elements
             + other_elements,
             headers=[
-                (_("General Properties"), [key for key, _vs in general_elements]),
+                (_("General properties"), [key for key, _vs in general_elements]),
                 (_("LDAP Connection"), [key for key, _vs in connection_elements]),
                 (_("Users"), [key for key, _vs in user_elements]),
                 (_("Groups"), [key for key, _vs in group_elements]),
-                (_("Attribute Sync Plugins"), ["active_plugins"]),
+                (_("Attribute sync plug-ins"), ["active_plugins"]),
                 (_("Other"), ["cache_livetime"]),
             ],
             render="form",
@@ -144,23 +145,20 @@ class LDAPConnectionValuespec(Transform):
             validate=self._validate_ldap_connection,
         )
 
-        super().__init__(valuespec=valuespec, forth=LDAPUserConnector.transform_config)
-
-    def _general_elements(self) -> List[DictionaryEntry]:
-        general_elements: List[DictionaryEntry] = []
+    def _general_elements(self) -> list[DictionaryEntry]:
+        general_elements: list[DictionaryEntry] = []
 
         if self._new:
             id_element: DictionaryEntry = (
                 "id",
-                TextInput(
+                ID(
                     title=_("ID"),
                     help=_(
-                        "The ID of the connection must be a unique text. It will be used as an internal key "
-                        "when objects refer to the connection."
+                        "The ID of the connection must be a unique text, with the same requirements as an user id. "
+                        "It will be used as an internal key when objects refer to the connection."
                     ),
                     allow_empty=False,
                     size=12,
-                    validate=self._validate_ldap_connection_id,
                 ),
             )
         else:
@@ -174,15 +172,14 @@ class LDAPConnectionValuespec(Transform):
 
         general_elements += [id_element]
 
-        if cmk_version.is_managed_edition():
-            general_elements += managed.customer_choice_element()
+        general_elements += customer_api().customer_choice_element()
 
         general_elements += rule_option_elements()
 
         return general_elements
 
-    def _connection_elements(self):
-        connection_elements = [
+    def _connection_elements(self) -> list[tuple[str, ValueSpec]]:
+        connection_elements: list[tuple[str, ValueSpec]] = [
             (
                 "directory_type",
                 CascadingDropdown(
@@ -225,7 +222,7 @@ class LDAPConnectionValuespec(Transform):
                             ),
                             size=63,
                         ),
-                        IndividualOrStoredPassword(
+                        MigrateNotUpdatedToIndividualOrStoredPassword(
                             title=_("Bind password"),
                             help=_(
                                 "Specify the password to be used to bind to the LDAP directory."
@@ -254,7 +251,7 @@ class LDAPConnectionValuespec(Transform):
                     help=_(
                         "Connect to the LDAP server with a SSL encrypted connection. The "
                         '<a href="wato.py?mode=edit_configvar&site=&varname=trusted_certificate_authorities">trusted '
-                        "certificates authorities</a> configured in Check_MK will be used to validate the "
+                        "certificates authorities</a> configured in Checkmk will be used to validate the "
                         "certificate provided by the LDAP server."
                     ),
                     value=True,
@@ -336,7 +333,7 @@ class LDAPConnectionValuespec(Transform):
         return connection_elements
 
     def _vs_directory_options(self, ty: str) -> Dictionary:
-        connect_to_choices: List[CascadingDropdownChoice] = [
+        connect_to_choices: list[CascadingDropdownChoice] = [
             (
                 "fixed_list",
                 _("Manually specify list of LDAP servers"),
@@ -348,7 +345,7 @@ class LDAPConnectionValuespec(Transform):
                                 title=_("LDAP Server"),
                                 help=_(
                                     "Set the host address of the LDAP server. Might be an IP address or "
-                                    "resolvable hostname."
+                                    "resolvable host name."
                                 ),
                                 allow_empty=False,
                             ),
@@ -356,7 +353,7 @@ class LDAPConnectionValuespec(Transform):
                         (
                             "failover_servers",
                             ListOfStrings(
-                                title=_("Failover Servers"),
+                                title=_("Failover servers"),
                                 help=_(
                                     "When the connection to the first server fails with connect specific errors "
                                     "like timeouts or some other network related problems, the connect mechanism "
@@ -385,7 +382,7 @@ class LDAPConnectionValuespec(Transform):
                                 TextInput(
                                     title=_("DNS domain name to discover LDAP servers of"),
                                     help=_(
-                                        "Configure the DNS domain name of your Active directory domain here, Check_MK "
+                                        "Configure the DNS domain name of your Active directory domain here, Checkmk "
                                         "will then query this domain for it's closest domain controller to communicate "
                                         "with."
                                     ),
@@ -411,8 +408,8 @@ class LDAPConnectionValuespec(Transform):
             optional_keys=[],
         )
 
-    def _user_elements(self):
-        user_elements = [
+    def _user_elements(self) -> list[tuple[str, ValueSpec]]:
+        user_elements: list[tuple[str, ValueSpec]] = [
             (
                 "user_dn",
                 LDAPDistinguishedName(
@@ -458,7 +455,7 @@ class LDAPConnectionValuespec(Transform):
                     ),
                     size=80,
                     default_value=lambda: ldap_filter_of_connection(
-                        self._connection_id, "users", False
+                        self._connection, "users", False
                     ),
                 ),
             ),
@@ -475,8 +472,8 @@ class LDAPConnectionValuespec(Transform):
                         "directories. But some directories do not have such attributes because the memberships "
                         "are stored in the group objects as e.g. <tt>member</tt> attributes. You should use the "
                         "regular search filter whenever possible and only use this filter when it is really "
-                        "neccessary. Finally you can say, you should not use this option when using Active Directory. "
-                        "This option is neccessary in OpenLDAP directories when you like to filter by group membership.<br><br>"
+                        "necessary. Finally you can say, you should not use this option when using Active Directory. "
+                        "This option is necessary in OpenLDAP directories when you like to filter by group membership.<br><br>"
                         "If using, give a plain distinguished name of a group here, e. g. "
                         "<tt>CN=cmk-users,OU=groups,DC=example,DC=com</tt>"
                     ),
@@ -492,7 +489,7 @@ class LDAPConnectionValuespec(Transform):
                         "unique values to make an user identifyable by the value of this "
                         "attribute."
                     ),
-                    default_value=lambda: ldap_attr_of_connection(self._connection_id, "user_id"),
+                    default_value=lambda: ldap_attr_of_connection(self._connection, "user_id"),
                 ),
             ),
             (
@@ -506,7 +503,7 @@ class LDAPConnectionValuespec(Transform):
             ),
             (
                 "user_id_umlauts",
-                Transform(
+                MigrateNotUpdated(
                     valuespec=DropdownChoice(
                         title=_("Umlauts in User-IDs (deprecated)"),
                         help=_(
@@ -522,7 +519,7 @@ class LDAPConnectionValuespec(Transform):
                         ],
                         default_value="keep",
                     ),
-                    forth=lambda x: "keep" if (x == "skip") else x,
+                    migrate=lambda x: "keep" if (x == "skip") else x,
                 ),
             ),
             (
@@ -540,8 +537,8 @@ class LDAPConnectionValuespec(Transform):
 
         return user_elements
 
-    def _group_elements(self):
-        group_elements = [
+    def _group_elements(self) -> list[tuple[str, ValueSpec]]:
+        group_elements: list[tuple[str, ValueSpec]] = [
             (
                 "group_dn",
                 LDAPDistinguishedName(
@@ -583,7 +580,7 @@ class LDAPConnectionValuespec(Transform):
                     ),
                     size=80,
                     default_value=lambda: ldap_filter_of_connection(
-                        self._connection_id, "groups", False
+                        self._connection, "groups", False
                     ),
                 ),
             ),
@@ -592,25 +589,25 @@ class LDAPConnectionValuespec(Transform):
                 TextInput(
                     title=_("Member attribute"),
                     help=_("The attribute used to identify users group memberships."),
-                    default_value=lambda: ldap_attr_of_connection(self._connection_id, "member"),
+                    default_value=lambda: ldap_attr_of_connection(self._connection, "member"),
                 ),
             ),
         ]
 
         return group_elements
 
-    def _other_elements(self):
-        other_elements = [
+    def _other_elements(self) -> list[tuple[str, ValueSpec]]:
+        other_elements: list[tuple[str, ValueSpec]] = [
             (
                 "active_plugins",
                 Dictionary(
-                    title=_("Attribute sync plugins"),
+                    title=_("Attribute sync plug-ins"),
                     help=_(
-                        "It is possible to fetch several attributes of users, like Email or full names, "
-                        "from the LDAP directory. This is done by plugins which can individually enabled "
-                        "or disabled. When enabling a plugin, it is used upon the next synchonisation of "
+                        "It is possible to fetch several attributes of users, like email or full names, "
+                        "from the LDAP directory. This is done by plug-ins which can be individually enabled "
+                        "or disabled. When enabling a plug-in, it is used upon the next synchronization of "
                         "user accounts for gathering their attributes. The user options which get imported "
-                        "into Check_MK from LDAP will be locked in WATO."
+                        "into Checkmk from LDAP will be locked in Setup."
                     ),
                     elements=lambda: ldap_attribute_plugins_elements(self._connection),
                     default_keys=["email", "alias", "auth_expire"],
@@ -625,7 +622,7 @@ class LDAPConnectionValuespec(Transform):
                         "used by sites which have the "
                         '<a href="wato.py?mode=sites">Automatic User '
                         "Synchronization</a> enabled.<br><br>"
-                        "Please note: Passwords of the users are never stored in WATO and therefor never cached!"
+                        "Please note: Passwords of the users are never stored in Setup and therefor never cached!"
                     ),
                     minvalue=60,
                     default_value=300,
@@ -636,14 +633,7 @@ class LDAPConnectionValuespec(Transform):
 
         return other_elements
 
-    def _validate_ldap_connection_id(self, value, varprefix):
-        if value in [c["id"] for c in active_config.user_connections]:
-            raise MKUserError(
-                varprefix,
-                _("This ID is already used by another connection. Please choose another one."),
-            )
-
-    def _validate_ldap_connection(self, value, varprefix):
+    def _validate_ldap_connection(self, value: dict[str, Any], varprefix: str) -> None:
         for role_id, group_specs in value["active_plugins"].get("groups_to_roles", {}).items():
             if role_id == "nested":
                 continue  # This is the option to enabled/disable nested group handling, not a role to DN entry
@@ -666,7 +656,7 @@ class LDAPConnectionValuespec(Transform):
                         varprefix,
                         _(
                             "You need to configure the group base DN to be able to "
-                            "use the roles synchronization plugin."
+                            "use the roles synchronization plug-in."
                         ),
                     )
 
@@ -679,7 +669,7 @@ class LDAPConnectionValuespec(Transform):
                         varname, _("The configured DN does not match the group base DN.")
                     )
 
-    def _validate_ldap_connection_suffix(self, value, varprefix):
+    def _validate_ldap_connection_suffix(self, value: str, varprefix: str) -> None:
         for connection in active_config.user_connections:
             suffix = connection.get("suffix")
             if suffix is None:
@@ -694,201 +684,97 @@ class LDAPConnectionValuespec(Transform):
                 )
 
 
-class LDAPMode(WatoMode):
-    def _add_change(self, action_name: str, text: LogMessage, sites: List[SiteId]) -> None:
-        _changes.add_change(action_name, text, domains=[ConfigDomainGUI], sites=sites)
-
-    def _get_affected_sites(self, connection: UserConnectionSpec) -> List[SiteId]:
-        if cmk_version.is_managed_edition():
-            return list(managed.get_sites_of_customer(connection["customer"]).keys())
-        return get_login_sites()
-
-
-@mode_registry.register
-class ModeLDAPConfig(LDAPMode):
+class ModeLDAPConfig(WatoMode):
     @classmethod
     def name(cls) -> str:
         return "ldap_config"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["global"]
+
+    @property
+    def type(self) -> str:
+        return "ldap"
 
     def title(self) -> str:
         return _("LDAP connections")
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
-        page_menu: PageMenu = PageMenu(
-            dropdowns=[
-                PageMenuDropdown(
-                    name="connections",
-                    title=_("Connections"),
-                    topics=[
-                        PageMenuTopic(
-                            title=_("Add connection"),
-                            entries=[
-                                PageMenuEntry(
-                                    title=_("Add connection"),
-                                    icon_name="new",
-                                    item=make_simple_link(
-                                        folder_preserving_link([("mode", "edit_ldap_connection")])
-                                    ),
-                                    is_shortcut=True,
-                                    is_suggested=True,
-                                ),
-                            ],
-                        ),
-                    ],
-                ),
-                PageMenuDropdown(
-                    name="related",
-                    title=_("Related"),
-                    topics=[
-                        PageMenuTopic(
-                            title=_("Setup"),
-                            entries=list(self._page_menu_entries_related()),
-                        ),
-                    ],
-                ),
-            ],
+        return add_connections_page_menu(
+            title=self.title(),
+            edit_mode_path="edit_ldap_connection",
             breadcrumb=breadcrumb,
-            inpage_search=PageMenuSearch(),
-        )
-        page_menu.add_doc_reference(title=self.title(), doc_ref=DocReference.LDAP)
-        return page_menu
-
-    def _page_menu_entries_related(self) -> Iterable[PageMenuEntry]:
-        yield PageMenuEntry(
-            title=_("Users"),
-            icon_name="users",
-            item=make_simple_link(
-                makeuri_contextless(
-                    request,
-                    [("mode", "users")],
-                    filename="wato.py",
-                )
-            ),
+            documentation_reference=DocReference.LDAP,
         )
 
     def action(self) -> ActionResult:
-        if not transactions.check_transaction():
-            return redirect(self.mode_url())
-
-        connections = load_connection_config(lock=True)
-        if request.has_var("_delete"):
-            index = request.get_integer_input_mandatory("_delete")
-            connection = connections[index]
-            self._add_change(
-                "delete-ldap-connection",
-                _("Deleted LDAP connection %s") % (connection["id"]),
-                self._get_affected_sites(connection),
-            )
-            del connections[index]
-            save_connection_config(connections)
-
-        elif request.has_var("_move"):
-            from_pos = request.get_integer_input_mandatory("_move")
-            to_pos = request.get_integer_input_mandatory("_index")
-            connection = connections[from_pos]
-            self._add_change(
-                "move-ldap-connection",
-                _("Changed position of LDAP connection %s to %d") % (connection["id"], to_pos),
-                self._get_affected_sites(connection),
-            )
-            del connections[from_pos]  # make to_pos now match!
-            connections[to_pos:to_pos] = [connection]
-            save_connection_config(connections)
-
-        return redirect(self.mode_url())
+        return connection_actions(
+            config_mode_url=self.mode_url(), connection_type=self.type, custom_config_dirs=()
+        )
 
     def page(self) -> None:
-        with table_element() as table:
-            for index, connection in enumerate(load_connection_config()):
-                table.row()
-
-                table.cell(_("Actions"), css=["buttons"])
-                edit_url = folder_preserving_link(
-                    [("mode", "edit_ldap_connection"), ("id", connection["id"])]
-                )
-                delete_url = make_confirm_link(
-                    url=make_action_link([("mode", "ldap_config"), ("_delete", index)]),
-                    message=_("Do you really want to delete the LDAP connection <b>%s</b>?")
-                    % connection["id"],
-                )
-                drag_url = make_action_link([("mode", "ldap_config"), ("_move", index)])
-                clone_url = folder_preserving_link(
-                    [("mode", "edit_ldap_connection"), ("clone", connection["id"])]
-                )
-
-                html.icon_button(edit_url, _("Edit this LDAP connection"), "edit")
-                html.icon_button(clone_url, _("Create a copy of this LDAP connection"), "clone")
-                html.element_dragger_url("tr", base_url=drag_url)
-                html.icon_button(delete_url, _("Delete this LDAP connection"), "delete")
-
-                table.cell("", css=["narrow"])
-                if connection.get("disabled"):
-                    html.icon(
-                        "disabled",
-                        _("This connection is currently not being used for synchronization."),
-                    )
-                else:
-                    html.empty_icon_button()
-
-                table.cell(_("ID"), connection["id"])
-
-                if cmk_version.is_managed_edition():
-                    table.cell(_("Customer"), managed.get_customer_name(connection))
-
-                table.cell(_("Description"))
-                url = connection.get("docu_url")
-                if url:
-                    html.icon_button(
-                        url, _("Context information about this connection"), "url", target="_blank"
-                    )
-                    html.write_text("&nbsp;")
-                html.write_text(connection["description"])
+        render_connections_page(
+            connection_type=self.type,
+            edit_mode_path="edit_ldap_connection",
+            config_mode_path="ldap_config",
+        )
 
 
-@mode_registry.register
-class ModeEditLDAPConnection(LDAPMode):
+class ModeEditLDAPConnection(WatoMode):
     @classmethod
     def name(cls) -> str:
         return "edit_ldap_connection"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["global"]
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeLDAPConfig
 
-    def _from_vars(self):
+    def _from_vars(self) -> None:
         self._connection_id = request.get_ascii_input("id")
-        self._connection_cfg = {}
-        self._connections = load_connection_config(lock=transactions.is_transaction())
+        self._connection_cfg: LDAPUserConnectionConfig
 
         if self._connection_id is None:
-            clone_id = request.var("clone")
-            if clone_id is not None:
-                self._connection_cfg = self._get_connection_cfg_and_index(clone_id)[0]
+            if (clone_id := request.var("clone")) is not None:
+                self._cloned_connection(clone_id)
+            else:
+                self._new_connection()
+        else:
+            self._new = False
+            self._connection_cfg = get_ldap_connections()[self._connection_id]
 
-            self._new = True
-            return
+    def _new_connection(self) -> None:
+        self._new = True
+        directory_type: ACTIVE_DIR = ("ad", {"connect_to": ("fixed_list", {"server": ""})})
+        self._connection_cfg = {
+            "id": "",
+            "description": "",
+            "comment": "",
+            "docu_url": "",
+            "disabled": False,
+            "directory_type": directory_type,
+            "user_dn": "",
+            "user_scope": "sub",
+            "user_id_umlauts": "keep",
+            "group_dn": "",
+            "group_scope": "sub",
+            "active_plugins": {},
+            "cache_livetime": 300,
+            "type": "ldap",
+        }
 
-        self._new = False
-        self._connection_cfg, self._connection_nr = self._get_connection_cfg_and_index(
-            self._connection_id
-        )
+    def _cloned_connection(self, clone_id: str) -> None:
+        self._new = True
+        ldap_connections = get_ldap_connections()
+        self._connection_cfg = deepcopy(ldap_connections[clone_id])
+        while self._connection_cfg["id"] in ldap_connections:
+            self._connection_cfg["id"] += "x"
 
-    def _get_connection_cfg_and_index(self, connection_id):
-        for index, cfg in enumerate(self._connections):
-            if cfg["id"] == connection_id:
-                return cfg, index
-
-        if not self._connection_cfg:
-            raise MKUserError(None, _("The requested connection does not exist."))
-        return None
+        self._connection_id = self._connection_cfg["id"]
 
     def title(self) -> str:
         if self._new:
@@ -918,40 +804,52 @@ class ModeEditLDAPConnection(LDAPMode):
         return menu
 
     def action(self) -> ActionResult:
+        check_csrf_token()
+
         if not transactions.check_transaction():
             return None
 
+        _all_connections = {
+            c["id"]: c for c in load_connection_config(lock=transactions.is_transaction())
+        }
+
         vs = self._valuespec()
-        self._connection_cfg = vs.from_html_vars("connection")
-        vs.validate_value(self._connection_cfg, "connection")
-
-        self._connection_cfg["type"] = "ldap"
-
-        if self._new:
-            self._connections.insert(0, self._connection_cfg)
-            self._connection_id = self._connection_cfg["id"]
-        else:
-            self._connection_cfg["id"] = self._connection_id
-            self._connections[self._connection_nr] = self._connection_cfg
-
-        assert self._connection_id is not None
+        connection_cfg = cast(LDAPUserConnectionConfig, vs.from_html_vars("connection"))
+        vs.validate_value(dict(connection_cfg), "connection")
+        connection_cfg["type"] = "ldap"
 
         if self._new:
-            log_what = "new-ldap-connection"
-            log_text = _("Created new LDAP connection")
-        else:
-            log_what = "edit-ldap-connection"
-            log_text = _("Changed LDAP connection %s") % self._connection_id
-        self._add_change(log_what, log_text, self._get_affected_sites(self._connection_cfg))
+            if connection_cfg["id"] in _all_connections:
+                raise MKUserError(
+                    "id",
+                    _("The ID %s is already used by another connection.")
+                    % self._connection_cfg["id"],
+                )
+            _all_connections[connection_cfg["id"]] = connection_cfg
+            add_change(
+                "new-ldap-connection",
+                _("Created new LDAP connection"),
+                get_affected_sites(connection_cfg),
+            )
 
-        save_connection_config(self._connections)
-        active_config.user_connections = (
-            self._connections
-        )  # make directly available on current page
+        else:
+            _all_connections[connection_cfg["id"]] = connection_cfg
+            add_change(
+                "edit-ldap-connection",
+                _("Changed LDAP connection %s") % connection_cfg["id"],
+                get_affected_sites(connection_cfg),
+            )
+
+        self._connection_cfg = connection_cfg
+        connection_list = list(_all_connections.values())
+        save_connection_config(connection_list)
+        active_config.user_connections = connection_list  # make directly available on current page
+
         if request.var("_save"):
             return redirect(mode_url("ldap_config"))
+
         # Handle the case where a user hit "Save & Test" during creation
-        return redirect(self.mode_url(_test="1", id=self._connection_id))
+        return redirect(self.mode_url(_test="1", id=self._connection_cfg["id"]))
 
     def page(self) -> None:
         html.open_div(id_="ldap")
@@ -959,20 +857,19 @@ class ModeEditLDAPConnection(LDAPMode):
         html.open_tr()
 
         html.open_td()
-        html.begin_form("connection", method="POST")
-        html.prevent_password_auto_completion()
-        vs = self._valuespec()
-        vs.render_input("connection", self._connection_cfg)
-        vs.set_focus("connection")
-        html.hidden_fields()
-        html.end_form()
+        with html.form_context("connection", method="POST"):
+            html.prevent_password_auto_completion()
+            vs = self._valuespec()
+            vs.render_input("connection", dict(self._connection_cfg))
+            vs.set_focus("connection")
+            html.hidden_fields()
         html.close_td()
 
         html.open_td(style="padding-left:10px;vertical-align:top")
         html.h2(_("Diagnostics"))
         if not request.var("_test") or not self._connection_id:
             html.show_message(
-                HTML(
+                HTML.without_escaping(
                     "<p>%s</p><p>%s</p>"
                     % (
                         _(
@@ -991,11 +888,11 @@ class ModeEditLDAPConnection(LDAPMode):
                 )
             )
         else:
-            connection = userdb.get_connection(self._connection_id)
+            connection = get_connection(self._connection_id)
             assert isinstance(connection, LDAPUserConnector)
 
             for address in connection.servers():
-                html.h3("%s: %s" % (_("Server"), address))
+                html.h3("{}: {}".format(_("Server"), address))
                 with table_element("test", searchable=False) as table:
                     for title, test_func in self._tests():
                         table.row()
@@ -1007,9 +904,9 @@ class ModeEditLDAPConnection(LDAPMode):
                             logger.exception("error testing LDAP %s for %s", title, address)
 
                         if state:
-                            img = html.render_icon("success", _("Success"))
+                            img = html.render_icon("checkmark", _("Success"))
                         else:
-                            img = html.render_icon("failed", _("Failed"))
+                            img = html.render_icon("cross", _("Failed"))
 
                         table.cell(_("Test"), title)
                         table.cell(_("State"), img)
@@ -1022,23 +919,27 @@ class ModeEditLDAPConnection(LDAPMode):
         html.close_table()
         html.close_div()
 
-    def _tests(self):
+    def _tests(
+        self,
+    ) -> list[tuple[str, Callable[[LDAPUserConnector, str], tuple[bool, str | None]]]]:
         return [
             (_("Connection"), self._test_connect),
             (_("User Base-DN"), self._test_user_base_dn),
             (_("Count Users"), self._test_user_count),
             (_("Group Base-DN"), self._test_group_base_dn),
             (_("Count Groups"), self._test_group_count),
-            (_("Sync-Plugin: Roles"), self._test_groups_to_roles),
+            (_("Sync-Plug-in: Roles"), self._test_groups_to_roles),
         ]
 
-    def _test_connect(self, connection, address):
+    def _test_connect(self, connection: LDAPUserConnector, address: str) -> tuple[bool, str | None]:
         conn, msg = connection.connect_server(address)
         if conn:
             return (True, _("Connection established. The connection settings seem to be ok."))
         return (False, msg)
 
-    def _test_user_base_dn(self, connection, address):
+    def _test_user_base_dn(
+        self, connection: LDAPUserConnector, address: str
+    ) -> tuple[bool, str | None]:
         if not connection.has_user_base_dn_configured():
             return (False, _("The User Base DN is not configured."))
         connection.connect(enforce_new=True, enforce_server=address)
@@ -1061,7 +962,9 @@ class ModeEditLDAPConnection(LDAPMode):
             ),
         )
 
-    def _test_user_count(self, connection, address):
+    def _test_user_count(
+        self, connection: LDAPUserConnector, address: str
+    ) -> tuple[bool, str | None]:
         if not connection.has_user_base_dn_configured():
             return (False, _("The User Base DN is not configured."))
         connection.connect(enforce_new=True, enforce_server=address)
@@ -1086,7 +989,9 @@ class ModeEditLDAPConnection(LDAPMode):
             return (True, _("Found %d users for synchronization.") % len(ldap_users))
         return (False, msg)
 
-    def _test_group_base_dn(self, connection, address):
+    def _test_group_base_dn(
+        self, connection: LDAPUserConnector, address: str
+    ) -> tuple[bool, str | None]:
         if not connection.has_group_base_dn_configured():
             return (False, _("The Group Base DN is not configured, not fetching any groups."))
         connection.connect(enforce_new=True, enforce_server=address)
@@ -1094,7 +999,9 @@ class ModeEditLDAPConnection(LDAPMode):
             return (True, _("The Group Base DN could be found."))
         return (False, _("The Group Base DN could not be found."))
 
-    def _test_group_count(self, connection, address):
+    def _test_group_count(
+        self, connection: LDAPUserConnector, address: str
+    ) -> tuple[bool, str | None]:
         if not connection.has_group_base_dn_configured():
             return (False, _("The Group Base DN is not configured, not fetching any groups."))
         connection.connect(enforce_new=True, enforce_server=address)
@@ -1118,10 +1025,12 @@ class ModeEditLDAPConnection(LDAPMode):
             return (True, _("Found %d groups for synchronization.") % len(ldap_groups))
         return (False, msg)
 
-    def _test_groups_to_roles(self, connection, address):
+    def _test_groups_to_roles(
+        self, connection: LDAPUserConnector, address: str
+    ) -> tuple[bool, str | None]:
         active_plugins = connection.active_plugins()
         if "groups_to_roles" not in active_plugins:
-            return True, _("Skipping this test (Plugin is not enabled)")
+            return True, _("Skipping this test (plug-in is not enabled)")
 
         params = active_plugins["groups_to_roles"]
         connection.connect(enforce_new=True, enforce_server=address)
@@ -1143,10 +1052,13 @@ class ModeEditLDAPConnection(LDAPMode):
                     dn = group_spec[0]
 
                 if dn.lower() not in ldap_groups:
-                    return False, _("Could not find the group specified for role %s") % role_id
+                    return False, _('Could not find the group "%s" specified for role %s') % (
+                        strip_tags(dn),
+                        role_id,
+                    )
 
                 num_groups += 1
         return True, _("Found all %d groups.") % num_groups
 
-    def _valuespec(self):
+    def _valuespec(self) -> LDAPConnectionValuespec:
         return LDAPConnectionValuespec(self._new, self._connection_id)

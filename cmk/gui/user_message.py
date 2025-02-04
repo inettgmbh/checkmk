@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
-import cmk.utils.paths
-import cmk.utils.werks
-
-import cmk.gui.message as message
-import cmk.gui.pages
+from cmk.gui import message
 from cmk.gui.breadcrumb import Breadcrumb, make_simple_page_breadcrumb
 from cmk.gui.htmllib.header import make_header
 from cmk.gui.htmllib.html import html
@@ -25,12 +21,17 @@ from cmk.gui.page_menu import (
     PageMenuEntry,
     PageMenuTopic,
 )
+from cmk.gui.pages import Page, PageRegistry
 from cmk.gui.table import table_element
-from cmk.gui.watolib.global_settings import rulebased_notifications_enabled
+from cmk.gui.utils.csrf_token import check_csrf_token
 
 
-@cmk.gui.pages.page_registry.register_page("user_message")
-class ModeUserMessagePage(cmk.gui.pages.Page):
+def register(page_registry: PageRegistry) -> None:
+    page_registry.register_page("user_message")(PageUserMessage)
+    page_registry.register_page_handler("ajax_delete_user_message", ajax_delete_user_message)
+
+
+class PageUserMessage(Page):
     def title(self) -> str:
         return _("User messages")
 
@@ -70,7 +71,7 @@ def _page_menu_entries_related() -> Iterator[PageMenuEntry]:
         item=make_simple_link("user_profile.py"),
     )
 
-    if rulebased_notifications_enabled() and user.may("general.edit_notifications"):
+    if user.may("general.edit_notifications"):
         yield PageMenuEntry(
             title=_("Notification rules"),
             icon_name="topic_events",
@@ -83,7 +84,6 @@ def render_user_message_table(what: str) -> None:
     with table_element(
         "user_messages", sortable=False, searchable=False, omit_if_empty=True
     ) as table:
-
         for entry in sorted(message.get_gui_messages(), key=lambda e: e["time"], reverse=True):
             if what not in entry["methods"]:
                 continue
@@ -92,28 +92,34 @@ def render_user_message_table(what: str) -> None:
 
             msg_id = entry["id"]
             datetime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["time"]))
+            expiretime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["valid_till"]))
             msg = entry["text"].replace("\n", " ")
 
             table.cell(_("Actions"), css=["buttons"], sortable=False)
-            onclick = (
-                "cmk.utils.delete_user_message('%s', this);cmk.utils.reload_whole_page();" % msg_id
-                if what == "gui_hint"
-                else "cmk.utils.delete_user_message('%s', this);" % msg_id
-            )
-            html.icon_button(
-                "",
-                _("Delete"),
-                "delete",
-                onclick=onclick,
-            )
+            if not entry.get("security"):
+                onclick = (
+                    "cmk.utils.delete_user_message('%s', this);cmk.utils.reload_whole_page();"
+                    % msg_id
+                    if what == "gui_hint"
+                    else "cmk.utils.delete_user_message('%s', this);" % msg_id
+                )
+                html.icon_button(
+                    "",
+                    _("Delete"),
+                    "delete",
+                    onclick=onclick,
+                )
+            else:
+                html.icon("warning", _("Cannot be deleted manually, must expire"))
 
             table.cell(_("Message"), msg)
-            table.cell(_("Date"), datetime)
+            table.cell(_("Date sent"), datetime)
+            table.cell(_("Expires on"), expiretime)
 
     html.close_div()
 
 
-@cmk.gui.pages.register("ajax_delete_user_message")
 def ajax_delete_user_message() -> None:
+    check_csrf_token()
     msg_id = request.get_str_input_mandatory("id")
     message.delete_gui_message(msg_id)

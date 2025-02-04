@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import re
+from typing import Literal
 
 import pytest
-from bs4 import BeautifulSoup as bs  # type: ignore[import]
+from bs4 import BeautifulSoup as bs
+from pytest import MonkeyPatch
 
-from tests.testlib import compare_html
+from tests.unit.cmk.gui.compare_html import compare_html
 
 from cmk.gui.htmllib.html import html
-from cmk.gui.http import response
+from cmk.gui.http import request, response
 from cmk.gui.logged_in import LoggedInNobody
 from cmk.gui.table import table_element
 from cmk.gui.utils.html import HTML
@@ -44,7 +46,8 @@ def read_out_csv(text, separator):
     return data
 
 
-def test_basic(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_basic() -> None:
     table_id = 0
     title = " TEST "
 
@@ -61,12 +64,13 @@ def test_basic(request_context) -> None:  # type:ignore[no-untyped-def]
     assert read_out_simple_table(written_text) == [["A", "B"], ["1", "2"], ["1", "4"]]
 
 
-def test_cell_content_escaping(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_cell_content_escaping() -> None:
     with output_funnel.plugged():
         with table_element("ding", "TITLE", searchable=False, sortable=False) as table:
             table.row()
             table.cell("A", "<script>alert('A')</script>")
-            table.cell("B", HTML("<script>alert('B')</script>"))
+            table.cell("B", HTML.without_escaping("<script>alert('B')</script>"))
             table.cell("C", "<b>C</b>")
 
         written_text = output_funnel.drain()
@@ -76,12 +80,13 @@ def test_cell_content_escaping(request_context) -> None:  # type:ignore[no-untyp
     assert "<b>C</b>" in written_text
 
 
-def test_cell_title_escaping(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_cell_title_escaping() -> None:
     with output_funnel.plugged():
         with table_element("ding", "TITLE", searchable=False, sortable=False) as table:
             table.row()
             table.cell("<script>alert('A')</script>")
-            table.cell(HTML("<script>alert('B')</script>"))
+            table.cell(HTML.without_escaping("<script>alert('B')</script>"))
             table.cell("<b>C</b>")
 
         written_text = output_funnel.drain()
@@ -91,7 +96,8 @@ def test_cell_title_escaping(request_context) -> None:  # type:ignore[no-untyped
     assert "<b>C</b>" in written_text
 
 
-def test_plug(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_plug() -> None:
     table_id = 0
     title = " TEST "
 
@@ -99,20 +105,21 @@ def test_plug(request_context) -> None:  # type:ignore[no-untyped-def]
         with table_element("%d" % table_id, title, searchable=False, sortable=False) as table:
             table.row()
             table.cell("A", "1")
-            html.write_text("a")
+            html.write_text_permissive("a")
             table.cell("B", "2")
-            html.write_text("b")
+            html.write_text_permissive("b")
             table.row()
             table.cell("A", "1")
-            html.write_text("a")
+            html.write_text_permissive("a")
             table.cell("C", "4")
-            html.write_text("c")
+            html.write_text_permissive("c")
 
         written_text = "".join(output_funnel.drain())
     assert read_out_simple_table(written_text) == [["A", "B"], ["1a", "2b"], ["1a", "4c"]]
 
 
-def test_context(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_context() -> None:
     table_id = 0
     rows = [(i, i**3) for i in range(10)]
     header = ["Number", "Cubical"]
@@ -130,7 +137,8 @@ def test_context(request_context) -> None:  # type:ignore[no-untyped-def]
     assert data == rows
 
 
-def test_nesting(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_nesting() -> None:
     table_id = 0
     title = " TEST "
 
@@ -165,7 +173,8 @@ def test_nesting(request_context) -> None:  # type:ignore[no-untyped-def]
     ), written_text
 
 
-def test_nesting_context(request_context) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("request_context")
+def test_nesting_context() -> None:
     table_id = 0
     title = " TEST "
 
@@ -202,12 +211,17 @@ def test_nesting_context(request_context) -> None:  # type:ignore[no-untyped-def
     ), written_text
 
 
+@pytest.mark.usefixtures("request_context", "patch_theme")
 @pytest.mark.parametrize("sortable", [True, False])
 @pytest.mark.parametrize("searchable", [True, False])
 @pytest.mark.parametrize("limit", [None, 2])
 @pytest.mark.parametrize("output_format", ["html", "csv"])
-def test_table_cubical(  # type:ignore[no-untyped-def]
-    request_context, monkeypatch, sortable, searchable, limit, output_format
+def test_table_cubical(
+    monkeypatch: MonkeyPatch,
+    sortable: bool,
+    searchable: bool,
+    limit: int | Literal[False] | None,
+    output_format: str,
 ) -> None:
     monkeypatch.setattr(LoggedInNobody, "save_tableoptions", lambda s: None)
 
@@ -219,8 +233,8 @@ def test_table_cubical(  # type:ignore[no-untyped-def]
     table_id = 0
     title = " TEST "
     separator = ";"
-    html.request.set_var("_%s_sort" % table_id, "1,0")
-    html.request.set_var("_%s_actions" % table_id, "1")
+    request.set_var("_%s_sort" % table_id, "1,0")
+    request.set_var("_%s_actions" % table_id, "1")
 
     def _render_table() -> None:
         with table_element(
@@ -259,5 +273,5 @@ def test_table_cubical(  # type:ignore[no-untyped-def]
         limit = len(rows)
 
     # Assert data correctness
-    assert len(data) <= limit, "Wrong number of rows: Got %s, should be <= %s" % (len(data), limit)
-    assert data == rows[:limit], "Incorrect data: %s\n\nVS\n%s" % (data, rows[:limit])
+    assert len(data) <= limit, f"Wrong number of rows: Got {len(data)}, should be <= {limit}"
+    assert data == rows[:limit], f"Incorrect data: {data}\n\nVS\n{rows[:limit]}"

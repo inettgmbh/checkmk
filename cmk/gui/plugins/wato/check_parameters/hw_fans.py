@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,11 +9,11 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersEnvironment,
 )
-from cmk.gui.valuespec import Checkbox, Dictionary, Integer, TextInput, Transform, Tuple
+from cmk.gui.valuespec import Checkbox, Dictionary, Integer, TextInput, Tuple
 
 
-def _parameter_valuespec_hw_fans():
-    hw_fans_dict = Dictionary(
+def _parameter_valuespec_hw_fans() -> Dictionary:
+    return Dictionary(
         elements=[
             (
                 "lower",
@@ -42,11 +42,7 @@ def _parameter_valuespec_hw_fans():
                 Checkbox(title=_("Performance data"), label=_("Enable performance data")),
             ),
         ],
-        optional_keys=["upper", "output_metrics"],
-    )
-    return Transform(
-        valuespec=hw_fans_dict,
-        forth=lambda spec: spec if isinstance(spec, dict) else {"lower": spec},
+        optional_keys=["lower", "upper", "output_metrics"],
     )
 
 

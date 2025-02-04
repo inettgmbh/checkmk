@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -10,7 +10,7 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersStorage,
 )
-from cmk.gui.valuespec import Dictionary, DropdownChoice, TextInput, Transform
+from cmk.gui.valuespec import Dictionary, DropdownChoice, TextInput
 
 
 def _item_spec_raid_disk():
@@ -23,44 +23,34 @@ def _item_spec_raid_disk():
     )
 
 
-def _parameter_valuespec_raid_disk():
-    return Transform(
-        valuespec=Dictionary(
-            elements=[
-                (
-                    "expected_state",
-                    TextInput(
-                        title=_("Expected state"),
-                        help=_(
-                            "State the disk is expected to be in. Typical good states "
-                            "are online, host spare, OK and the like. The exact way of how "
-                            "to specify a state depends on the check and hard type being used. "
-                            "Please take examples from discovered checks for reference."
-                        ),
+def _parameter_valuespec_raid_disk() -> Dictionary:
+    return Dictionary(
+        elements=[
+            (
+                "expected_state",
+                TextInput(
+                    title=_("Expected state"),
+                    help=_(
+                        "State the disk is expected to be in. Typical good states "
+                        "are online, host spare, OK and the like. The exact way of how "
+                        "to specify a state depends on the check and hard type being used. "
+                        "Please take examples from discovered checks for reference."
                     ),
                 ),
-                (
-                    "use_device_states",
-                    DropdownChoice(
-                        title=_("Use device states and overwrite expected status"),
-                        choices=[
-                            (False, _("Ignore")),
-                            (True, _("Use device states")),
-                        ],
-                        default_value=True,
-                    ),
+            ),
+            (
+                "use_device_states",
+                DropdownChoice(
+                    title=_("Use device states and overwrite expected status"),
+                    choices=[
+                        (False, _("Ignore")),
+                        (True, _("Use device states")),
+                    ],
+                    default_value=True,
                 ),
-            ],
-        ),
-        forth=_transform_expected_state,
+            ),
+        ],
     )
-
-
-def _transform_expected_state(params):
-    # This was introduced in the Checkmk version 2.2.0.
-    if isinstance(params, str):
-        return {"expected_state": params}
-    return params
 
 
 rulespec_registry.register(

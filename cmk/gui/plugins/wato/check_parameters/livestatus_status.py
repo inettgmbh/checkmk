@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -105,8 +105,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "average_latency_generic",
                 Tuple(
-                    title=_("Levels Latency Check"),
-                    help=_("Set Levels for the Check Latency Time"),
+                    title=_("Levels latency check"),
+                    help=_("Set levels for the check latency time"),
                     elements=[
                         Age(
                             title=_("Warning at or above"),
@@ -122,8 +122,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "average_latency_cmk",
                 Tuple(
-                    title=_("Levels Latency Checkmk"),
-                    help=_("Set Levels for the Checkmk Latency Time"),
+                    title=_("Levels latency checker"),
+                    help=_("Set levels for the checker latency time"),
                     elements=[
                         Age(
                             title=_("Warning at or above"),
@@ -139,8 +139,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "average_latency_fetcher",
                 Tuple(
-                    title=_("Levels Latency Fetcher"),
-                    help=_("Set Levels for the Fetcher Latency Time"),
+                    title=_("Levels latency fetcher"),
+                    help=_("Set levels for the fetcher latency time"),
                     elements=[
                         Age(
                             title=_("Warning at or above"),
@@ -156,8 +156,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "helper_usage_generic",
                 Tuple(
-                    title=_("Levels Helper usage Check"),
-                    help=_("Set Levels for the Check helper Usage"),
+                    title=_("Levels helper usage check"),
+                    help=_("Set levels for the check helper usage"),
                     elements=[
                         Percentage(
                             title=_("Warning at or above"),
@@ -173,8 +173,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "helper_usage_cmk",
                 Tuple(
-                    title=_("Levels Helper usage Checkmk"),
-                    help=_("Set Levels for the Checkmk helper Usage"),
+                    title=_("Levels helper usage Checkmk"),
+                    help=_("Set levels for the Checkmk helper usage"),
                     elements=[
                         Percentage(
                             title=_("Warning at or above"),
@@ -190,8 +190,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "helper_usage_fetcher",
                 Tuple(
-                    title=_("Levels Helper usage fetcher"),
-                    help=_("Set Levels for the fetcher helper Usage"),
+                    title=_("Levels helper usage fetcher"),
+                    help=_("Set levels for the fetcher helper usage"),
                     elements=[
                         Percentage(
                             title=_("Warning at or above"),
@@ -207,8 +207,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "helper_usage_checker",
                 Tuple(
-                    title=_("Levels Helper usage checker"),
-                    help=_("Set Levels for the checker helper Usage"),
+                    title=_("Levels helper usage checker"),
+                    help=_("Set levels for the checker helper usage"),
                     elements=[
                         Percentage(
                             title=_("Warning at or above"),
@@ -224,8 +224,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "livestatus_usage",
                 Tuple(
-                    title=_("Levels Livestatus Usage"),
-                    help=_("Set Levels for the Checkmk Livestatus Usage"),
+                    title=_("Levels livestatus usage"),
+                    help=_("Set levels for the Checkmk livestatus usage"),
                     elements=[
                         Percentage(
                             title=_("Warning at or above"),
@@ -241,8 +241,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "livestatus_overflows_rate",
                 Tuple(
-                    title=_("Levels Livestatus Overflows"),
-                    help=_("Set Levels for the Checkmk Livestatus Overflows"),
+                    title=_("Levels livestatus overflows"),
+                    help=_("Set levels for the Checkmk livestatus overflows"),
                     elements=[
                         Float(
                             title=_("Warning at or above"),
@@ -260,8 +260,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "levels_hosts",
                 Tuple(
-                    title=_("Levels Hosts"),
-                    help=_("Set Levels for the number of Hosts"),
+                    title=_("Levels hosts"),
+                    help=_("Set levels for the number of hosts"),
                     elements=[
                         Integer(
                             title=_("Warning at or above"),
@@ -277,8 +277,8 @@ def _parameter_valuespec_livestatus_status():
             (
                 "levels_services",
                 Tuple(
-                    title=_("Levels Services"),
-                    help=_("Set Levels for the number of Services"),
+                    title=_("Levels services"),
+                    help=_("Set levels for the number of services"),
                     elements=[
                         Integer(
                             title=_("Warning at or above"),
@@ -287,6 +287,120 @@ def _parameter_valuespec_livestatus_status():
                         Integer(
                             title=_("Critical at or above"),
                             unit=_("Services"),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "carbon_overflows_rate",
+                Tuple(
+                    title=_("Carbon overflows rate"),
+                    help=_("Rate of performance data loss for carbon"),
+                    elements=[
+                        Float(
+                            title=_("Warning at or above"),
+                            unit=_("/s"),
+                            default_value=0.01,
+                        ),
+                        Float(
+                            title=_("Critical at or above"),
+                            unit=_("/s"),
+                            default_value=0.02,
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "carbon_queue_usage",
+                Tuple(
+                    title=_("Carbon queue usage"),
+                    help=_("Carbon queue usage"),
+                    elements=[
+                        Percentage(
+                            title=_("Warning at or above"),
+                            unit=_("%"),
+                            default_value=60,
+                        ),
+                        Percentage(
+                            title=_("Critical at or above"),
+                            unit=_("%"),
+                            default_value=80,
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "influxdb_overflows_rate",
+                Tuple(
+                    title=_("InfluxDB overflows rate"),
+                    help=_("Rate of performance data loss for InfluxDB"),
+                    elements=[
+                        Float(
+                            title=_("Warning at or above"),
+                            unit=_("/s"),
+                            default_value=0.01,
+                        ),
+                        Float(
+                            title=_("Critical at or above"),
+                            unit=_("/s"),
+                            default_value=0.02,
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "influxdb_queue_usage",
+                Tuple(
+                    title=_("InfluxDB queue usage"),
+                    help=_("InfluxDB queue usage"),
+                    elements=[
+                        Percentage(
+                            title=_("Warning at or above"),
+                            unit=_("%"),
+                            default_value=60,
+                        ),
+                        Percentage(
+                            title=_("Critical at or above"),
+                            unit=_("%"),
+                            default_value=80,
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "rrdcached_overflows_rate",
+                Tuple(
+                    title=_("RRD overflows rate"),
+                    help=_("Rate of performance data loss for RRD"),
+                    elements=[
+                        Float(
+                            title=_("Warning at or above"),
+                            unit=_("/s"),
+                            default_value=0.01,
+                        ),
+                        Float(
+                            title=_("Critical at or above"),
+                            unit=_("/s"),
+                            default_value=0.02,
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "rrdcached_queue_usage",
+                Tuple(
+                    title=_("RRD queue usage"),
+                    help=_("RRD queue usage"),
+                    elements=[
+                        Percentage(
+                            title=_("Warning at or above"),
+                            unit=_("%"),
+                            default_value=60,
+                        ),
+                        Percentage(
+                            title=_("Critical at or above"),
+                            unit=_("%"),
+                            default_value=80,
                         ),
                     ],
                 ),

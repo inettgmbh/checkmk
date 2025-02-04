@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -15,7 +15,7 @@ from cmk.gui.valuespec import Dictionary, Percentage, TextInput, Tuple
 def _parameter_valuespec_oracle_processes():
     return Dictionary(
         help=_(
-            "Here you can override the default levels for the ORACLE Processes check. The levels "
+            "Here you can override the default levels for the Oracle processes check. The levels "
             "are applied on the number of used processes in percentage of the configured limit."
         ),
         elements=[
@@ -41,6 +41,6 @@ rulespec_registry.register(
         item_spec=lambda: TextInput(title=_("Database SID"), size=12, allow_empty=False),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_oracle_processes,
-        title=lambda: _("Oracle Processes"),
+        title=lambda: _("Oracle processes"),
     )
 )

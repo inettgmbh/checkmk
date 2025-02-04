@@ -1,41 +1,71 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# ruff: noqa: A005
+
 """Wrapper layer between WSGI and GUI application code"""
 
 import ast
 import json
+import time
 import urllib.parse
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import (
-    Any,
-    Dict,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-    overload,
-    Protocol,
-    Tuple,
-    TypeVar,
-    Union,
-)
+from enum import auto, StrEnum
+from typing import Any, cast, Literal, overload, Protocol, TypeVar
 
-import werkzeug
-from six import ensure_str
+import flask
+from flask import request as flask_request
+from pydantic import BaseModel
 from werkzeug.utils import get_content_type
 
-from cmk.utils.site import url_prefix
+from cmk.ccc.exceptions import MKGeneralException
+from cmk.ccc.site import url_prefix
 
-import cmk.gui.utils as utils
+from cmk.utils.urls import is_allowed_url
+
 from cmk.gui.ctx_stack import request_local_attr
-from cmk.gui.exceptions import MKGeneralException, MKUserError
+from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
 
-UploadedFile = Tuple[str, str, bytes]
+UploadedFile = tuple[str, str, bytes]
 T = TypeVar("T")
 Value = TypeVar("Value")
+
+HTTPMethod = Literal["get", "put", "post", "delete"]
+
+
+class ContentDispositionType(StrEnum):
+    """
+    https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Disposition
+
+    Form data currently not supported by us.
+    """
+
+    INLINE = auto()
+    ATTACHMENT = auto()
+
+
+# This is used to match content-type to file ending (file extension) in
+# set_content_disposition. Feel free to add more extensions and content-types.
+# However please make sure that the added types are precise as we are
+# restricting types mitigate risk.
+FILE_EXTENSIONS = {
+    "application/javascript": [".js"],
+    "application/json": [".json"],
+    "application/pdf": [".pdf"],
+    "application/x-deb": [".deb"],
+    "application/x-rpm": [".rpm"],
+    "application/x-pkg": [".pkg"],
+    "application/x-tgz": [".tar.gz"],
+    "application/x-msi": [".msi"],
+    "application/x-mkp": [".mkp"],
+    "image/png": [".png"],
+    "text/csv": [".csv"],
+    "text/plain": [".txt"],
+    "application/x-pem-file": [".pem"],
+}
 
 
 class ValidatedClass(Protocol):
@@ -47,6 +77,8 @@ class ValidatedClass(Protocol):
 
 
 Validation_T = TypeVar("Validation_T", bound=ValidatedClass)
+
+Model_T = TypeVar("Model_T", bound=BaseModel)
 
 
 class LegacyVarsMixin:
@@ -62,7 +94,8 @@ class LegacyVarsMixin:
 
     def __init__(self, *args: Any, **kw: Any) -> None:
         super().__init__(*args, **kw)
-        self.legacy_vars = self._vars = {}  # type: Dict[str, Union[str, object]]
+        self._vars: dict[str, str | object] = {}
+        self.legacy_vars = self._vars
 
     def set_var(self, varname: str, value: str) -> None:
         if not isinstance(value, str):
@@ -78,7 +111,7 @@ class LegacyVarsMixin:
             if varname.startswith(prefix):
                 self.del_var(varname)
 
-    def itervars(self, prefix: str = "") -> Iterator[Tuple[str, str]]:
+    def itervars(self, prefix: str = "") -> Iterator[tuple[str, str]]:
         skip = []
         for name, value in self.legacy_vars.items():
             if name.startswith(prefix):
@@ -105,7 +138,16 @@ class LegacyVarsMixin:
         # up with 1.7, once we have moved to python 3.
         return super().has_var(varname)  # type: ignore[misc]
 
-    def var(self, name: str, default: Optional[str] = None) -> Optional[str]:
+    @overload
+    def var(self, name: str) -> str | None: ...
+
+    @overload
+    def var(self, name: str, default: str) -> str: ...
+
+    @overload
+    def var(self, name: str, default: str | None) -> str | None: ...
+
+    def var(self, name: str, default: str | None = None) -> str | None:
         legacy_var = self.legacy_vars.get(name, None)
         if legacy_var is not None:
             if legacy_var is not self.DELETED:
@@ -121,7 +163,7 @@ class LegacyVarsMixin:
 class LegacyUploadMixin:
     def __init__(self, *args: Any, **kw: Any) -> None:
         super().__init__(*args, **kw)
-        self.upload_cache: Dict[str, UploadedFile] = {}
+        self.upload_cache: dict[str, UploadedFile] = {}
 
     def uploaded_file(self, name: str) -> UploadedFile:
         # NOTE: There could be multiple entries with the same key, we ignore that for now...
@@ -147,19 +189,25 @@ class LegacyDeprecatedMixin:
     methods and properties in Request itself.
     """
 
-    def itervars(self, prefix: str = "") -> Iterator[Tuple[str, Optional[str]]]:
+    def itervars(self, prefix: str = "") -> Iterator[tuple[str, str | None]]:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
         # up with 1.7, once we have moved to python 3.
         # TODO: Deprecated
-        # ? type of values attribute and functions defined with it are unclear
         for name, values in self.values.lists():  # type: ignore[attr-defined]
             if name.startswith(prefix):
                 # Preserve previous behaviour
-                yield name, ensure_str(  # pylint: disable= six-ensure-str-bin-call
-                    values[-1]
-                ) if values else None
+                yield (name, (values[-1] if values else None))
 
-    def var(self, name: str, default: Optional[str] = None) -> Optional[str]:
+    @overload
+    def var(self, name: str) -> str | None: ...
+
+    @overload
+    def var(self, name: str, default: str) -> str: ...
+
+    @overload
+    def var(self, name: str, default: str | None) -> str | None: ...
+
+    def var(self, name: str, default: str | None = None) -> str | None:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
         # up with 1.7, once we have moved to python 3.
         # TODO: Deprecated
@@ -168,7 +216,7 @@ class LegacyDeprecatedMixin:
             return default
 
         # Preserve previous behaviour
-        return ensure_str(values[-1])  # pylint: disable= six-ensure-str-bin-call
+        return str(values[-1])
 
     def has_var(self, varname: str) -> bool:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
@@ -183,7 +231,7 @@ class LegacyDeprecatedMixin:
         # TODO: Deprecated
         return varname in self.cookies  # type: ignore[attr-defined]
 
-    def cookie(self, varname: str, default: Optional[str] = None) -> Optional[str]:
+    def cookie(self, varname: str, default: str | None = None) -> str | None:
         """Return the value of the cookie provided by the client.
 
         If the cookie has not been set, None will be returned as a default.
@@ -191,21 +239,19 @@ class LegacyDeprecatedMixin:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
         # up with 1.7, once we have moved to python 3.
         # TODO: Deprecated
-        # ? type of self.cookies argument is unclear
         value = self.cookies.get(varname, default)  # type: ignore[attr-defined]
         if value is not None:
-            # Why would we want to do that? test_http.py requires it though.
-            return ensure_str(value)  # pylint: disable= six-ensure-str-bin-call
+            return value
         return None
 
-    def get_request_header(self, key: str, default: Optional[str] = None) -> Optional[str]:
+    def get_request_header(self, key: str, default: str | None = None) -> str | None:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
         # up with 1.7, once we have moved to python 3.
         # TODO: Deprecated
         return self.headers.get(key, default)  # type: ignore[attr-defined]
 
     @property
-    def referer(self) -> Optional[str]:
+    def referer(self) -> str | None:
         # TODO: mypy does not know about the related mixin classes. This whole class can be cleaned
         # up with 1.7, once we have moved to python 3.
         # TODO: Deprecated
@@ -240,7 +286,7 @@ class LegacyDeprecatedMixin:
         return self.is_secure  # type: ignore[attr-defined]
 
 
-def mandatory_parameter(varname: str, value: Optional[T]) -> T:
+def mandatory_parameter(varname: str, value: T | None) -> T:
     if value is None:
         raise MKUserError(varname, _('The parameter "%s" is missing.') % varname)
     return value
@@ -250,49 +296,53 @@ class Request(
     LegacyVarsMixin,
     LegacyUploadMixin,
     LegacyDeprecatedMixin,
-    werkzeug.Request,
+    flask.Request,
 ):
     """Provides information about the users HTTP-request to the application
 
     This class essentially wraps the information provided with the WSGI environment
-    and provides some low level functions to the application for accessing this information.
+    and provides some low-level functions to the application for accessing this information.
     These should be basic HTTP request handling things and no application specific mechanisms.
     """
 
-    # pylint: disable=too-many-ancestors
+    # The system web servers configured request timeout.
+    # This is the time before the request terminates from the view of the client.
+    request_timeout = 110
 
-    def __init__(  # type:ignore[no-untyped-def]
-        self, environ, populate_request=True, shallow=False
-    ) -> None:
+    # TODO investigate why there are so many form_parts
+    max_form_parts = 20000
+    max_form_memory_size = 20 * 1024 * 1024
+    meta: dict[str, Any]
+
+    def __init__(self, environ: dict, populate_request: bool = True, shallow: bool = False) -> None:
+        # Modify the environment to fix double URLs in some apache configurations, only once.
+        if "apache.version" in environ and environ.get("SCRIPT_NAME"):
+            environ["PATH_INFO"] = environ["SCRIPT_NAME"]
+            del environ["SCRIPT_NAME"]
+
         super().__init__(environ, populate_request=populate_request, shallow=shallow)
+        self.started = time.monotonic()
+        self.meta = {}
         self._verify_not_using_threaded_mpm()
 
     def _verify_not_using_threaded_mpm(self) -> None:
         if self.is_multithread:
             raise MKGeneralException(
                 _(
-                    "You are trying to Checkmk together with a threaded Apache multiprocessing module (MPM). "
-                    "Check_MK is only working with the prefork module. Please change the MPM module to make "
-                    "Check_MK work."
+                    "You are trying to use Checkmk together with a threaded "
+                    "Apache multiprocessing module (MPM). Checkmk is only "
+                    "working with the prefork module. Please change the MPM "
+                    "module to make Checkmk work."
                 )
             )
 
     @property
-    def request_timeout(self) -> int:
-        """The system web servers configured request timeout.
-
-        This is the time before the request terminates from the view of the client."""
-        # TODO: Found no way to get this information from WSGI environment. Hard code
-        #       the timeout for the moment.
-        return 110
-
-    @property
-    def remote_ip(self) -> Optional[str]:
+    def remote_ip(self) -> str | None:
         """Selects remote addr from the given list of ips in
         X-Forwarded-For. Picks first non-trusted ip address.
         """
-        trusted_proxies: List[str] = ["127.0.0.1", "::1"]
-        remote_addr: Optional[str] = self.remote_addr
+        trusted_proxies: list[str] = ["127.0.0.1", "::1"]
+        remote_addr: str | None = self.remote_addr
         forwarded_for = self.environ.get("HTTP_X_FORWARDED_FOR", "").split(",")
         if remote_addr in trusted_proxies:
             return next(
@@ -305,19 +355,31 @@ class Request(
             )
         return self.remote_addr
 
-    def get_str_input(self, varname: str, deflt: Optional[str] = None) -> Optional[str]:
+    def get_str_input(self, varname: str, deflt: str | None = None) -> str | None:
         return self.var(varname, deflt)
 
-    def get_str_input_mandatory(self, varname: str, deflt: Optional[str] = None) -> str:
+    def get_str_input_mandatory(self, varname: str, deflt: str | None = None) -> str:
         return mandatory_parameter(varname, self.get_str_input(varname, deflt))
+
+    def get_model_mandatory(
+        self,
+        model: type[Model_T],
+        varname: str,
+    ) -> Model_T:
+        """Try to convert the value of an HTTP request variable to a given pydantic model"""
+        try:
+            return model.model_validate_json(mandatory_parameter(varname, self.var(varname)))
+        except ValueError as exception:
+            raise MKUserError(varname, _("The value is not valid: '%s'") % exception)
 
     @overload
     def get_validated_type_input(
         self,
         type_: type[Validation_T],
         varname: str,
-    ) -> Optional[Validation_T]:
-        ...
+        *,
+        empty_is_none: bool = False,
+    ) -> Validation_T | None: ...
 
     @overload
     def get_validated_type_input(
@@ -325,8 +387,9 @@ class Request(
         type_: type[Validation_T],
         varname: str,
         deflt: None,
-    ) -> Optional[Validation_T]:
-        ...
+        *,
+        empty_is_none: bool = False,
+    ) -> Validation_T | None: ...
 
     @overload
     def get_validated_type_input(
@@ -334,25 +397,33 @@ class Request(
         type_: type[Validation_T],
         varname: str,
         deflt: Validation_T,
-    ) -> Validation_T:
-        ...
+        *,
+        empty_is_none: bool = False,
+    ) -> Validation_T: ...
 
     def get_validated_type_input(
         self,
         type_: type[Validation_T],
         varname: str,
-        deflt: Optional[Validation_T] = None,
-    ) -> Optional[Validation_T]:
-        """try to convert the value of a HTTP request variable to given type
+        deflt: Validation_T | None = None,
+        *,
+        empty_is_none: bool = False,
+    ) -> Validation_T | None:
+        """Try to convert the value of an HTTP request variable to a given type
 
-        The Checkmk UI excepts `MKUserError` exceptions to be raised by
-        validation errors. In this case the UI displays a textual error message to the
-        user without triggering a crash report. The `ValueError` exceptions raises by
-        the `__new__` method of `type_` are catched and re-raised as `MKUserError` to
+        If empty_is_none is set to True, treat variables that are present but empty as
+        if they were missing (and return the default).
+
+        The Checkmk UI excepts `MKUserError` *exceptions* to be raised by
+        validation errors. In this case, the UI displays a textual error message to the
+        user without triggering a crash report. The `ValueError` *exceptions* raised by
+        the `__new__` method of `type_` are caught and re-raised as `MKUserError` to
         trigger the intended error handling.
         """
         raw_value = self.var(varname)
         if raw_value is None:
+            return deflt
+        if empty_is_none and not raw_value:
             return deflt
         try:
             return type_(raw_value)
@@ -363,13 +434,19 @@ class Request(
         self,
         type_: type[Validation_T],
         varname: str,
-        deflt: Optional[Validation_T] = None,
+        deflt: Validation_T | None = None,
+        *,
+        empty_is_none: bool = False,
     ) -> Validation_T:
-        return mandatory_parameter(varname, self.get_validated_type_input(type_, varname, deflt))
+        """Like get_validated_type_input, but raise an error if the input is missing"""
+        return mandatory_parameter(
+            varname,
+            self.get_validated_type_input(type_, varname, deflt, empty_is_none=empty_is_none),
+        )
 
-    def get_ascii_input(self, varname: str, deflt: Optional[str] = None) -> Optional[str]:
+    def get_ascii_input(self, varname: str, deflt: str | None = None) -> str | None:
         """Helper to retrieve a byte string and ensure it only contains ASCII characters
-        In case a non ASCII character is found an MKUserError() is raised."""
+        In case a non-ASCII character is found an MKUserError() is raised."""
         value = self.get_str_input(varname, deflt)
         if value is None:
             return value
@@ -377,20 +454,24 @@ class Request(
             raise MKUserError(varname, _("The given text must only contain ASCII characters."))
         return value
 
-    def get_ascii_input_mandatory(self, varname: str, deflt: Optional[str] = None) -> str:
-        return mandatory_parameter(varname, self.get_ascii_input(varname, deflt))
+    def get_ascii_input_mandatory(
+        self, varname: str, deflt: str | None = None, allowed_values: set[str] | None = None
+    ) -> str:
+        value = mandatory_parameter(varname, self.get_ascii_input(varname, deflt))
+        if allowed_values is not None and value not in allowed_values:
+            raise MKUserError(varname, _("Value must be one of '%s'") % "', '".join(allowed_values))
+        return value
 
-    def get_binary_input(self, varname: str, deflt: Optional[bytes] = None) -> Optional[bytes]:
+    def get_binary_input(self, varname: str, deflt: bytes | None = None) -> bytes | None:
         val = self.var(varname, deflt.decode() if deflt is not None else None)
         if val is None:
             return None
         return val.encode()
 
-    def get_binary_input_mandatory(self, varname: str, deflt: Optional[bytes] = None) -> bytes:
+    def get_binary_input_mandatory(self, varname: str, deflt: bytes | None = None) -> bytes:
         return mandatory_parameter(varname, self.get_binary_input(varname, deflt))
 
-    def get_integer_input(self, varname: str, deflt: Optional[int] = None) -> Optional[int]:
-
+    def get_integer_input(self, varname: str, deflt: int | None = None) -> int | None:
         value = self.var(varname, "%d" % deflt if deflt is not None else None)
         if value is None:
             return None
@@ -400,11 +481,10 @@ class Request(
         except ValueError:
             raise MKUserError(varname, _('The parameter "%s" is not an integer.') % varname)
 
-    def get_integer_input_mandatory(self, varname: str, deflt: Optional[int] = None) -> int:
+    def get_integer_input_mandatory(self, varname: str, deflt: int | None = None) -> int:
         return mandatory_parameter(varname, self.get_integer_input(varname, deflt))
 
-    def get_float_input(self, varname: str, deflt: Optional[float] = None) -> Optional[float]:
-
+    def get_float_input(self, varname: str, deflt: float | None = None) -> float | None:
         value = self.var(varname, "%s" % deflt if deflt is not None else None)
         if value is None:
             return None
@@ -414,10 +494,10 @@ class Request(
         except ValueError:
             raise MKUserError(varname, _('The parameter "%s" is not a float.') % varname)
 
-    def get_float_input_mandatory(self, varname: str, deflt: Optional[float] = None) -> float:
+    def get_float_input_mandatory(self, varname: str, deflt: float | None = None) -> float:
         return mandatory_parameter(varname, self.get_float_input(varname, deflt))
 
-    def get_item_input(self, varname: str, collection: Mapping[str, Value]) -> Tuple[Value, str]:
+    def get_item_input(self, varname: str, collection: Mapping[str, Value]) -> tuple[Value, str]:
         """Helper to get an item from the given collection
         Raises a MKUserError() in case the requested item is not available."""
         item = self.get_ascii_input(varname)
@@ -429,7 +509,7 @@ class Request(
     # TODO: Invalid default URL is not validated. Should we do it?
     # TODO: This is only protecting against some not allowed URLs but does not
     #       really verify that this is some kind of URL.
-    def get_url_input(self, varname: str, deflt: Optional[str] = None) -> str:
+    def get_url_input(self, varname: str, deflt: str | None = None) -> str:
         """Helper function to retrieve a URL from HTTP parameters
 
         This is mostly used to the "back url" which can then be used to create
@@ -447,7 +527,7 @@ class Request(
         url = self.var(varname)
         assert url is not None
 
-        if not utils.is_allowed_url(url):
+        if not is_allowed_url(url):
             if deflt:
                 return deflt
             raise MKUserError(varname, _('The parameter "%s" is not a valid URL.') % varname)
@@ -493,7 +573,7 @@ class Request(
     # TODO: The mixture of request variables and json request argument is a nasty hack. Split this
     # up into explicit methods that either use the one or the other method, remove the call sites to
     # this method and then this method.
-    def get_request(self, exclude_vars: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_request(self, exclude_vars: list[str] | None = None) -> dict[str, Any]:
         """Returns a dictionary containing all parameters the user handed over to this request.
 
         The concept is that the user can either provide the data in a single "request" variable,
@@ -531,7 +611,7 @@ class Request(
         return request_
 
 
-class Response(werkzeug.Response):
+class Response(flask.Response):
     # NOTE: Currently we rely on a *relative* Location header in redirects!
     autocorrect_location_header = False
 
@@ -546,9 +626,40 @@ class Response(werkzeug.Response):
         super().delete_cookie(key, path=url_prefix())
 
     def set_content_type(self, mime_type: str) -> None:
-        self.headers["Content-type"] = get_content_type(mime_type, self.charset)
+        self.headers["Content-type"] = get_content_type(mime_type, "utf-8")
+
+    def set_csp_form_action(self, form_action: str) -> None:
+        """If you have a form action that is not within the site, the
+        Content-Security-Policy will block it. So you can add it here, Apache
+        will then take this value and complete the CSP"""
+
+        self.headers["Content-Security-Policy"] = (
+            f"form-action 'self' javascript: 'unsafe-inline' {form_action};"
+        )
+
+    def set_content_disposition(self, header_type: ContentDispositionType, filename: str) -> None:
+        """Define the Content-Disposition header here, this HTTP header controls how
+        browsers present download data. If you are providing custom meta data for
+        the filename and process (such as attachment, inline etc) by which a browser
+        should make use when downloading.
+        """
+
+        if '"' in filename or "\\" in filename:
+            raise ValueError("Invalid character in filename")
+        for extensions in FILE_EXTENSIONS.get(str(self.mimetype), []):
+            if filename.endswith(extensions):
+                break
+        else:
+            raise ValueError("Invalid file extension: Have you set the Content-Type header?")
+        self.headers["Content-Disposition"] = f'{header_type}; filename="{filename}"'
+
+    def set_caching_headers(self) -> None:
+        if "Cache-Control" in self.headers:
+            # Do not override previous set settings
+            return
+        self.headers["Cache-Control"] = "no-store"
 
 
 # From request context
-request: Request = request_local_attr("request")
-response: Response = request_local_attr("response")
+request: Request = cast(Request, flask_request)
+response = request_local_attr("response", Response)

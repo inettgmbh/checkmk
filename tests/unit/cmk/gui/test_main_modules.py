@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
 
 import importlib
 import sys
@@ -21,7 +22,6 @@ def _plugin_path(main_module_name: str) -> Path:
 @pytest.fixture(
     name="main_module_name",
     params=[
-        "cron",
         "dashboard",
         "metrics",
         "sidebar",
@@ -30,7 +30,6 @@ def _plugin_path(main_module_name: str) -> Path:
         "visuals",
         "wato",
         "watolib",
-        "webapi",
     ],
 )
 def fixture_main_module_name(request):
@@ -46,20 +45,22 @@ def fixture_local_plugin(main_module_name):
 
 
 @pytest.mark.usefixtures("local_plugin")
-def test_load_local_plugin(main_module_name) -> None:  # type:ignore[no-untyped-def]
+def test_load_local_plugin(main_module_name: str) -> None:
     main_module = importlib.import_module(f"cmk.gui.{main_module_name}")
     assert "ding" not in main_module.__dict__
 
     try:
-        # Special case: watolib plugin loading is triggered by wato main module
+        # Special case: watolib plug-in loading is triggered by wato main module
         main_modules._call_load_plugins_hooks(
             [
-                main_module
-                if main_module_name != "watolib"
-                else importlib.import_module("cmk.gui.wato")
+                (
+                    main_module
+                    if main_module_name != "watolib"
+                    else importlib.import_module("cmk.gui.wato")
+                )
             ]
         )
-        assert main_module.ding == "dong"  # type: ignore[attr-defined]
+        assert main_module.ding == "dong"
     finally:
         del main_module.__dict__["ding"]
 
@@ -72,17 +73,12 @@ def test_load_local_plugin(main_module_name) -> None:  # type:ignore[no-untyped-
         "watolib",
         "sidebar",
         "userdb",
-        "webapi",
         "main_modules",
         "dashboard",
         "visuals",
-        "cron",
         "config",
         "bi",
-        "openapi",
-        "openapi/endpoints",
         "views",
-        "views/perfometers",
         "views/icons",
         "metrics",
     ],
@@ -91,9 +87,9 @@ def fixture_plugin_module_dir(request):
     return request.param
 
 
-def test_plugins_loaded(plugin_module_dir) -> None:  # type:ignore[no-untyped-def]
+def test_plugins_loaded(plugin_module_dir: str) -> None:
     if plugin_module_dir == "bi":
-        raise pytest.skip("No plugin at the moment")
+        raise pytest.skip("No plug-in at the moment")
 
     loaded_module_names = [
         name  #

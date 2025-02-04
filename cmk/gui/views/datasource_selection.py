@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import cmk.gui.forms as forms
-import cmk.gui.visuals as visuals
+from cmk.gui import forms, visuals
+from cmk.gui.data_source import data_source_registry
 from cmk.gui.exceptions import HTTPRedirect, MKUserError
 from cmk.gui.htmllib.header import make_header
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
 from cmk.gui.i18n import _
 from cmk.gui.page_menu import make_simple_form_page_menu
-from cmk.gui.plugins.views.utils import data_source_registry
 from cmk.gui.utils.transaction_manager import transactions
 from cmk.gui.utils.urls import makeuri
 from cmk.gui.valuespec import DropdownChoice
 
 
-def DatasourceSelection() -> DropdownChoice:
+def DatasourceSelection() -> DropdownChoice[str]:
     """Create datasource selection valuespec, also for other modules"""
-    return DropdownChoice(
+    return DropdownChoice[str](
         title=_("Datasource"),
         help=_("The datasources define which type of objects should be displayed with this view."),
         choices=data_source_registry.data_source_choices(),
@@ -27,14 +26,14 @@ def DatasourceSelection() -> DropdownChoice:
     )
 
 
-def page_create_view():
+def page_select_datasource() -> None:
     show_create_view_dialog()
 
 
-def show_create_view_dialog(next_url=None):
+def show_create_view_dialog(next_url: str | None = None) -> None:
     vs_ds = DatasourceSelection()
 
-    ds = "services"  # Default selection
+    ds: str | None = "services"  # Default selection
 
     title = _("Create view")
     breadcrumb = visuals.visual_page_breadcrumb("views", title, "create")
@@ -68,15 +67,14 @@ def show_create_view_dialog(next_url=None):
         except MKUserError as e:
             html.user_error(e)
 
-    html.begin_form("create_view")
-    html.hidden_field("mode", "create")
+    with html.form_context("create_view"):
+        html.hidden_field("mode", "create")
 
-    forms.header(_("Select Datasource"))
-    forms.section(vs_ds.title())
-    vs_ds.render_input("ds", ds)
-    html.help(vs_ds.help())
-    forms.end()
+        forms.header(_("Select datasource"))
+        forms.section(vs_ds.title())
+        vs_ds.render_input("ds", ds)
+        html.help(vs_ds.help())
+        forms.end()
 
-    html.hidden_fields()
-    html.end_form()
+        html.hidden_fields()
     html.footer()

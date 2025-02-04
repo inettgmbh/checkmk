@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,8 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Dictionary, Integer, TextInput, Tuple
+from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
+from cmk.gui.valuespec import Dictionary, Integer, TextInput
 
 
 def _item_spec_mq_queues():
@@ -23,24 +24,18 @@ def _parameter_valuespec_mq_queues():
         elements=[
             (
                 "size",
-                Tuple(
+                SimpleLevels(
                     title=_("Levels for the queue length"),
                     help=_("Set the maximum and minimum length for the queue size"),
-                    elements=[
-                        Integer(title="Warning at a size of"),
-                        Integer(title="Critical at a size of"),
-                    ],
+                    spec=Integer,
                 ),
             ),
             (
                 "consumerCount",
-                Tuple(
+                SimpleLevels(
                     title=_("Levels for the consumer count"),
                     help=_("Consumer Count is the size of connected consumers to a queue"),
-                    elements=[
-                        Integer(title="Warning less then"),
-                        Integer(title="Critical less then"),
-                    ],
+                    spec=Integer,
                 ),
             ),
         ],

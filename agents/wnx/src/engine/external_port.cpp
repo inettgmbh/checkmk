@@ -1,17 +1,17 @@
 #include "stdafx.h"
 
-#include "external_port.h"
+#include "wnx/external_port.h"
 
 #include <chrono>
+#include <filesystem>
 #include <iostream>
-#include <ranges>
 
-#include "agent_controller.h"
-#include "asio.h"
-#include "cfg.h"
 #include "common/mailslot_transport.h"
-#include "encryption.h"
-#include "realtime.h"
+#include "wnx/agent_controller.h"
+#include "wnx/asio.h"
+#include "wnx/cfg.h"
+#include "wnx/encryption.h"
+#include "wnx/realtime.h"
 
 using asio::ip::tcp;
 using namespace std::chrono_literals;
@@ -46,11 +46,11 @@ size_t CalcCryptBufferSize(const encrypt::Commander *commander,
 }  // namespace
 
 void LogWhenDebugging(const ByteVector &send_back) noexcept {
-    if (!tgt::IsDebug()) {
+    if constexpr (!tgt::IsDebug()) {
         return;
     }
 
-    std::string s(send_back.begin(), send_back.end());
+    const std::string s(send_back.begin(), send_back.end());
     auto t = tools::SplitString(s, "\n");
     XLOG::t.i("Send {} last string is {}", send_back.size(), t.back());
 }
@@ -64,13 +64,13 @@ void AsioSession::read_ip() {
         remote_ip_.reset();
     }
     socket_.async_read_some(asio::buffer(data_, kMaxLength - 1),
-                            [this, self](std::error_code ec, size_t length) {
+                            [this](std::error_code ec, size_t length) {
                                 std::scoped_lock l(data_lock_);
                                 received_ = ec ? 0U : length;
                                 cv_ready_.notify_one();
                             });
     std::unique_lock lk(data_lock_);
-    bool timeout = cv_ready_.wait_until(
+    const bool timeout = cv_ready_.wait_until(
         lk, std::chrono::steady_clock::now() + 1000ms,
         [this]() -> bool { return received_.has_value(); });
     if (received_.has_value() &&
@@ -112,7 +112,7 @@ static size_t WriteDataToSocket(asio::ip::tcp::socket &sock, const char *data,
 
     // asio execution
     std::error_code ec;
-    auto written_bytes =
+    const auto written_bytes =
         write(sock, buffer(data, sz), transfer_exactly(sz), ec);
 
     // error processing
@@ -133,11 +133,11 @@ static size_t WriteStringToSocket(asio::ip::tcp::socket &sock,
 
 // To send data
 void AsioSession::do_write(const void *data_block, std::size_t data_length,
-                           cma::encrypt::Commander *crypto_commander) {
+                           const encrypt::Commander *crypto_commander) {
     auto self(shared_from_this());
 
     const auto *data = static_cast<const char *>(data_block);
-    auto crypt_buf_len = allocCryptBuffer(crypto_commander);
+    const auto crypt_buf_len = allocCryptBuffer(crypto_commander);
 
     while (0 != data_length) {
         // we will send data in relatively small chunks
@@ -151,8 +151,7 @@ void AsioSession::do_write(const void *data_block, std::size_t data_length,
             // reference
             asio::async_write(
                 socket_, asio::buffer(data, to_send),
-                [self, to_send, data_length](std::error_code ec,
-                                             std::size_t length) {
+                [to_send, data_length](std::error_code ec, std::size_t length) {
                     XLOG::t.i(
                         "Send [{}] from [{}] data with code [{}] left to send [{}]",
                         length, to_send, ec.value(), data_length);
@@ -274,12 +273,12 @@ void ExternalPort::timedWaitForSession() {
     using namespace std::chrono;
     std::unique_lock lk(wake_lock_);
     wake_thread_.wait_until(lk, steady_clock::now() + wake_delay_,
-                            [this]() { return entriesInQueue() != 0; });
+                            [this] { return entriesInQueue() != 0; });
 }
 #define TEST_RESTART_OVERLOAD  // should be defined in production
 
-//#define TEST_OVERLOAD_MEMORY
-// internal testing code
+// #define TEST_OVERLOAD_MEMORY
+//  internal testing code
 #if defined(TEST_OVERLOAD_MEMORY)
 // a bit complicated method to eat memory in release target
 static std::vector<std::unique_ptr<char>> bad_vector;
@@ -298,14 +297,14 @@ static void OverLoadMemory() {
 #endif
 }
 
-bool IsIpAllowedAsException(const std::string &ip) {
+bool IsIpAllowedAsException(const std::string &ip) noexcept {
     return ac::IsRunController(cfg::GetLoadedConfig()) &&
            (ip == "127.0.0.1" || ip == "::1");
 }
 
 namespace {
-std::vector<Modus> local_connection_moduses{Modus::service, Modus::test,
-                                            Modus::integration};
+std::vector local_connection_moduses{Modus::service, Modus::test,
+                                     Modus::integration};
 
 bool AllowLocalConnection() {
     return rs::find(local_connection_moduses, GetModus()) !=
@@ -315,13 +314,16 @@ bool AllowLocalConnection() {
 
 void ExternalPort::processSession(const ReplyFunc &reply,
                                   AsioSession::s_ptr session) {
-    const auto [ip, p, ipv6] = GetSocketInfo(session->currentSocket());
-    XLOG::d.i("Connected from '{}' ipv6:{} port: {} <- queue", ip, ipv6, p);
+    const auto info = GetSocketInfo(session->currentSocket());
+    XLOG::d.i("Connected from '{}' ipv6:{} port: {} <- queue", info.peer_ip,
+              info.ip_mode == IpMode::ipv6 ? "ipv6" : "ipv4", info.peer_port);
 
     OverLoadMemory();
-    // controller can contact us
-    const bool local_connection = ip == "127.0.0.1" || ip == "::1";
-    if (cfg::groups::global.isIpAddressAllowed(ip) || local_connection) {
+
+    const bool local_connection =
+        info.peer_ip == "127.0.0.1" || info.peer_ip == "::1";
+    if (cfg::groups::g_global.isIpAddressAllowed(info.peer_ip) ||
+        local_connection) {
         if (local_connection && AllowLocalConnection()) {
             session->read_ip();
         }
@@ -343,7 +345,8 @@ void ExternalPort::processSession(const ReplyFunc &reply,
 #endif
         }
     } else {
-        XLOG::d("Address '{}' is not allowed, this call should happen", ip);
+        XLOG::d("Address '{}' is not allowed, this call should happen",
+                info.peer_ip);
     }
 }
 
@@ -363,20 +366,69 @@ RequestInfo ParseRequest(const std::string &request) {
     }
     return {.ip{table[0]}, .mailslot_name{table[1]}};
 }
+
+constexpr auto header_size = rt::kEncryptedHeader.size();
+
+std::optional<std::vector<uint8_t>> AllocateCryptoPackage(
+    const encrypt::Commander &commander, size_t sz) {
+    const size_t crypt_size = CalcCryptBufferSize(&commander, sz);
+    if (crypt_size == 0) {
+        return {};
+    }
+    std::vector<uint8_t> v;
+    try {
+        v.resize(crypt_size + header_size);
+        XLOG::d.i("Encryption crypt buffer {} bytes...", crypt_size);
+    } catch (const std::exception &e) {
+        XLOG::l.crit(XLOG_FUNC + " unexpected, but exception '{}'", e.what());
+        return {};
+    }
+    memcpy(v.data(), rt::kEncryptedHeader.data(), header_size);
+    return v;
+}
+
 }  // namespace
 
 bool SendDataToMailSlot(const std::string &mailslot_name,
-                        const std::vector<uint8_t> &data_block) {
+                        const std::vector<uint8_t> &data_block,
+                        const encrypt::Commander *commander) {
     if (mailslot_name.size() < 12) {
         XLOG::l("Invalid mailslot name '{}'", mailslot_name);
         return false;
     }
     mailslot::Slot postman(mailslot_name);
-    return postman.ExecPost(data_block.data(), data_block.size());
+    if (commander == nullptr) {
+        return postman.ExecPost(data_block.data(), data_block.size());
+    }
+
+    auto package = AllocateCryptoPackage(*commander, data_block.size());
+
+    if (!package) {
+        XLOG::l("Encrypt is requested, but encryption is failed");
+        postman.ExecPost(rt::kEncryptedHeader.data(),
+                         rt::kEncryptedHeader.size());
+        return false;
+    }
+
+    // encryption
+    void *buf = package->data() + header_size;
+    memcpy(buf, data_block.data(), data_block.size());
+    auto [success, len] = commander->encode(
+        buf, data_block.size(), package->size() - header_size, true);
+    // checking
+    if (!success) {
+        XLOG::l.crit(XLOG_FUNC + "CANNOT ENCRYPT {}.", len);
+        postman.ExecPost(rt::kEncryptedHeader.data(),
+                         rt::kEncryptedHeader.size());
+        return false;
+    }
+
+    return postman.ExecPost(package->data(), len + header_size);
 }
 
 void ExternalPort::processRequest(const ReplyFunc &reply,
-                                  const std::string &request) {
+                                  const std::string &request,
+                                  const encrypt::Commander *commander) const {
     XLOG::d.i("Request is '{}'", request);
     auto r = ParseRequest(request);
     if (r.ip.empty()) {
@@ -384,13 +436,15 @@ void ExternalPort::processRequest(const ReplyFunc &reply,
         return;
     }
 
-    auto send_back = reply(r.ip);
+    const auto send_back = reply(r.ip);
     if (send_back.empty()) {
         XLOG::d.i("No data to send");
         return;
     }
 
-    const auto result = SendDataToMailSlot(r.mailslot_name, send_back);
+    const auto result = SendDataToMailSlot(
+        mailslot::BuildMailSlotNameRoot(".") + r.mailslot_name, send_back,
+        commander);
     XLOG::d.i("Send [{}] bytes of data to [{}] - {}", send_back.size(),
               r.mailslot_name, result ? "OK" : "FAIl");
 
@@ -399,13 +453,14 @@ void ExternalPort::processRequest(const ReplyFunc &reply,
 
 /// singleton thread
 void ExternalPort::processQueue(const world::ReplyFunc &reply) {
+    const auto crypt = encrypt::MakeCrypt();
     while (true) {
         try {
             if (auto as = getSession(); as) {
                 processSession(reply, std::move(as));
             }
             if (auto r = getRequest(); !r.empty()) {
-                processRequest(reply, r);
+                processRequest(reply, r, crypt.get());
             }
             timedWaitForSession();
 
@@ -441,7 +496,7 @@ void ExternalPort::ioThreadProc(const ReplyFunc &reply_func, uint16_t port,
     XLOG::d.i(XLOG_FUNC + " started");
     // all threads must control exceptions
     try {
-        auto ipv6 = cfg::groups::global.ipv6();
+        auto ipv6 = cfg::groups::g_global.ipv6();
 
         // Asio IO server start
         XLOG::l.i("Starting IO ipv6:{}, used port:{}", ipv6, port);
@@ -470,7 +525,8 @@ void ExternalPort::ioThreadProc(const ReplyFunc &reply_func, uint16_t port,
 
     } catch (std::exception &e) {
         registerAsioContext(nullptr);  // cleanup
-        std::cerr << "Exception: " << e.what() << "\n";
+        std::cerr << "Exception in IO/ip: " << e.what() << "port " << port
+                  << " \n";
         XLOG::l(XLOG::kCritError)("IO broken with exception {}", e.what());
     }
 }
@@ -489,7 +545,7 @@ void ExternalPort::mailslotThreadProc(const ReplyFunc &reply_func,
         XLOG::l.i("IO ends...");
 
     } catch (std::exception &e) {
-        std::cerr << "Exception: " << e.what() << "\n";
+        std::cerr << "Exception in IO/ms: " << e.what() << "\n";
         XLOG::l(XLOG::kCritError)("IO broken with exception {}", e.what());
     }
 }
@@ -525,13 +581,10 @@ void ExternalPort::shutdownIo() {
     XLOG::l.i("Shutting down IO...");
     stopExecution();
 
-    bool should_wait = false;
-    {
-        std::lock_guard lk(io_thread_lock_);
-        should_wait = io_thread_.joinable();  // normal execution
-        io_started_ = false;
-    }
-
+    std::unique_lock lk(io_thread_lock_);
+    const auto should_wait = io_thread_.joinable();
+    io_started_ = false;
+    lk.unlock();
     if (should_wait) {
         io_thread_.join();
     }
@@ -542,43 +595,87 @@ size_t ExternalPort::entriesInQueue() const {
     return std::max(session_queue_.size(), request_queue_.size());
 }
 
-void ExternalPort::server::run_accept(SinkFunc sink, ExternalPort *ext_port) {
+namespace {
+struct ConnectionPorts {
+    uint16_t port;
+    uint16_t peer_port;
+};
+
+bool IsElevatedProcess(std::optional<uint32_t> p) noexcept {
+    if (!p.has_value()) {
+        return false;
+    }
+    const auto pid = *p;
+    const wtools::UniqueHandle process_handle{
+        ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+    if (!process_handle) {
+        return false;
+    }
+    HANDLE token{nullptr};
+    if (::OpenProcessToken(process_handle.get(), TOKEN_QUERY, &token) == TRUE) {
+        ON_OUT_OF_SCOPE(::CloseHandle(token));
+        DWORD return_size = 0;
+        TOKEN_ELEVATION elevated = {0};
+        return GetTokenInformation(token, TokenElevation, &elevated,
+                                   sizeof(TOKEN_ELEVATION),
+                                   &return_size) == TRUE &&
+               elevated.TokenIsElevated != 0;
+    }
+    return false;
+}
+
+/// Check that connection is allowed
+///
+/// Conditions for true:
+/// - controller-less mode
+/// - our controller process
+/// - elevated process request
+bool IsConnectionAllowed(ConnectionPorts cp, std::optional<uint32_t> ctl_pid) {
+    if (!ctl_pid.has_value() ||  // controller-less mode
+        wtools::CheckProcessUsePort(cp.port, *ctl_pid, cp.peer_port)) {
+        return true;
+    }
+
+    return ac::GetConfiguredAllowElevated() &&
+           IsElevatedProcess(wtools::GetConnectionPid(cp.port, cp.peer_port));
+}
+
+}  // namespace
+
+void ExternalPort::server::run_accept(const SinkFunc &sink,
+                                      ExternalPort *ext_port) {
     acceptor_.async_accept(socket_, [this, sink, ext_port](std::error_code ec) {
-        if (ec.value()) {
+        if (ec) {
             XLOG::l("Error on connection [{}] '{}'", ec.value(), ec.message());
         } else {
             try {
-                auto [peer_ip, peer_port, ipv6] = GetSocketInfo(socket_);
-                XLOG::d.i("Connected from '{}:{}' ipv6 :{} -> queue", peer_ip,
-                          peer_port, ipv6);
-                auto x = std::make_shared<AsioSession>(std::move(socket_));
+                auto info = GetSocketInfo(socket_);
+                XLOG::d.i("Connected from '{}:{}' ipv6 :{} -> queue",
+                          info.peer_ip, info.peer_port,
+                          info.ip_mode == IpMode::ipv6 ? "ipv6" : "ipv4");
+                const auto x =
+                    std::make_shared<AsioSession>(std::move(socket_));
 
-                auto process_allowed = !controller_pid_.has_value() ||
-                                       wtools::CheckProcessUsePort(
-                                           port_, *controller_pid_, peer_port);
-
-                if (process_allowed &&
-                    (cfg::groups::global.isIpAddressAllowed(peer_ip) ||
-                     IsIpAllowedAsException(peer_ip)))
+                if (IsConnectionAllowed(
+                        {.port = port_, .peer_port = info.peer_port},
+                        controller_pid_)) {
                     sink(x, ext_port);
-                else {
-                    XLOG::d("Connection forbidden: address '{}' process {}",
-                            process_allowed ? "allowed" : "not allowed");
+                } else {
+                    XLOG::d("Connection forbidden");
                 }
-
             } catch (const std::system_error &e) {
                 if (e.code().value() == WSAECONNRESET) {
                     XLOG::l(" Client closed connection");
                 } else {
                     XLOG::l(" Thrown unexpected exception '{}' with value {}",
-                            e.what(), e.code().value());
+                            e, e.code().value());
                 }
             } catch (const std::exception &e) {
-                XLOG::l(" Thrown unexpected exception '{}'", e.what());
+                XLOG::l(" Thrown unexpected exception '{}'", e);
             }
         }
 
-        // inside we have async call, this is not recursion
+        // Inside we have async call, this is not recursion
         run_accept(sink, ext_port);
     });
 }

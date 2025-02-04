@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import responses  # type: ignore[import]
-from freezegun import freeze_time
+
+import responses
+import time_machine
 
 from cmk.special_agents.agent_storeonce4x import StoreOnceOauth2Session
 
@@ -35,12 +36,11 @@ TOKEN_JSON_FROM_STOREONCE = {
 
 
 @responses.activate
-@freeze_time(NOW_SIMULATED)
+@time_machine.travel(NOW_SIMULATED, tick=False)
 def test_invalid_tokenfile() -> None:
-
     responses.add(
         responses.POST,
-        "https://%s:%s/pml/login/authenticate" % (HOST, PORT),
+        f"https://{HOST}:{PORT}/pml/login/authenticate",
         json=TOKEN_JSON_FROM_STOREONCE,
         status=200,
     )
@@ -51,19 +51,19 @@ def test_invalid_tokenfile() -> None:
     assert mysession._json_token["expires_in_abs"] == "1988-06-08 17:00:10.000000"
 
 
-@freeze_time(NOW_SIMULATED)
+@time_machine.travel(NOW_SIMULATED, tick=False)
 @responses.activate
 def test_REST_call() -> None:
     responses.add(
         responses.POST,
-        "https://%s:%s/pml/login/authenticate" % (HOST, PORT),
+        f"https://{HOST}:{PORT}/pml/login/authenticate",
         json=TOKEN_JSON_FROM_STOREONCE,
         status=200,
     )
-    responses.add(responses.GET, "https://%s:%s/rest/alerts/" % (HOST, PORT), json={}, status=200)
+    responses.add(responses.GET, f"https://{HOST}:{PORT}/rest/alerts/", json={}, status=200)
     responses.add(
         responses.GET,
-        "https://%s:%s/api/v1/data-services/d2d-service/status" % (HOST, PORT),
+        f"https://{HOST}:{PORT}/api/v1/data-services/d2d-service/status",
         json={
             "random_answer": "foo-bar",
         },

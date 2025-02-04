@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -65,10 +65,9 @@ def _parameter_valuespec_prometheus_custom():
                     ),
                     title=_("Metric levels"),
                     add_label=_("Add metric level"),
-                    allow_empty=False,
                     help=_(
                         "Specify upper and/or lower levels for a queried PromQL value. The matching happens "
-                        "on a 2-level basis: First on the service description level where the regular "
+                        "on a 2-level basis: First on the service name level where the regular "
                         "expression allows to target multiple services at once. Specify the regular "
                         "expression in the Conditions section below. A service can consist of multiple "
                         "metrics and you can add levels to each queried metric value. For the relevant "

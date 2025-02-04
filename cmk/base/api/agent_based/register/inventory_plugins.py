@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-"""Background tools required to register a check plugin
-"""
+"""Background tools required to register a check plug-in"""
+
 import functools
-from typing import Any, Callable, Iterable, List, Mapping, Optional
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any
 
-from cmk.utils.type_defs import InventoryPluginName, RuleSetName
+from cmk.utils.rulesets import RuleSetName
 
-from cmk.base.api.agent_based.inventory_classes import (
-    Attributes,
-    InventoryFunction,
-    InventoryPlugin,
-    TableRow,
-)
+from cmk.checkengine.inventory import InventoryPluginName
+
+from cmk.base.api.agent_based.plugin_classes import InventoryFunction, InventoryPlugin
 from cmk.base.api.agent_based.register.utils import (
     create_subscribed_sections,
     validate_default_parameters,
     validate_function_arguments,
 )
+
+from cmk.agent_based.v1 import Attributes, TableRow
+from cmk.discover_plugins import PluginLocation
 
 
 def _filter_inventory(
@@ -43,11 +44,11 @@ def _filter_inventory(
 def create_inventory_plugin(
     *,
     name: str,
-    sections: Optional[List[str]] = None,
+    sections: list[str] | None = None,
     inventory_function: Callable,
-    inventory_default_parameters: Optional[Mapping[str, Any]] = None,
-    inventory_ruleset_name: Optional[str] = None,
-    module: Optional[str] = None,
+    inventory_default_parameters: Mapping[str, Any] | None = None,
+    inventory_ruleset_name: str | None = None,
+    location: PluginLocation,
 ) -> InventoryPlugin:
     """Return an InventoryPlugin object after validating and converting the arguments one by one
 
@@ -81,5 +82,5 @@ def create_inventory_plugin(
         inventory_ruleset_name=(
             RuleSetName(inventory_ruleset_name) if inventory_ruleset_name else None
         ),
-        module=module,
+        location=location,
     )

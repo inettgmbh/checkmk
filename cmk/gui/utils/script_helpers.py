@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Helper functions for executing GUI code in external scripts.
@@ -7,74 +7,57 @@
 The intended use is for scripts such as cmk-update-config or init-redis.
 """
 
+import typing
+from collections.abc import Iterator
 from contextlib import contextmanager
-from functools import lru_cache
-from typing import Any, Iterator, Mapping, Optional
+from functools import cache
+from typing import Any
 
+from flask import Flask
+from flask.ctx import RequestContext
 from werkzeug.test import create_environ
 
-from cmk.gui.config import get_default_config, load_config, make_config_object
-from cmk.gui.context import AppContext, RequestContext
-from cmk.gui.ctx_stack import app_stack, request_stack
-from cmk.gui.display_options import DisplayOptions
-from cmk.gui.htmllib.html import HTMLGenerator
-from cmk.gui.http import Request, Response
-from cmk.gui.logged_in import LoggedInNobody
-from cmk.gui.utils.logging import PrependURLFilter
-from cmk.gui.utils.mobile import is_mobile
-from cmk.gui.utils.output_funnel import OutputFunnel
-from cmk.gui.utils.theme import Theme
-from cmk.gui.utils.timeout_manager import TimeoutManager
+from cmk.ccc.version import edition
+
+from cmk.utils import paths
+
+from cmk.gui.http import Response
+
+Environments = typing.Literal["production", "testing", "development"]
 
 
-@lru_cache
-def session_wsgi_app(debug):
+@cache
+def session_wsgi_app(debug: bool = False, testing: bool = False) -> Flask:
     # TODO: Temporary hack. Can be removed once #12954 has been ported from 2.0.0
-    from cmk.gui.wsgi import make_app
+    from cmk.gui.wsgi.app import make_wsgi_app
 
-    return make_app(debug=debug)
+    # For now always use the detected edition. At some point make this parameterized
+    return make_wsgi_app(edition(paths.omd_root), debug=debug, testing=testing)
+
+
+def make_request_context(app: Flask, environ: dict[str, Any] | None = None) -> RequestContext:
+    if environ is None:
+        environ = create_environ()
+    return app.request_context(environ)
 
 
 @contextmanager
-def application_context() -> Iterator[None]:
-    with AppContext(session_wsgi_app(debug=False), stack=app_stack()):
+def request_context(app: Flask, environ: dict[str, Any] | None = None) -> Iterator[None]:
+    with make_request_context(app, environ):
+        app.preprocess_request()
         yield
-
-
-def make_request_context(environ: Optional[Mapping[str, Any]] = None) -> RequestContext:
-    req = Request(dict(create_environ(), REQUEST_URI="") if environ is None else environ)
-    resp = Response(mimetype="text/html")
-    funnel = OutputFunnel(resp)
-    return RequestContext(
-        req=req,
-        resp=resp,
-        funnel=funnel,
-        config_obj=make_config_object(get_default_config()),
-        user=LoggedInNobody(),
-        html_obj=HTMLGenerator(req, funnel, output_format="html", mobile=is_mobile(req, resp)),
-        display_options=DisplayOptions(),
-        timeout_manager=TimeoutManager(),
-        theme=Theme(),
-        prefix_logs_with_url=False,
-        stack=request_stack(),
-        url_filter=PrependURLFilter(),
-    )
+        app.process_response(Response())
 
 
 @contextmanager
-def request_context(environ: Optional[Mapping[str, Any]] = None) -> Iterator[None]:
-    with make_request_context(environ=environ):
+def application_and_request_context(environ: dict[str, Any] | None = None) -> Iterator[None]:
+    app = session_wsgi_app(testing=True)
+    with app.app_context(), request_context(app, environ):
         yield
 
 
 @contextmanager
-def application_and_request_context(environ: Optional[Mapping[str, Any]] = None) -> Iterator[None]:
-    with application_context(), request_context(environ):
-        yield
-
-
-@contextmanager
-def gui_context(environ: Optional[Mapping[str, Any]] = None) -> Iterator[None]:
-    with application_context(), request_context(environ):
-        load_config()
+def gui_context(environ: dict[str, Any] | None = None) -> Iterator[None]:
+    app = session_wsgi_app(testing=True)
+    with app.app_context(), make_request_context(app, environ):
         yield

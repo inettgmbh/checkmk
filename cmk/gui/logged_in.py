@@ -1,101 +1,129 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Manage the currently logged in user"""
 
 from __future__ import annotations
 
-import contextlib
-import errno
 import logging
 import os
 import time
-from typing import (
-    Any,
-    ContextManager,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    TYPE_CHECKING,
-    Union,
-)
+from collections.abc import Container, Sequence
+from typing import Any, Final, Literal, NewType
 
 from livestatus import SiteConfigurations, SiteId
 
-import cmk.utils.paths
-import cmk.utils.store as store
-from cmk.utils.type_defs import UserId
-from cmk.utils.version import __version__, Version
+from cmk.ccc import store
+from cmk.ccc.version import __version__, Edition, edition, Version
 
-import cmk.gui.permissions as permissions
-import cmk.gui.site_config as site_config
-from cmk.gui.config import active_config, builtin_role_ids
-from cmk.gui.ctx_stack import request_local_attr
+import cmk.utils.paths
+from cmk.utils.user import UserId
+
+from cmk.gui import hooks, permissions, site_config
+from cmk.gui.config import active_config
+from cmk.gui.ctx_stack import session_attr
 from cmk.gui.exceptions import MKAuthException
-from cmk.gui.http import request
 from cmk.gui.i18n import _
+from cmk.gui.utils.permission_verification import BasePerm
 from cmk.gui.utils.roles import may_with_roles, roles_of_user
+from cmk.gui.utils.selection_id import SelectionId
 from cmk.gui.utils.transaction_manager import TransactionManager
 
-if TYPE_CHECKING:
-    # Cyclic import!
-    from cmk.gui.plugins.openapi.restful_objects import Endpoint
-
-endpoint: Endpoint = request_local_attr("endpoint")
-
 _logger = logging.getLogger(__name__)
+_ContactgroupName = str
+UserFileName = Literal[
+    "acknowledged_notifications",
+    "analyze_notification_display_options",
+    "automation_user",
+    "avoptions",
+    "bi_assumptions",
+    "bi_treestate",
+    "cached_profile",
+    "customer_settings",
+    "discovery_checkboxes",
+    "discovery_show_discovered_labels",
+    "discovery_show_plugin_names",
+    "favorites",
+    "foldertree",
+    "graph_pin",
+    "graph_size",
+    "help",
+    "notification_display_options",
+    "parameter_column",
+    "parentscan",
+    "reporting_timerange",
+    "sidebar",
+    "sidebar_sites",
+    "simulated_event",
+    "siteconfig",
+    "start_url",
+    "tableoptions",
+    "test_notification_display_options",
+    "transids",
+    "treestates",
+    "unittest",  # for testing only
+    "viewoptions",
+    "virtual_host_tree",
+    "wato_folders_show_labels",
+    "wato_folders_show_tags",
+]
+
+# a str consisting of `rowselection/` and a SelectionId (uuid)
+_RowSelection = NewType("_RowSelection", str)
+
+# a str that is supposed to be "path safe"
+UserGraphDataRangeFileName = NewType("UserGraphDataRangeFileName", str)
 
 
 class LoggedInUser:
-    """Manage the currently logged in user
+    """Manage the currently logged-in user
 
-    This objects intention is currently only to handle the currently logged in user after
+    This objects intention is currently only to handle the currently logged-in user after
     authentication.
     """
 
-    def __init__(self, user_id: Optional[str]) -> None:
-        self.id = UserId(user_id) if user_id else None
-        self.transactions = TransactionManager(request, self)
+    def __init__(
+        self,
+        user_id: UserId | None,
+        *,
+        explicitly_given_permissions: Container[str] = frozenset(),
+    ) -> None:
+        self.id = user_id
+        self.transactions = TransactionManager(user_id, self.transids, self.save_transids)
 
         self.confdir = _confdir_for_user_id(self.id)
         self.role_ids = self._gather_roles(self.id)
-        baserole_ids = _baserole_ids_from_role_ids(self.role_ids)
-        self.baserole_id = _most_permissive_baserole_id(baserole_ids)
         self._attributes = self._load_attributes(self.id, self.role_ids)
         self.alias = self._attributes.get("alias", self.id)
         self.email = self._attributes.get("email", self.id)
 
-        self._permissions: dict[str, bool] = {}
+        self.explicitly_given_permissions: Final = explicitly_given_permissions
         self._siteconf = self.load_file("siteconfig", {})
-        self._button_counts: Dict[str, float] = {}
-        self._stars: Set[str] = set()
-        self._tree_states: Dict = {}
-        self._bi_assumptions: Dict[Union[Tuple[str, str], Tuple[str, str, str]], int] = {}
-        self._tableoptions: Dict[str, Dict[str, Any]] = {}
+        self._button_counts: dict[str, float] = {}
+        self._stars: set[str] = set()
+        self._tree_states: dict = {}
+        self._bi_assumptions: dict[tuple[str, str] | tuple[str, str, str], int] = {}
+        self._tableoptions: dict[str, dict[str, Any]] = {}
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} {self.id!r}>"
 
     @property
     def ident(self) -> UserId:
-        """Return the user-id as a string, or crash.
-
-        Returns:
-            The user_id as a string.
+        """Return the user ID or crash
 
         Raises:
             ValueError: whenever there is no user_id.
-
         """
         if self.id is None:
             raise AttributeError("No user_id on this instance.")
         return self.id
 
-    def _gather_roles(self, user_id: Optional[UserId]) -> List[str]:
+    def _gather_roles(self, user_id: UserId | None) -> list[str]:
         return roles_of_user(user_id)
 
-    def _load_attributes(self, user_id: Optional[UserId], role_ids: List[str]) -> Any:
+    def _load_attributes(self, user_id: UserId | None, role_ids: list[str]) -> Any:
         if user_id is None:
             return {"roles": role_ids}
         attributes = self.load_file("cached_profile", None)
@@ -121,15 +149,23 @@ class LoggedInUser:
             pass
 
     @property
-    def language(self) -> Optional[str]:
+    def language(self) -> str:
         return self.get_attribute("language", active_config.default_language)
 
     @language.setter
-    def language(self, value: Optional[str]) -> None:
+    def language(self, value: str) -> None:
         self._set_attribute("language", value)
 
     def reset_language(self) -> None:
         self._unset_attribute("language")
+
+    @property
+    def automation_user(self) -> bool:
+        return self.load_file("automation_user", False)
+
+    @automation_user.setter
+    def automation_user(self, value: bool) -> None:
+        self.save_file("automation_user", value)
 
     @property
     def show_mode(self) -> str:
@@ -140,15 +176,15 @@ class LoggedInUser:
         return "show_more" in self.show_mode
 
     @property
-    def customer_id(self) -> Optional[str]:
+    def customer_id(self) -> str | None:
         return self.get_attribute("customer")
 
     @property
-    def contact_groups(self) -> List:
-        return self.get_attribute("contactgroups", [])
+    def contact_groups(self) -> Sequence[_ContactgroupName]:
+        return [_ContactgroupName(raw) for raw in self.get_attribute("contactgroups", [])]
 
     @property
-    def start_url(self) -> Optional[str]:
+    def start_url(self) -> str | None:
         return self.load_file("start_url", None)
 
     @property
@@ -217,14 +253,14 @@ class LoggedInUser:
 
     @property
     def bi_expansion_level(self) -> int:
-        return self.load_file("bi_treestate", (None,))[0]
+        return self.load_file("bi_treestate", (0,))[0]
 
     @bi_expansion_level.setter
     def bi_expansion_level(self, value: int) -> None:
         self.save_file("bi_treestate", (value,))
 
     @property
-    def stars(self) -> Set[str]:
+    def stars(self) -> set[str]:
         if not self._stars:
             self._stars = set(self.load_file("favorites", []))
         return self._stars
@@ -233,7 +269,7 @@ class LoggedInUser:
         self.save_file("favorites", list(self._stars))
 
     @property
-    def tree_states(self) -> Dict:
+    def tree_states(self) -> dict:
         if not self._tree_states:
             self._tree_states = self.load_file("treestates", {})
         return self._tree_states
@@ -281,7 +317,7 @@ class LoggedInUser:
         self.save_file("bi_assumptions", self._bi_assumptions)
 
     @property
-    def tableoptions(self) -> Dict[str, Dict[str, Any]]:
+    def tableoptions(self) -> dict[str, dict[str, Any]]:
         if not self._tableoptions:
             self._tableoptions = self.load_file("tableoptions", {})
         return self._tableoptions
@@ -289,14 +325,15 @@ class LoggedInUser:
     def save_tableoptions(self) -> None:
         self.save_file("tableoptions", self._tableoptions)
 
-    def get_rowselection(self, selection_id: str, identifier: str) -> List[str]:
-        vo = self.load_file("rowselection/%s" % selection_id, {})
+    def get_rowselection(self, selection_id: SelectionId, identifier: str) -> list[str]:
+        vo = self.load_file(_RowSelection(f"rowselection/{selection_id}"), {})
         return vo.get(identifier, [])
 
     def set_rowselection(
-        self, selection_id: str, identifier: str, rows: List[str], action: str
+        self, selection_id: SelectionId, identifier: str, rows: list[str], action: str
     ) -> None:
-        vo = self.load_file("rowselection/%s" % selection_id, {}, lock=True)
+        row_selection = _RowSelection(f"rowselection/{selection_id}")
+        vo = self.load_file(row_selection, {}, lock=True)
 
         if action == "set":
             vo[identifier] = rows
@@ -310,7 +347,7 @@ class LoggedInUser:
         elif action == "unset":
             del vo[identifier]
 
-        self.save_file("rowselection/%s" % selection_id, vo)
+        self.save_file(row_selection, vo)
 
     def cleanup_old_selections(self) -> None:
         # Delete all selection files older than the defined livetime.
@@ -327,10 +364,10 @@ class LoggedInUser:
         except OSError:
             pass  # no directory -> no cleanup
 
-    def get_sidebar_configuration(self, default: Dict[str, Any]) -> Dict[str, Any]:
+    def get_sidebar_configuration(self, default: dict[str, Any]) -> dict[str, Any]:
         return self.load_file("sidebar", default)
 
-    def set_sidebar_configuration(self, configuration: Dict[str, Any]) -> None:
+    def set_sidebar_configuration(self, configuration: dict[str, Any]) -> None:
         self.save_file("sidebar", configuration)
 
     def is_site_disabled(self, site_id: SiteId) -> bool:
@@ -345,18 +382,18 @@ class LoggedInUser:
     def save_site_config(self) -> None:
         self.save_file("siteconfig", self._siteconf)
 
-    def transids(self, lock: bool = False) -> List[str]:
+    def transids(self, lock: bool = False) -> list[str]:
         return self.load_file("transids", [], lock=lock)
 
-    def save_transids(self, transids: List[str]) -> None:
+    def save_transids(self, transids: list[str]) -> None:
         if self.id:
             self.save_file("transids", transids)
 
     def authorized_sites(
-        self, unfiltered_sites: Optional[SiteConfigurations] = None
+        self, unfiltered_sites: SiteConfigurations | None = None
     ) -> SiteConfigurations:
         if unfiltered_sites is None:
-            unfiltered_sites = site_config.allsites()
+            unfiltered_sites = site_config.enabled_sites()
 
         authorized_sites = self.get_attribute("authorized_sites")
         if authorized_sites is None:
@@ -376,46 +413,27 @@ class LoggedInUser:
             SiteConfigurations(
                 {
                     site_id: s
-                    for site_id, s in site_config.allsites().items()
+                    for site_id, s in site_config.enabled_sites().items()
                     if site_id in login_site_ids  #
                 }
             )
         )
 
     def may(self, pname: str) -> bool:
-        they_may = may_with_roles(self.role_ids, pname)
-        self._permissions[pname] = they_may
-
-        is_rest_api_call = bool(endpoint)  # we can't check if "is None" because it's a LocalProxy
-        if is_rest_api_call and endpoint.track_permissions:
-            # We need to remember this, in oder to later check if the set of required permissions
-            # actually fits the declared permission schema.
-            endpoint.remember_checked_permission(pname)
-            permission_not_declared = (
-                endpoint.permissions_required is not None
-                and pname not in endpoint.permissions_required
-            )
-            if permission_not_declared:
-                _logger.error(
-                    "Permission mismatch: Endpoint %r Use of undeclared permission %s",
-                    endpoint,
-                    pname,
-                )
-
-                if request.environ.get("paste.testing"):
-                    raise PermissionError(
-                        f"Required permissions not declared for this endpoint.\n"
-                        f"Endpoint: {endpoint}\n"
-                        f"Permission: {pname}\n"
-                        f"Used permission: {endpoint._used_permissions}\n"
-                        f"Declared: {endpoint.permissions_required}\n"
-                    )
-
+        they_may = (pname in self.explicitly_given_permissions) or may_with_roles(
+            self.role_ids, pname
+        )
+        hooks.call("permission-checked", pname)
         return they_may
 
-    def need_permission(self, pname: str) -> None:
-        if not self.may(pname):
-            perm = permissions.permission_registry[pname]
+    def need_permission(self, permission: str | BasePerm) -> None:
+        if isinstance(permission, BasePerm):
+            for p in permission.iter_perms():
+                self.need_permission(p.name)
+            return
+
+        if not self.may(permission):
+            perm = permissions.permission_registry[permission]
             raise MKAuthException(
                 _(
                     "We are sorry, but you lack the permission "
@@ -426,7 +444,12 @@ class LoggedInUser:
                 % perm.title
             )
 
-    def load_file(self, name: str, deflt: Any, lock: bool = False) -> Any:
+    def load_file(
+        self,
+        name: UserFileName | _RowSelection | UserGraphDataRangeFileName,
+        deflt: Any,
+        lock: bool = False,
+    ) -> Any:
         if self.confdir is None:
             return deflt
 
@@ -440,7 +463,9 @@ class LoggedInUser:
         except (ValueError, SyntaxError):
             return deflt
 
-    def save_file(self, name: str, content: Any) -> None:
+    def save_file(
+        self, name: UserFileName | _RowSelection | UserGraphDataRangeFileName, content: object
+    ) -> None:
         assert self.id is not None
         save_user_file(name, content, self.id)
 
@@ -450,15 +475,17 @@ class LoggedInUser:
 
         try:
             return os.stat(self.confdir + "/" + name + ".mk").st_mtime
-        except OSError as e:
-            if e.errno == errno.ENOENT:
-                return 0
-            raise
+        except FileNotFoundError:
+            return 0
 
     def get_docs_base_url(self) -> str:
-        version = Version(__version__).version_base
-        version = version if version != "" else "master"
-        return "https://docs.checkmk.com/%s/%s" % (version, "de" if self.language == "de" else "en")
+        version = (
+            "saas"
+            if edition(cmk.utils.paths.omd_root) == Edition.CSE
+            else Version.from_str(__version__).version_base or "master"
+        )
+        language = "de" if self.language == "de" else "en"
+        return f"https://docs.checkmk.com/{version}/{language}"
 
 
 # Login a user that has all permissions. This is needed for making
@@ -467,14 +494,28 @@ class LoggedInUser:
 class LoggedInSuperUser(LoggedInUser):
     def __init__(self) -> None:
         super().__init__(None)
-        self.alias = "Superuser for unauthenticated pages"
+        self.alias = "Superuser for internal use"
         self.email = "admin"
 
-    def _gather_roles(self, _user_id: Optional[UserId]) -> List[str]:
+    def _gather_roles(self, _user_id: UserId | None) -> list[str]:
         return ["admin"]
 
     def save_file(self, name: str, content: Any) -> None:
         raise TypeError("The profiles of LoggedInSuperUser cannot be saved")
+
+
+class LoggedInRemoteSite(LoggedInUser):
+    def __init__(self, *, site_name: str) -> None:
+        super().__init__(None)
+        self.alias = f"Remote site {site_name}"
+        self.email = "?"
+        self.site_name = site_name
+
+    def _gather_roles(self, _user_id: UserId | None) -> list[str]:
+        return ["no_permissions"]
+
+    def save_file(self, name: str, content: Any) -> None:
+        raise TypeError("The profiles of LoggedInRemoteSite cannot be saved")
 
 
 class LoggedInNobody(LoggedInUser):
@@ -483,55 +524,14 @@ class LoggedInNobody(LoggedInUser):
         self.alias = "Unauthenticated user"
         self.email = "nobody"
 
-    def _gather_roles(self, _user_id: Optional[UserId]) -> List[str]:
+    def _gather_roles(self, _user_id: UserId | None) -> list[str]:
         return []
 
     def save_file(self, name: str, content: Any) -> None:
         raise TypeError("The profiles of LoggedInNobody cannot be saved")
 
 
-def UserContext(user_id: UserId) -> ContextManager[None]:
-    """Execute a block of code as another user
-
-    After the block exits, the previous user will be replaced again.
-
-    Args:
-        user_id:
-            The user-id of the user.
-
-    Returns:
-        The context manager.
-
-    """
-    return _UserContext(LoggedInUser(user_id))
-
-
-def SuperUserContext() -> ContextManager[None]:
-    """Execute a block code as the superuser
-
-    After the block exits, the previous user will be replaced again.
-
-    Returns:
-        The context manager.
-
-    """
-    return _UserContext(LoggedInSuperUser())
-
-
-@contextlib.contextmanager
-def _UserContext(user_obj: LoggedInUser) -> Iterator[None]:
-    """Managing authenticated user context
-
-    After the user has been authenticated, initialize the global user object."""
-    old_user = request_local_attr().user
-    try:
-        request_local_attr().user = user_obj
-        yield
-    finally:
-        request_local_attr().user = old_user
-
-
-def _confdir_for_user_id(user_id: Optional[UserId]) -> Optional[str]:
+def _confdir_for_user_id(user_id: UserId | None) -> str | None:
     if user_id is None:
         return None
 
@@ -540,28 +540,10 @@ def _confdir_for_user_id(user_id: Optional[UserId]) -> Optional[str]:
     return str(confdir)
 
 
-def _baserole_ids_from_role_ids(role_ids: List[str]) -> List[str]:
-    base_roles = set()
-    for r in role_ids:
-        if r in builtin_role_ids:
-            base_roles.add(r)
-        else:
-            base_roles.add(active_config.roles[r]["basedon"])
-    return list(base_roles)
-
-
-def _most_permissive_baserole_id(baserole_ids: List[str]) -> str:
-    if "admin" in baserole_ids:
-        return "admin"
-    if "user" in baserole_ids:
-        return "user"
-    return "guest"
-
-
 def save_user_file(name: str, data: Any, user_id: UserId) -> None:
     path = cmk.utils.paths.profile_dir.joinpath(user_id, name + ".mk")
     store.mkdir(path.parent)
     store.save_object_to_file(path, data)
 
 
-user: LoggedInUser = request_local_attr("user")
+user: LoggedInUser = session_attr("user", LoggedInUser)

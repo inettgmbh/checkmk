@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import datetime
 import re
 import typing
+from collections.abc import Mapping
 
 from marshmallow import ValidationError
 from marshmallow.decorators import post_load, pre_dump, validates_schema
-from marshmallow_oneofschema import OneOfSchema  # type: ignore[import]
+from marshmallow_oneofschema import OneOfSchema
+
+from cmk.utils.tags import TagGroupID
 
 from cmk.gui import userdb
 from cmk.gui.fields.base import BaseSchema
 from cmk.gui.fields.definitions import GroupField, Timestamp
 from cmk.gui.fields.mixins import CheckmkTuple, Converter
+from cmk.gui.watolib.tags import load_tag_group
 
-from cmk.fields import Boolean, Constant, DateTime, Integer, List, Nested, String, Time
+from cmk.fields import Boolean, Constant, Integer, List, Nested, String, Time
 from cmk.fields.validators import IsValidRegexp, ValidateIPv4, ValidateIPv4Network
 
 # TODO: make wrong 'tuple_fields' entries fail at compile not, not at runtime.
@@ -45,6 +49,7 @@ class RegexpRewrites(BaseSchema, CheckmkTuple):
         ('()()()', '\\1, \\3')
 
     """
+
     tuple_fields = ("search", "replace_with")
     cast_to_dict = True
 
@@ -118,7 +123,51 @@ class IPAddressRange(BaseSchema, CheckmkTuple):
     )
 
 
+class IPNetworkCIDR(String):
+    """
+    >>> schema = IPNetworkCIDR()
+    >>> schema.serialize("d", dict(d=("192.168.178.10", 24)))
+    '192.168.178.10/24'
+    >>> schema.deserialize("192.168.178.10/24")
+    ('192.168.178.10', 24)
+    >>> class FooSchema(BaseSchema):
+    ...    blah = IPNetworkCIDR()
+    >>> schema = FooSchema()
+    >>> schema.load({"blah": "broken"})
+    Traceback (most recent call last):
+    ...
+    marshmallow.exceptions.ValidationError: {'blah': ["Expected an IP network in CIDR notation like '192.168.0.0/24'"]}
+    >>> schema.dump({"blah": "broken"})
+    Traceback (most recent call last):
+    ...
+    marshmallow.exceptions.ValidationError: Error handling 'broken', expected a tuple of IPv4 address and network size e.g. ('192.168.0.0', 24)
+    """
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        try:
+            network, mask = tuple(value.split("/"))
+            return (network, int(mask))
+        except ValueError:
+            raise ValidationError("Expected an IP network in CIDR notation like '192.168.0.0/24'")
+
+    def _serialize(self, value, attr, obj, **kwargs):
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return f"{value[0]}/{value[1]}"
+        raise ValidationError(
+            f"Error handling {value!r}, expected a tuple of IPv4 address and network size e.g. ('192.168.0.0', 24)"
+        )
+
+
 class IPNetwork(BaseSchema, CheckmkTuple):
+    """
+    >>> schema = IPNetwork()
+    >>> rv = schema.dump(('ip_network', ('192.168.0.0', 24)))
+    >>> rv
+    {'type': 'ip_network', 'network': '192.168.0.0/24'}
+    >>> schema.load(rv)
+    ('ip_network', ('192.168.0.0', 24))
+    """
+
     tuple_fields = ("type", "network")
     cast_to_dict = True
 
@@ -126,7 +175,7 @@ class IPNetwork(BaseSchema, CheckmkTuple):
         description="A single IPv4 network in CIDR notation.",
         constant="ip_network",
     )
-    network = String(
+    network = IPNetworkCIDR(
         description=(
             "A IPv4 network in CIDR notation. Minimum prefix length is 8 bit, "
             "maximum prefix length is 30 bit.\n\nValid examples:\n\n"
@@ -207,7 +256,7 @@ class IPRange(OneOfSchema):
 
     Loading defective values from store is possible...
 
-        >>> rv = s.dump(('ip_network', '127.0.0.1/32'))
+        >>> rv = s.dump(('ip_network', ('127.0.0.1', '32')))
         >>> rv
         {'type': 'network_range', 'network': '127.0.0.1/32'}
 
@@ -260,8 +309,18 @@ class DateConverter(Converter):
     # meaning is "the last second/minute of this day", so we replace it with that.
 
     def from_checkmk(self, data):
-        if data == (24, 0):
-            data = (23, 59, 59)
+        """Converts a Checkmk date string to a datetime object
+
+        Examples:
+            >>> DateConverter().from_checkmk([24, 0])
+            datetime.time(23, 59, 59)
+
+            >>> DateConverter().from_checkmk((0, 0))
+            datetime.time(0, 0)
+        """
+        if data[0] == 24 and data[1] == 0:  # Checkmk format can be [24, 0] e.g. folder network scan
+            data = 23, 59, 59
+
         return datetime.time(*data)
 
     def to_checkmk(self, data):
@@ -284,12 +343,14 @@ class TimeAllowedRange(BaseSchema, CheckmkTuple):
     converter = (DateConverter(), DateConverter())
 
     start = Time(
-        description=(
-            "The start time of day. Inclusive. " "Use ISO8601 format. Seconds are stripped."
-        )
+        description=("The start time of day. Inclusive. Use ISO8601 format. Seconds are stripped."),
+        required=True,
+        pattern=r"^\d\d:\d\d(:\d\d)?$",
     )
     end = Time(
-        description=("The end time of day. Inclusive. " "Use ISO8601 format. Seconds are stripped.")
+        description=("The end time of day. Inclusive. Use ISO8601 format. Seconds are stripped."),
+        required=True,
+        pattern=r"^\d\d:\d\d(:\d\d)?$",
     )
 
 
@@ -299,7 +360,7 @@ def _active_users(user):
         raise ValidationError(f"User {user!r} is not known.")
 
 
-def _enum_options(options: typing.List[typing.Tuple[str, str]]) -> str:
+def _enum_options(options: list[tuple[str, str]]) -> str:
     """
 
     >>> _enum_options([('foo', 'Do the foo, bar times!'), ('bar', 'Barf!')])
@@ -318,7 +379,7 @@ class DirectMapping(BaseSchema, CheckmkTuple):
     tuple_fields = ("hostname", "replace_with")
 
     hostname = String(
-        description="The hostname to be replaced.",
+        description="The host name to be replaced.",
         required=True,
     )
     replace_with = String(
@@ -330,12 +391,12 @@ class DirectMapping(BaseSchema, CheckmkTuple):
 class TranslateNames(BaseSchema):
     case = String(
         data_key="convert_case",
-        description="Convert all detected hostnames to upper- or lower-case.\n\n"
+        description="Convert all detected host names to upper- or lower-case.\n\n"
         + _enum_options(
             [
                 ("nop", "Do not convert anything"),
-                ("lower", "Convert all hostnames to lowercase."),
-                ("upper", "Convert all hostnames to uppercase."),
+                ("lower", "Convert all host names to lowercase."),
+                ("upper", "Convert all host names to uppercase."),
             ]
         ),
         enum=["nop", "lower", "upper"],
@@ -343,7 +404,7 @@ class TranslateNames(BaseSchema):
     )
     drop_domain = Boolean(
         description=(
-            "Drop the rest of the domain, only keep the hostname. Will not affect "
+            "Drop the rest of the domain, only keep the host name. Will not affect "
             "IP addresses.\n\n"
             "Examples:\n\n"
             " * `192.168.0.1` -> `192.168.0.1`\n"
@@ -358,7 +419,7 @@ class TranslateNames(BaseSchema):
         Nested(RegexpRewrites),
         data_key="regexp_rewrites",
         description=(
-            "Rewrite discovered hostnames with multiple regular expressions. The "
+            "Rewrite discovered host names with multiple regular expressions. The "
             "replacements will be done one after another in the order they appear "
             "in the list. If not anchored at the end by a `$` character, the regexp"
             "will be anchored at the end implicitly by adding a `$` character.\n\n"
@@ -382,12 +443,13 @@ class TranslateNames(BaseSchema):
 
 class NetworkScan(BaseSchema):
     """
-
+    >>> from pprint import pprint
     >>> schema = NetworkScan()
     >>> settings = {
     ...     'exclude_ranges': [('ip_list', ['192.168.0.2']),
     ...                        ('ip_regex_list', ['192.168.[02].*'])],
     ...     'ip_ranges': [('ip_range', ('192.168.0.10', '192.168.0.244')),
+    ...                   ('ip_network', ('172.10.9.0', 24)),
     ...                   ('ip_regex_list', ['192.168.[01].*']),
     ...                   ('ip_list', ['192.168.0.2'])],
     ...     'max_parallel_pings': 100,
@@ -401,17 +463,29 @@ class NetworkScan(BaseSchema):
     ...         'drop_domain': True,
     ...         'mapping': [('example.com', 'www.example.com')],
     ...         'regex': [('.*', 'mehrfacheregulaere')]}}
-    >>> result = schema.dump(settings)
-    >>> assert len(result['addresses']) == 3
-    >>> assert len(result['exclude_addresses']) == 2
-    >>> assert len(result['time_allowed'][0]) == 2
-    >>> assert len(result['translate_names']) == 4
-
-    >>> import unittest
-    >>> test_case = unittest.TestCase()
-    >>> test_case.maxDiff = None
-    >>> test_case.assertDictEqual(settings, schema.load(result))
-
+    >>> pprint(dumped := schema.dump(settings))
+    {'addresses': [{'from_address': '192.168.0.10',
+                    'to_address': '192.168.0.244',
+                    'type': 'address_range'},
+                   {'network': '172.10.9.0/24', 'type': 'network_range'},
+                   {'regexp_list': ['192.168.[01].*'], 'type': 'exclude_by_regexp'},
+                   {'addresses': ['192.168.0.2'], 'type': 'explicit_addresses'}],
+     'exclude_addresses': [{'addresses': ['192.168.0.2'],
+                            'type': 'explicit_addresses'},
+                           {'regexp_list': ['192.168.[02].*'],
+                            'type': 'exclude_by_regexp'}],
+     'max_parallel_pings': 100,
+     'scan_interval': 86400,
+     'set_ip_address': True,
+     'time_allowed': [{'end': '23:59:00', 'start': '12:00:00'}],
+     'translate_names': {'convert_case': 'lower',
+                         'drop_domain': True,
+                         'hostname_replacement': [{'hostname': 'example.com',
+                                                   'replace_with': 'www.example.com'}],
+                         'regexp_rewrites': [{'replace_with': 'mehrfacheregulaere',
+                                              'search': '.*'}]}}
+    >>> settings == schema.load(dumped)
+    True
     """
 
     ip_ranges = List(
@@ -455,23 +529,63 @@ class NetworkScan(BaseSchema):
         required=False,
         validate=_active_users,
     )
+    tag_criticality = String(
+        description=(
+            "Specify which criticality tag to set on the host created by the network scan. "
+            "This field is required if the criticality tag group exists, "
+            "otherwise it as to be omitted."
+        ),
+        required=False,
+    )
     translate_names = Nested(TranslateNames)
+
+    @validates_schema
+    def validate_tag_criticality(self, data: dict[str, typing.Any], **kwargs: typing.Any) -> None:
+        tag_criticality = load_tag_group(TagGroupID("criticality"))
+        if tag_criticality is None:
+            if "tag_criticality" in data:
+                raise ValidationError(
+                    "Tag group criticality does not exist. tag_criticality must be omitted."
+                )
+        else:
+            if "tag_criticality" not in data:
+                raise ValidationError("tag_criticality must be specified")
+            if (value := data["tag_criticality"]) not in (t.id for t in tag_criticality.tags):
+                raise ValidationError(
+                    f"tag_criticality value {value!r} is not defined for criticality tag group"
+                )
+
+
+class NetworkScanResultState(String):
+    def _serialize(self, value, attr, obj, **kwargs):
+        if value is None:
+            return "running"
+        if value is True:
+            return "succeeded"
+        if value is False:
+            return "failed"
+        raise AssertionError(f"NetworkScanResult: value {value} not defined")
 
 
 class NetworkScanResult(BaseSchema):
-    start = DateTime(description="When the scan started")
-    end = DateTime(
+    start = Timestamp(
+        description="When the scan started",
+        allow_none=True,
+    )
+    end = Timestamp(
         description="When the scan finished. Will be Null if not yet run.",
         allow_none=True,
     )
-    state = String(
+    state = NetworkScanResultState(
         description="Last scan result",
         enum=[
-            "not_started",
             "running",
             "succeeded",
             "failed",
         ],
+    )
+    output = String(
+        description="Short human readable description of what is happening.",
     )
 
 
@@ -550,13 +664,13 @@ class MappingConverter(Converter):
 
     """
 
-    def __init__(self, mapping) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, mapping: Mapping[str, str]) -> None:
         self.mapping = mapping
 
-    def to_checkmk(self, data):
+    def to_checkmk(self, data: str) -> str:
         return self.mapping[data]
 
-    def from_checkmk(self, data):
+    def from_checkmk(self, data: str) -> str:
         for key, value in self.mapping.items():
             if data == value:
                 return key
@@ -569,6 +683,7 @@ class SNMPCommunity(BaseSchema):
     type = Constant(constant="v1_v2_community")
     community = String(
         description="SNMP community (SNMP Versions 1 and 2c)",
+        required=True,
     )
 
     @post_load
@@ -686,7 +801,7 @@ class SNMPv3AuthPrivacy(BaseSchema, CheckmkTuple):
     )
     privacy_password = String(
         description=(
-            "Privacy pass phrase. " "If filled, privacy_protocol needs to be selected as well."
+            "Privacy pass phrase. If filled, privacy_protocol needs to be selected as well."
         ),
         required=True,
         minLength=8,
@@ -806,18 +921,16 @@ class HostAttributeManagementBoardField(String):
             enum=["none", "snmp", "ipmi"],
         )
 
-    def _deserialize(  # type:ignore[no-untyped-def]
-        self, value, attr, data, **kwargs
-    ) -> typing.Any:
+    def _deserialize(
+        self, value: object, attr: object, data: object, **kwargs: typing.Any
+    ) -> str | None:
         # get value from api, convert it to cmk/python
         deserialized = super()._deserialize(value, attr, data, **kwargs)
         if deserialized == "none":
             return None
         return deserialized
 
-    def _serialize(  # type:ignore[no-untyped-def]
-        self, value, attr, obj, **kwargs
-    ) -> typing.Optional[str]:
+    def _serialize(self, value: str | None, attr: object, obj: object, **kwargs: typing.Any) -> str:
         # get value from cmk/python, convert it to api side
         serialized = super()._serialize(value, attr, obj, **kwargs)
         if serialized is None:

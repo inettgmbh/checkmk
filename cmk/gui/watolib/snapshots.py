@@ -1,673 +1,251 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import errno
-import glob
-import io
+"""Coordinates the collection and packing of snapshots"""
+
+from __future__ import annotations
+
+import logging
+import multiprocessing.pool
 import os
 import shutil
 import subprocess
-import tarfile
-import time
-import traceback
-from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
 
-import cmk.utils
+from livestatus import SiteId
+
+from cmk.ccc import store
+from cmk.ccc.exceptions import MKGeneralException
+
 import cmk.utils.paths
-import cmk.utils.store as store
 
-from cmk.gui.config import active_config
-from cmk.gui.exceptions import MKGeneralException
-from cmk.gui.i18n import _
+from cmk.gui import hooks
 from cmk.gui.log import logger
-from cmk.gui.logged_in import user
-from cmk.gui.watolib.audit_log import log_audit
+from cmk.gui.watolib.config_sync import (
+    ABCSnapshotDataCollector,
+    create_distributed_wato_files,
+    create_rabbitmq_new_definitions_file,
+    get_site_globals,
+    replication_path_registry,
+    ReplicationPath,
+    SnapshotSettings,
+)
+from cmk.gui.watolib.global_settings import save_site_global_settings
 
-DomainSpec = Dict
+from cmk import trace
 
-var_dir = cmk.utils.paths.var_dir + "/wato/"
-snapshot_dir = var_dir + "snapshots/"
-
-backup_domains: Dict[str, Dict[str, Any]] = {}
+tracer = trace.get_tracer()
 
 
-# TODO: Remove once new changes mechanism has been implemented
-def create_snapshot(comment):
-    logger.debug("Start creating backup snapshot")
-    start = time.time()
-    store.mkdir(snapshot_dir)
-
-    snapshot_name = "wato-snapshot-%s.tar" % time.strftime(
-        "%Y-%m-%d-%H-%M-%S", time.localtime(time.time())
+def make_cre_snapshot_manager(
+    work_dir: str,
+    site_snapshot_settings: dict[SiteId, SnapshotSettings],
+) -> SnapshotManager:
+    return SnapshotManager(
+        work_dir,
+        site_snapshot_settings,
+        CRESnapshotDataCollector(site_snapshot_settings),
+        reuse_identical_snapshots=True,
+        generate_in_subprocess=False,
     )
 
-    data: Dict[str, Any] = {}
-    data["comment"] = _("Activated changes by %s.") % user.id
 
-    if comment:
-        data["comment"] += _("Comment: %s") % comment
-
-    # with SuperUserContext the user.id is None; later this value will be encoded for tar
-    data["created_by"] = "" if user.id is None else user.id
-    data["type"] = "automatic"
-    data["snapshot_name"] = snapshot_name
-
-    _do_create_snapshot(data)
-    _do_snapshot_maintenance()
-
-    log_audit("snapshot-created", _("Created snapshot %s") % snapshot_name)
-    logger.debug("Backup snapshot creation took %.4f", time.time() - start)
-
-
-# TODO: Remove once new changes mechanism has been implemented
-def _do_create_snapshot(data):
-    snapshot_name = data["snapshot_name"]
-    work_dir = snapshot_dir.rstrip("/") + "/workdir/%s" % snapshot_name
-
-    try:
-        if not os.path.exists(work_dir):
-            os.makedirs(work_dir)
-
-        # Open / initialize files
-        filename_target = "%s/%s" % (snapshot_dir, snapshot_name)
-        filename_work = "%s/%s.work" % (work_dir, snapshot_name)
-
-        with open(filename_target, "wb"):
-            pass
-
-        def get_basic_tarinfo(name):
-            tarinfo = tarfile.TarInfo(name)
-            tarinfo.mtime = int(time.time())
-            tarinfo.uid = 0
-            tarinfo.gid = 0
-            tarinfo.mode = 0o644
-            tarinfo.type = tarfile.REGTYPE
-            return tarinfo
-
-        # Initialize the snapshot tar file and populate with initial information
-        with tarfile.open(filename_work, "w") as tar_in_progress:
-
-            for key in ["comment", "created_by", "type"]:
-                tarinfo = get_basic_tarinfo(key)
-                encoded_value = data[key].encode("utf-8")
-                tarinfo.size = len(encoded_value)
-                tar_in_progress.addfile(tarinfo, io.BytesIO(encoded_value))
-
-        # Process domains (sorted)
-        subtar_info = {}
-
-        for name, info in sorted(_get_default_backup_domains().items()):
-            prefix = info.get("prefix", "")
-            filename_subtar = "%s.tar.gz" % name
-            path_subtar = "%s/%s" % (work_dir, filename_subtar)
-
-            paths = ["." if x[1] == "" else x[1] for x in info.get("paths", [])]
-            command = [
-                "tar",
-                "czf",
-                path_subtar,
-                "--ignore-failed-read",
-                "--force-local",
-                "-C",
-                prefix,
-            ] + paths
-
-            completed_process = subprocess.run(
-                command,
-                stdin=None,
-                close_fds=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=prefix,
-                encoding="utf-8",
-                check=False,
-            )
-            # Allow exit codes 0 and 1 (files changed during backup)
-            if completed_process.returncode not in [0, 1]:
-                raise MKGeneralException(
-                    "Error while creating backup of %s (Exit Code %d) - %s.\n%s"
-                    % (name, completed_process.returncode, completed_process.stderr, command)
-                )
-
-            with open(path_subtar, "rb") as subtar:
-                subtar_hash = sha256(subtar.read()).hexdigest()
-
-            subtar_signed = sha256(subtar_hash.encode() + _snapshot_secret()).hexdigest()
-            subtar_info[filename_subtar] = (subtar_hash, subtar_signed)
-
-            # Append tar.gz subtar to snapshot
-            command = ["tar", "--append", "--file=" + filename_work, filename_subtar]
-            completed_proc = subprocess.run(command, cwd=work_dir, close_fds=True, check=False)
-
-            if os.path.exists(filename_subtar):
-                os.unlink(filename_subtar)
-
-            if completed_proc.returncode:
-                raise MKGeneralException("Error on adding backup domain %s to tarfile" % name)
-
-        # Now add the info file which contains hashes and signed hashes for
-        # each of the subtars
-        info = "".join(["%s %s %s\n" % (k, v[0], v[1]) for k, v in subtar_info.items()]) + "\n"
-
-        with tarfile.open(filename_work, "a") as tar_in_progress:
-            tarinfo = get_basic_tarinfo("checksums")
-            tarinfo.size = len(info)
-            tar_in_progress.addfile(tarinfo, io.BytesIO(info.encode()))
-
-        shutil.move(filename_work, filename_target)
-
-    finally:
-        shutil.rmtree(work_dir)
-
-
-# TODO: Remove once new changes mechanism has been implemented
-def _do_snapshot_maintenance():
-    snapshots = []
-    for f in os.listdir(snapshot_dir):
-        if f.startswith("wato-snapshot-"):
-            status = get_snapshot_status(f, check_correct_core=False)
-            # only remove automatic and legacy snapshots
-            if status.get("type") in ["automatic", "legacy"]:
-                snapshots.append(f)
-
-    snapshots.sort(reverse=True)
-    while len(snapshots) > active_config.wato_max_snapshots:
-        # log_audit("snapshot-removed", _("Removed snapshot %s") % snapshots[-1])
-        os.remove(snapshot_dir + snapshots.pop())
-
-
-# Returns status information for snapshots or snapshots in progress
-# TODO: Remove once new changes mechanism has been implemented
-def get_snapshot_status(  # pylint: disable=too-many-branches
-    snapshot,
-    validate_checksums=False,
-    check_correct_core=True,
-):
-    if isinstance(snapshot, tuple):
-        name, file_stream = snapshot
-    else:
-        name = snapshot
-        file_stream = None
-
-    # Defaults of available keys
-    status: Dict[str, Any] = {
-        "name": "",
-        "total_size": 0,
-        "type": None,
-        "files": {},
-        "comment": "",
-        "created_by": "",
-        "broken": False,
-        "progress_status": "",
-    }
-
-    def access_snapshot(handler):
-        if file_stream:
-            file_stream.seek(0)
-            return handler(file_stream)
-        return handler(snapshot_dir + name)
-
-    def check_size():
-        if file_stream:
-            file_stream.seek(0, os.SEEK_END)
-            size = file_stream.tell()
-        else:
-            statinfo = os.stat(snapshot_dir + name)
-            size = statinfo.st_size
-        if size < 256:
-            raise MKGeneralException(_("Invalid snapshot (too small)"))
-        status["total_size"] = size
-
-    def check_extension():
-        # Check snapshot extension: tar or tar.gz
-        if name.endswith(".tar.gz"):
-            status["type"] = "legacy"
-            status["comment"] = _("Snapshot created with old version")
-        elif not name.endswith(".tar"):
-            raise MKGeneralException(_("Invalid snapshot (incorrect file extension)"))
-
-    def check_content():
-        status["files"] = access_snapshot(_list_tar_content)
-
-        if status.get("type") == "legacy":
-            allowed_files = ["%s.tar" % x[1] for x in _get_default_backup_domains()]
-            for tarname in status["files"]:
-                if tarname not in allowed_files:
-                    raise MKGeneralException(
-                        _("Invalid snapshot (contains invalid tarfile %s)") % tarname
-                    )
-        else:  # new snapshots
-            for entry in ["comment", "created_by", "type"]:
-                if entry in status["files"]:
-
-                    def handler(x, entry=entry):
-                        return _get_file_content(x, entry).decode("utf-8")
-
-                    status[entry] = access_snapshot(handler)
-                else:
-                    raise MKGeneralException(_("Invalid snapshot (missing file: %s)") % entry)
-
-    def check_core():
-        if "check_mk.tar.gz" not in status["files"]:
-            return
-
-        cmk_tar = io.BytesIO(access_snapshot(lambda x: _get_file_content(x, "check_mk.tar.gz")))
-        files = _list_tar_content(cmk_tar)
-        using_cmc = (cmk.utils.paths.omd_root / "etc/check_mk/conf.d/microcore.mk").exists()
-        snapshot_cmc = "conf.d/microcore.mk" in files
-        if using_cmc and not snapshot_cmc:
-            raise MKGeneralException(
-                _(
-                    "You are currently using the Check_MK Micro Core, but this snapshot does not use the "
-                    "Check_MK Micro Core. If you need to migrate your data, you could consider changing "
-                    "the core, restoring the snapshot and changing the core back again."
-                )
-            )
-        if not using_cmc and snapshot_cmc:
-            raise MKGeneralException(
-                _(
-                    "You are currently not using the Check_MK Micro Core, but this snapshot uses the "
-                    "Check_MK Micro Core. If you need to migrate your data, you could consider changing "
-                    "the core, restoring the snapshot and changing the core back again."
-                )
-            )
-
-    def check_checksums():
-        for f in status["files"].values():
-            f["checksum"] = None
-
-        # checksums field might contain three states:
-        # a) None  - This is a legacy snapshot, no checksum file available
-        # b) False - No or invalid checksums
-        # c) True  - Checksums successfully validated
-        if status["type"] == "legacy":
-            status["checksums"] = None
-            return
-
-        if "checksums" not in status["files"]:
-            status["checksums"] = False
-            return
-
-        # Extract all available checksums from the snapshot
-        checksums_raw = access_snapshot(lambda x: _get_file_content(x, "checksums"))
-        checksums = {}
-        for l in checksums_raw.split("\n"):
-            line = l.strip()
-            if " " in line:
-                parts = line.split(" ")
-                if len(parts) == 3:
-                    checksums[parts[0]] = (parts[1], parts[2])
-
-        # now loop all known backup domains and check wheter or not they request
-        # checksum validation, there is one available and it is valid
-        status["checksums"] = True
-        for domain_id, domain in backup_domains.items():
-            filename = domain_id + ".tar.gz"
-            if not domain.get("checksum", True) or filename not in status["files"]:
-                continue
-
-            if filename not in checksums:
-                continue
-
-            checksum, signed = checksums[filename]
-
-            # Get hashes of file in question
-            def handler(x, filename=filename):
-                return _get_file_content(x, filename)
-
-            subtar = access_snapshot(handler)
-            subtar_hash = sha256(subtar).hexdigest()
-            subtar_signed = sha256(subtar_hash.encode() + _snapshot_secret()).hexdigest()
-
-            status["files"][filename]["checksum"] = (
-                checksum == subtar_hash and signed == subtar_signed
-            )
-            status["checksums"] &= status["files"][filename]["checksum"]
-
-    try:
-        if len(name) > 35:
-            status["name"] = "%s %s" % (name[14:24], name[25:33].replace("-", ":"))
-        else:
-            status["name"] = name
-
-        if not file_stream:
-            # Check if the snapshot build is still in progress...
-            path_status = "%s/workdir/%s/%s.status" % (snapshot_dir, name, name)
-            path_pid = "%s/workdir/%s/%s.pid" % (snapshot_dir, name, name)
-
-            # Check if this process is still running
-            if os.path.exists(path_pid):
-                with Path(path_pid).open(encoding="utf-8") as f:
-                    pid = int(f.read())
-
-                if not os.path.exists("/proc/%d" % pid):
-                    status["progress_status"] = _("ERROR: Snapshot progress no longer running!")
-                    raise MKGeneralException(
-                        _(
-                            "Error: The process responsible for creating the snapshot is no longer running!"
-                        )
-                    )
-                status["progress_status"] = _("Snapshot build currently in progress")
-
-            # Read snapshot status file (regularly updated by snapshot process)
-            if os.path.exists(path_status):
-                with Path(path_status).open(encoding="utf-8") as f:
-                    lines = f.readlines()
-
-                status["comment"] = lines[0].split(":", 1)[1]
-                file_info = {}
-                for filename in lines[1:]:
-                    name, info = filename.split(":", 1)
-                    text, size = info[:-1].split(":", 1)
-                    file_info[name] = {"size": int(size), "text": text}
-                status["files"] = file_info
-                return status
-
-        # Snapshot exists and is finished - do some basic checks
-        check_size()
-        check_extension()
-        check_content()
-        if check_correct_core:
-            check_core()
-
-        if validate_checksums:
-            check_checksums()
-
-    except Exception as e:
-        if active_config.debug:
-            status["broken_text"] = traceback.format_exc()
-            status["broken"] = True
-        else:
-            status["broken_text"] = "%s" % e
-            status["broken"] = True
-    return status
-
-
-def _list_tar_content(the_tarfile: Union[str, io.BytesIO]) -> Dict[str, Dict[str, int]]:
-    files = {}
-    try:
-        if not isinstance(the_tarfile, str):
-            the_tarfile.seek(0)
-            with tarfile.open("r", fileobj=the_tarfile) as tar:
-                for x in tar.getmembers():
-                    files.update({x.name: {"size": x.size}})
-        else:
-            with tarfile.open(the_tarfile, "r") as tar:
-                for x in tar.getmembers():
-                    files.update({x.name: {"size": x.size}})
-
-    except Exception:
-        return {}
-    return files
-
-
-def _get_file_content(the_tarfile: Union[str, io.BytesIO], filename: str) -> bytes:
-    if not isinstance(the_tarfile, str):
-        the_tarfile.seek(0)
-        with tarfile.open("r", fileobj=the_tarfile) as tar:
-            if obj := tar.extractfile(filename):
-                return obj.read()
-    else:
-        with tarfile.open(the_tarfile, "r") as tar:
-            if obj := tar.extractfile(filename):
-                return obj.read()
-
-    raise MKGeneralException(_("Failed to extract %s") % filename)
-
-
-def _get_default_backup_domains():
-    domains = {}
-    for domain, value in backup_domains.items():
-        if "default" in value and not value.get("deprecated"):
-            domains.update({domain: value})
-    return domains
-
-
-def _snapshot_secret() -> bytes:
-    path = Path(cmk.utils.paths.default_config_dir, "snapshot.secret")
-    try:
-        return path.read_bytes()
-    except IOError:
-        # create a secret during first use
-        try:
-            s = os.urandom(256)
-        except NotImplementedError:
-            s = str(sha256(str(time.time()).encode())).encode()
-        path.write_bytes(s)
-        return s
-
-
-def extract_snapshot(  # pylint: disable=too-many-branches
-    tar: tarfile.TarFile,
-    domains: Dict[str, DomainSpec],
+class SnapshotManager:
+    def __init__(
+        self,
+        activation_work_dir: str,
+        site_snapshot_settings: dict[SiteId, SnapshotSettings],
+        data_collector: ABCSnapshotDataCollector,
+        reuse_identical_snapshots: bool,
+        generate_in_subprocess: bool,
+    ) -> None:
+        super().__init__()
+        self._activation_work_dir = activation_work_dir
+        self._site_snapshot_settings = site_snapshot_settings
+        self._data_collector = data_collector
+        self._reuse_identical_snapshots = reuse_identical_snapshots
+        self._generate_in_subproces = generate_in_subprocess
+
+        # Stores site and folder specific information to speed-up the snapshot generation
+        self._logger = logger.getChild(self.__class__.__name__)
+
+    def generate_snapshots(self) -> None:
+        if not self._site_snapshot_settings:
+            return  # Nothing to do
+
+        # 1. Collect files to "var/check_mk/site_configs" directory
+        with tracer.span("prepare_snapshot_files"):
+            self._data_collector.prepare_snapshot_files()
+
+        # 2. Allow hooks to further modify the reference data for the remote site
+        hooks.call("post-snapshot-creation", self._site_snapshot_settings)
+
+
+def _clone_site_config_directory(
+    site_logger: logging.Logger,
+    site_id: str,
+    snapshot_settings: SnapshotSettings,
+    origin_site_work_dir: str,
 ) -> None:
-    """Used to restore a configuration snapshot for "discard changes"""
-    tar_domains = {}
-    for member in tar.getmembers():
-        try:
-            if member.name.endswith(".tar.gz"):
-                tar_domains[member.name[:-7]] = member
-        except Exception:
-            pass
+    site_logger.debug("Processing site %s", site_id)
 
-    # We are using the var_dir, because tmp_dir might not have enough space
-    restore_dir = cmk.utils.paths.var_dir + "/wato/snapshots/restore_snapshot"
-    if not os.path.exists(restore_dir):
-        os.makedirs(restore_dir)
+    if os.path.exists(snapshot_settings.work_dir):
+        shutil.rmtree(snapshot_settings.work_dir)
 
-    def check_domain(domain: DomainSpec, tar_member: tarfile.TarInfo) -> List[str]:
-        errors = []
+    completed_process = subprocess.run(
+        ["cp", "-al", origin_site_work_dir, snapshot_settings.work_dir],
+        shell=False,
+        close_fds=True,
+        check=False,
+    )
 
-        prefix = domain["prefix"]
+    assert completed_process.returncode == 0
+    site_logger.debug("Finished site")
 
-        def check_exists_or_writable(path_tokens: List[str]) -> bool:
-            if not path_tokens:
-                return False
-            if os.path.exists("/".join(path_tokens)):
-                if os.access("/".join(path_tokens), os.W_OK):
-                    return True  # exists and writable
 
-                errors.append(_("Permission problem: Path not writable %s") % "/".join(path_tokens))
-                return False  # not writable
+class CRESnapshotDataCollector(ABCSnapshotDataCollector):
+    def prepare_snapshot_files(self) -> None:
+        """Collect the files to be synchronized for all sites
 
-            return check_exists_or_writable(path_tokens[:-1])
+        This is done by copying the things declared by the generic components together to a single
+        site_config for one site. This will result in a directory containing only hard links to
+        the original files.
 
-        # The complete tar file never fits in stringIO buffer..
-        tar.extract(tar_member, restore_dir)
+        This directory is then cloned recursively for all sites, again with the result of having
+        a single directory per site containing a lot of hard links to the original files.
 
-        # Older versions of python tarfile handle empty subtar archives :(
-        # This won't work: subtar = tarfile.open("%s/%s" % (restore_dir, tar_member.name))
-        completed_process = subprocess.run(
-            ["tar", "tzf", "%s/%s" % (restore_dir, tar_member.name)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            check=False,
-        )
-        if completed_process.stderr:
-            errors.append(_("Contains corrupt file %s") % tar_member.name)
-            return errors
+        As last step the site individual files will be added.
+        """
+        # Choose one site to create the first site config for
+        site_ids = list(self._site_snapshot_settings.keys())
+        first_site = site_ids.pop(0)
 
-        for line in completed_process.stdout:
-            full_path = str(prefix) + "/" + line
-            path_tokens = full_path.split("/")
-            check_exists_or_writable(path_tokens)
+        # Create first directory and clone it once for each destination site
+        with tracer.span("prepare_first_site"):
+            self._prepare_site_config_directory(first_site)
+            self._clone_site_config_directories(first_site, site_ids)
 
-        # Cleanup
-        os.unlink("%s/%s" % (restore_dir, tar_member.name))
+        for site_id, snapshot_settings in sorted(
+            self._site_snapshot_settings.items(), key=lambda x: x[0]
+        ):
+            with tracer.span(f"prepare_site_{site_id}"):
+                save_site_global_settings(
+                    get_site_globals(site_id, snapshot_settings.site_config),
+                    custom_site_path=snapshot_settings.work_dir,
+                )
+                create_distributed_wato_files(
+                    Path(snapshot_settings.work_dir), site_id, is_remote=True
+                )
+                create_rabbitmq_new_definitions_file(
+                    Path(snapshot_settings.work_dir), snapshot_settings.rabbitmq_definition
+                )
 
-        return errors
+    def _prepare_site_config_directory(self, site_id: SiteId) -> None:
+        """
+        Gather files to be synchronized to remote sites from etc hierarchy
 
-    def cleanup_domain(domain: DomainSpec) -> List[str]:
-        # Some domains, e.g. authorization, do not get a cleanup
-        if domain.get("cleanup") is False:
-            return []
+        - Iterate all files declared by snapshot components
+        - Synchronize site hierarchy with site_config directory
+          - Remove files that do not exist anymore
+          - Add hard links
+        """
+        self._logger.debug("Processing first site %s", site_id)
+        snapshot_settings = self._site_snapshot_settings[site_id]
 
-        def path_valid(prefix: str, path: str) -> bool:
-            if path.startswith("/") or path.startswith(".."):
-                return False
-            return True
+        # Currently we don't have an incremental sync on disk. The performance of some mkdir/link
+        # calls should be good enough
+        if os.path.exists(snapshot_settings.work_dir):
+            shutil.rmtree(snapshot_settings.work_dir)
 
-        # Remove old stuff
-        for what, path in domain.get("paths", {}):
-            if not path_valid(domain["prefix"], path):
+        for component in self.get_generic_components():
+            # Generic components (i.e. any component that does not have "ident"
+            # = "sitespecific") are collected to be snapshotted. Site-specific
+            # components as well as distributed wato components are done later on
+            # in the process.
+
+            # Note that at this stage, components that have been deselected
+            # from site synchronisation by the user must not be pre-filtered,
+            # otherwise these settings would cascade randomly from the first site
+            # to the other sites.
+
+            # These components are deselected in the snapshot settings of the
+            # site, which is the basis of the actual synchronisation.
+
+            # Examples of components that can be excluded:
+            # - event console ("mkeventd", "mkeventd_mkp")
+            # - MKPs ("local", "mkps")
+
+            source_path = cmk.utils.paths.omd_root / component.site_path
+            target_path = Path(snapshot_settings.work_dir).joinpath(component.site_path)
+
+            store.makedirs(target_path.parent)
+
+            if not source_path.exists():
+                # Not existing files things can simply be skipped, not existing files could also be
+                # skipped, but we create them here to be 1:1 compatible with the pre 1.7 sync.
+                if component.ty == "dir":
+                    store.makedirs(target_path)
+
                 continue
-            full_path = "%s/%s" % (domain["prefix"], path)
-            if os.path.exists(full_path):
-                if what == "dir":
-                    exclude_files = []
-                    for pattern in domain.get("exclude", []):
-                        if "*" in pattern:
-                            exclude_files.extend(glob.glob("%s/%s" % (domain["prefix"], pattern)))
-                        else:
-                            exclude_files.append("%s/%s" % (domain["prefix"], pattern))
-                    _cleanup_dir(full_path, exclude_files)
-                else:
-                    os.remove(full_path)
-        return []
 
-    def extract_domain(domain: DomainSpec, tar_member: tarfile.TarInfo) -> List[str]:
-        try:
-            target_dir = domain.get("prefix")
-            if not target_dir:
-                return []
-            # The complete tar.gz file never fits in stringIO buffer..
-            tar.extract(tar_member, restore_dir)
+            # Recursively hard link files (rsync --link-dest or cp -al)
+            # With Python 3 we could use "shutil.copytree(src, dst, copy_function=os.link)", but
+            # please have a look at the performance before switching over...
+            # shutil.copytree(source_path, str(target_path.parent) + "/", copy_function=os.link)
 
-            command = ["tar", "xzf", "%s/%s" % (restore_dir, tar_member.name), "-C", target_dir]
             completed_process = subprocess.run(
-                command,
+                ["cp", "-al", str(source_path), str(target_path.parent) + "/"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                shell=False,
+                close_fds=True,
                 check=False,
             )
-
             if completed_process.returncode:
-                return ["%s - %s" % (domain["title"], completed_process.stderr)]
-        except Exception as e:
-            return ["%s - %s" % (domain["title"], str(e))]
-
-        return []
-
-    def execute_restore(domain: DomainSpec, is_pre_restore: bool = True) -> List[str]:
-        if is_pre_restore:
-            if "pre_restore" in domain:
-                return domain["pre_restore"]()
-        else:
-            if "post_restore" in domain:
-                return domain["post_restore"]()
-        return []
-
-    total_errors = []
-    logger.info("Restoring snapshot: %s", tar.name)
-    logger.info("Domains: %s", ", ".join(tar_domains.keys()))
-    for what, abort_on_error, handler in [
-        ("Permissions", True, check_domain),
-        (
-            "Pre-Restore",
-            True,
-            lambda domain, tar_member: execute_restore(domain, is_pre_restore=True),
-        ),
-        ("Cleanup", False, lambda domain, tar_member: cleanup_domain(domain)),
-        ("Extract", False, extract_domain),
-        (
-            "Post-Restore",
-            False,
-            lambda domain, tar_member: execute_restore(domain, is_pre_restore=False),
-        ),
-    ]:
-        errors: List[str] = []
-        for name, tar_member in tar_domains.items():
-            if name in domains:
-                try:
-                    dom_errors = handler(domains[name], tar_member)
-                    errors.extend(dom_errors or [])
-                except Exception:
-                    # This should NEVER happen
-                    err_info = "Restore-Phase: %s, Domain: %s\nError: %s" % (
-                        what,
-                        name,
-                        traceback.format_exc(),
-                    )
-                    errors.append(err_info)
-                    logger.critical(err_info)
-                    if not abort_on_error:
-                        # At this state, the restored data is broken.
-                        # We still try to apply the rest of the snapshot
-                        # Hopefully the log entry helps in identifying the problem..
-                        logger.critical("Snapshot restore FAILED! (possible loss of snapshot data)")
-                        continue
-                    break
-
-        if errors:
-            if what == "Permissions":
-                errors = list(set(errors))
-                errors.append(
-                    _(
-                        "<br>If there are permission problems, please ensure the site user has write permissions."
-                    )
+                self._logger.error(
+                    "Failed to clone files from %s to %s: %s",
+                    source_path,
+                    str(target_path),
+                    completed_process.stdout,
                 )
-            if abort_on_error:
-                raise MKGeneralException(
-                    _("%s - Unable to restore snapshot:<br>%s") % (what, "<br>".join(errors))
-                )
-            total_errors.extend(errors)
+                raise MKGeneralException("Failed to create site config directory")
 
-    # Cleanup
-    _wipe_directory(restore_dir)
+        self._logger.debug("Finished site")
 
-    if total_errors:
-        raise MKGeneralException(
-            _("Errors on restoring snapshot:<br>%s") % "<br>".join(total_errors)
-        )
+    def _clone_site_config_directories(
+        self, origin_site_id: SiteId, site_ids: list[SiteId]
+    ) -> None:
+        clone_args = [
+            (
+                self._logger.getChild(f"site[{site_id}]"),
+                site_id,
+                self._site_snapshot_settings[site_id],
+                self._site_snapshot_settings[origin_site_id].work_dir,
+            )
+            for site_id in site_ids
+        ]
 
+        num_threads = 5  # based on rudimentary tests, performance improvement drops off after
+        with multiprocessing.pool.ThreadPool(processes=num_threads) as copy_pool:
+            copy_pool.starmap(_clone_site_config_directory, clone_args)
 
-# Try to cleanup everything starting from the root_path
-# except the specific exclude files
-def _cleanup_dir(root_path: str, exclude_files: Optional[List[str]] = None) -> None:
-    if exclude_files is None:
-        exclude_files = []
+    def get_generic_components(self) -> list[ReplicationPath]:
+        return list(replication_path_registry.values())
 
-    paths_to_remove = []
-    files_to_remove = []
-    for path, dirnames, filenames in os.walk(root_path):
-        for dirname in dirnames:
-            pathname = "%s/%s" % (path, dirname)
-            for entry in exclude_files:
-                if entry.startswith(pathname):
-                    break
+    def get_site_components(
+        self, snapshot_settings: SnapshotSettings
+    ) -> tuple[list[ReplicationPath], list[ReplicationPath]]:
+        generic_site_components = []
+        custom_site_components = []
+
+        for component in snapshot_settings.snapshot_components:
+            if component.ident == "sitespecific":
+                # Only the site specific global files are individually handled in the non CME snapshot
+                custom_site_components.append(component)
             else:
-                paths_to_remove.append(pathname)
-        for filename in filenames:
-            filepath = "%s/%s" % (path, filename)
-            if filepath not in exclude_files:
-                files_to_remove.append(filepath)
+                generic_site_components.append(component)
 
-    paths_to_remove.sort()
-    files_to_remove.sort()
-
-    for path in paths_to_remove:
-        if os.path.exists(path) and os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
-
-    for filename in files_to_remove:
-        if os.path.dirname(filename) not in paths_to_remove:
-            os.remove(filename)
-
-
-def _wipe_directory(path: str) -> None:
-    for entry in os.listdir(path):
-        p = path + "/" + entry
-        if os.path.isdir(p):
-            shutil.rmtree(p, ignore_errors=True)
-        else:
-            try:
-                os.remove(p)
-            except OSError as e:
-                if e.errno != errno.ENOENT:
-                    raise
+        return generic_site_components, custom_site_components

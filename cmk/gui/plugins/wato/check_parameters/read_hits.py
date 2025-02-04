@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,16 +9,27 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersStorage,
 )
-from cmk.gui.valuespec import Float, TextInput, Tuple
+from cmk.gui.valuespec import Dictionary, Float, Migrate, TextInput, Tuple
 
 
-def _parameter_valuespec_read_hits() -> Tuple:
-    return Tuple(
-        title=_("Prefetch hits"),
-        elements=[
-            Float(title=_("Warning below"), default_value=95.0),
-            Float(title=_("Critical below"), default_value=90.0),
-        ],
+def _parameter_valuespec_read_hits() -> Migrate:
+    return Migrate(
+        valuespec=Dictionary(
+            elements=[
+                (
+                    "levels_lower",
+                    Tuple(
+                        title=_("Prefetch hits"),
+                        elements=[
+                            Float(title=_("Warning at or below"), default_value=85.0),
+                            Float(title=_("Critical at or below"), default_value=70.0),
+                        ],
+                    ),
+                ),
+            ],
+            optional_keys=[],
+        ),
+        migrate=lambda p: p if isinstance(p, dict) else {"levels_lower": p},
     )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,8 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Dictionary, Integer, TextInput, Tuple
+from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
+from cmk.gui.valuespec import Dictionary, Integer, TextInput
 
 
 def _parameter_valuespec_mssql_connections():
@@ -17,12 +18,10 @@ def _parameter_valuespec_mssql_connections():
         elements=[
             (
                 "levels",
-                Tuple(
+                SimpleLevels(
                     title=_("Upper levels for the number of active database connections"),
-                    elements=[
-                        Integer(title=_("Warning if over"), default_value=20),
-                        Integer(title=_("Critical if over"), default_value=50),
-                    ],
+                    spec=Integer,
+                    default_value=(20, 50),
                 ),
             )
         ],

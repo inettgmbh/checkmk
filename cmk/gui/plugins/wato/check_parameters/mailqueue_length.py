@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import typing
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.utils import (
@@ -11,9 +10,9 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Dictionary, Integer, Transform, Tuple, ValueSpec
+from cmk.gui.valuespec import Dictionary, Integer, Tuple, ValueSpec
 
-mailqueue_elements: typing.List[typing.Tuple[str, ValueSpec]] = [
+mailqueue_elements: list[tuple[str, ValueSpec]] = [
     (
         "deferred",
         Tuple(
@@ -34,8 +33,7 @@ mailqueue_elements: typing.List[typing.Tuple[str, ValueSpec]] = [
         Tuple(
             title=_("Mails in active mail queue"),
             help=_(
-                "This rule is applied to the number of E-Mails currently "
-                "in the active mail queue"
+                "This rule is applied to the number of E-Mails currently in the active mail queue"
             ),
             elements=[
                 Integer(title=_("Warning at"), unit=_("mails"), default_value=800),
@@ -45,16 +43,11 @@ mailqueue_elements: typing.List[typing.Tuple[str, ValueSpec]] = [
     ),
 ]
 
-mailqueue_params = Dictionary(
-    elements=mailqueue_elements,
-    optional_keys=["active"],
-)
 
-
-def _parameter_valuespec_mailqueue_length():
-    return Transform(
-        valuespec=mailqueue_params,
-        forth=lambda old: not isinstance(old, dict) and {"deferred": old} or old,
+def _parameter_valuespec_mailqueue_length() -> Dictionary:
+    return Dictionary(
+        elements=mailqueue_elements,
+        optional_keys=["active"],
     )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -12,18 +12,21 @@ will be read by javascript and included in the ajax call to the autocompleters
 endpoint.
 """
 
-from typing import Collection, Literal, Mapping, Optional, Union
+from collections.abc import Collection, Mapping
+from typing import Literal
 
-AutocompleterParams = Mapping[str, Union[str, int, float, bool, Collection[str]]]
+AutocompleterParams = Mapping[str, str | int | float | bool | Collection[str]]
 AutocompleterConfigJson = Mapping[
-    str, Union[str, int, float, bool, Collection[str], AutocompleterParams]
+    str, str | int | float | bool | Collection[str] | AutocompleterParams
 ]
 DynamicParamsCallbackName = Literal[
-    # see dynamicParamsCallbacks object in web/htdocs/js/modules/valuespecs.js
+    # see dynamicParamsCallbacks object in packages/frontend-vue/js/modules/valuespecs.js
     "nop",
     "tag_group_options_autocompleter",
     "host_and_service_hinted_autocompleter",
     "host_hinted_autocompleter",
+    "label_autocompleter",
+    "check_types_autocompleter",
 ]
 
 
@@ -34,11 +37,13 @@ class AutocompleterConfig:
         ident: str,
         # TODO: rename ident to endpoint!
         strict: bool = False,
-        dynamic_params_callback_name: Optional[DynamicParamsCallbackName] = None,
+        dynamic_params_callback_name: DynamicParamsCallbackName | None = None,
+        escape_regex: bool = False,
     ):
         self._ident = ident
         self._strict = strict
         self._dynamic_params_callback_name = dynamic_params_callback_name
+        self._escape_regex = escape_regex
 
     @property
     def ident(self) -> str:
@@ -46,7 +51,7 @@ class AutocompleterConfig:
 
     @property
     def params(self) -> AutocompleterParams:
-        return {"strict": self._strict}
+        return {"strict": self._strict, "escape_regex": self._escape_regex}
 
     @property
     def config(self) -> AutocompleterConfigJson:
@@ -72,13 +77,13 @@ class ContextAutocompleterConfig(AutocompleterConfig):
     metric can only be chosen if both host and service is chosen).
     """
 
-    def __init__(  # type:ignore[no-untyped-def]
+    def __init__(
         self,
         *,
         ident: str,
         strict: bool = True,
-        show_independent_of_context=False,
-        dynamic_params_callback_name: Optional[DynamicParamsCallbackName] = None,
+        show_independent_of_context: bool = False,
+        dynamic_params_callback_name: DynamicParamsCallbackName | None = None,
     ) -> None:
         super().__init__(
             ident=ident,
@@ -110,7 +115,7 @@ class GroupAutocompleterConfig(AutocompleterConfig):
             "statefulset",
         ],
         strict: bool = True,
-        dynamic_params_callback_name: Optional[DynamicParamsCallbackName] = None,
+        dynamic_params_callback_name: DynamicParamsCallbackName | None = None,
     ) -> None:
         super().__init__(
             ident=ident, strict=strict, dynamic_params_callback_name=dynamic_params_callback_name

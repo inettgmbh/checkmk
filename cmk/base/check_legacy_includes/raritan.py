@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-
 
 from .temperature import check_temperature
 
@@ -97,6 +96,13 @@ raritan_map_state = {
     "11": (2, "alarmed"),
 }
 
+# SensorStateEnumeration (EMD-, PDU2, LHX-MIB) - simplified for plugs (on/off)
+# nr. --> state human readable
+raritan_pdu_plug_state = {
+    "7": "on",
+    "8": "off",
+}
+
 # .
 #   .--Functions-----------------------------------------------------------.
 #   |             _____                 _   _                              |
@@ -138,14 +144,13 @@ def parse_raritan_sensors(info):
         sensor_upper_crit_str,
         sensor_upper_warn_str,
     ) in info:
-
         sensor_type, sensor_type_readable = raritan_map_type.get(sensor_type, ("", "Other"))
 
         extra_name = ""
         if sensor_type_readable != "":
             extra_name += " " + sensor_type_readable
 
-        sensor_name = ("Sensor %s%s %s" % (sensor_id, extra_name, sensor_name)).strip()
+        sensor_name = (f"Sensor {sensor_id}{extra_name} {sensor_name}").strip()
 
         sensor_unit = raritan_map_unit.get(sensor_unit, " Other")
 
@@ -205,18 +210,13 @@ def check_raritan_sensors(item, _no_params, parsed):
     if item in parsed:
         state, state_readable = parsed[item]["state"]
         unit = parsed[item]["sensor_unit"]
-        reading, crit_lower, warn_lower, crit, warn = parsed[item]["sensor_data"]
-        infotext = "%s%s, status: %s" % (reading, unit, state_readable)
+        reading, _crit_lower, warn_lower, crit, warn = parsed[item]["sensor_data"]
+        infotext = f"{reading}{unit}, status: {state_readable}"
 
         if state > 0 and reading >= warn:
-            infotext += " (device warn/crit at %.1f%s/%.1f%s)" % (warn, unit, crit, unit)
+            infotext += f" (device warn/crit at {warn:.1f}{unit}/{crit:.1f}{unit})"
         elif state > 0 and reading < warn_lower:
-            infotext += " (device warn/crit below %.1f%s/%.1f%s)" % (
-                warn_lower,
-                unit,
-                crit_lower,
-                unit,
-            )
+            infotext += f" (device warn/crit below {warn_lower:.1f}{unit}/{warn_lower:.1f}{unit})"
 
         return state, infotext, [(parsed[item]["sensor_type"], reading, warn, crit)]
     return None

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 from logging import Logger
-from typing import Any, Iterable, Optional
 
-import cmk.utils.debug
-import cmk.utils.defines
 from cmk.utils.log import VERBOSE
-from cmk.utils.type_defs import ContactgroupName, ECEventContext
+from cmk.utils.statename import service_state_name
+
+from cmk.events import event_context
 
 from .config import Action, Config, EMailActionConfig, Rule, ScriptActionConfig
 from .core_queries import query_contactgroups_members, query_status_enable_notifications
@@ -20,6 +20,41 @@ from .event import Event
 from .history import History
 from .host_config import HostConfig
 from .settings import Settings
+
+
+class ECEventContext(event_context.EventContext, total=False):
+    """The keys "found" in cmk.ec
+
+    Not sure if subclassing EventContext is the right call...
+    Feel free to merge if you feel like doing it.
+    """
+
+    EC_CONTACT: str
+    EC_CONTACT_GROUPS: str
+    EC_ID: str
+    EC_MATCH_GROUPS: str
+    EC_ORIG_HOST: str
+    EC_OWNER: str
+    EC_PHASE: str
+    EC_PID: str
+    HOSTADDRESS: str
+    HOSTALIAS: str
+    HOSTDOWNTIME: str
+    LASTSERVICESTATEID: str
+    NOTIFICATIONAUTHOR: str
+    NOTIFICATIONAUTHORALIAS: str
+    NOTIFICATIONAUTHORNAME: str
+    SERVICEACKAUTHOR: str
+    SERVICEACKCOMMENT: str
+    SERVICEPERFDATA: str
+    SERVICEPROBLEMID: str
+    SERVICESTATEID: str
+    SERVICE_EC_CONTACT: str
+    SERVICE_SL: str
+
+    # Dynamically added:
+    # HOST_*: str  #  custom_variables
+
 
 # .
 #   .--Actions-------------------------------------------------------------.
@@ -34,6 +69,8 @@ from .settings import Settings
 #   | executing scripts.                                                   |
 #   '----------------------------------------------------------------------'
 
+_ContactgroupName = str
+
 
 def event_has_opened(
     history: History,
@@ -41,12 +78,14 @@ def event_has_opened(
     config: Config,
     logger: Logger,
     host_config: HostConfig,
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     rule: Rule,
     event: Event,
 ) -> None:
-    # Prepare for events with a limited livetime. This time starts
-    # when the event enters the open state or acked state
+    """
+    Prepare for events with a limited lifetime. This time starts
+    when the event enters the open state or acked state.
+    """
     if "livetime" in rule:
         livetime, phases = rule["livetime"]
         event["live_until"] = time.time() + livetime
@@ -69,28 +108,31 @@ def event_has_opened(
     )
 
 
-# Execute a list of actions on an event that has just been
-# opened or cancelled.
 def do_event_actions(
     history: History,
     settings: Settings,
     config: Config,
     logger: Logger,
     host_config: HostConfig,
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     actions: Iterable[str],
     event: Event,
     is_cancelling: bool,
 ) -> None:
+    """Execute a list of actions on an event that has just been opened or cancelled."""
     table = config["action"]
     for aname in actions:
         if aname == "@NOTIFY":
             do_notify(host_config, logger, event, is_cancelling=is_cancelling)
         elif action := table.get(aname):
-            logger.info(f'executing action "{action["title"]}" on event {event["id"]}')
+            logger.info('executing action "%s" on event %s', action["title"], event["id"])
             do_event_action(history, settings, config, logger, event_columns, action, event, "")
         else:
-            logger.info('undefined action "{aname}, must be one of {", ".join(table.keys()}"')
+            logger.info(
+                'undefined action "%s", must be one of %s',
+                aname,
+                ", ".join(table.keys()),
+            )
 
 
 # Rule actions are currently done synchronously. Actions should
@@ -102,7 +144,7 @@ def do_event_action(
     settings: Settings,
     config: Config,
     logger: Logger,
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     action: Action,
     event: Event,
     user: str,
@@ -118,7 +160,8 @@ def do_event_action(
         elif act[0] == "script":
             _do_script_action(history, logger, event_columns, act[1], action_id, event, user)
         else:
-            logger.error("Cannot execute action %s: invalid action type %s", action_id, act[0])
+            # TODO: Really parse the config, then this can't happen
+            logger.error("Cannot execute action %s: invalid action type %s", action_id, act[0])  # type: ignore[unreachable]
     except Exception:
         if settings.options.debug:
             raise
@@ -129,7 +172,7 @@ def _do_email_action(
     history: History,
     config: Config,
     logger: Logger,
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     action_config: EMailActionConfig,
     event: Event,
     user: str,
@@ -144,7 +187,7 @@ def _do_email_action(
 def _do_script_action(
     history: History,
     logger: Logger,
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     action_config: ScriptActionConfig,
     action_id: str,
     event: Event,
@@ -159,7 +202,7 @@ def _do_script_action(
     history.add(event, "SCRIPT", user, action_id)
 
 
-def _prepare_text(text: str, event_columns: Iterable[tuple[str, Any]], event: Event) -> str:
+def _prepare_text(text: str, event_columns: Iterable[tuple[str, object]], event: Event) -> str:
     return _escape_null_bytes(_substitute_event_tags(text, event_columns, event))
 
 
@@ -168,10 +211,10 @@ def _escape_null_bytes(s: str) -> str:
 
 
 def _substitute_event_tags(
-    text: str, event_columns: Iterable[tuple[str, Any]], event: Event
+    text: str, event_columns: Iterable[tuple[str, object]], event: Event
 ) -> str:
     for key, value in _get_event_tags(event_columns, event).items():
-        text = text.replace("$%s$" % key.upper(), value)
+        text = text.replace(f"${key.upper()}$", value)
     return text
 
 
@@ -186,7 +229,7 @@ def _send_email(config: Config, to: str, subject: str, body: str, logger: Logger
     ]
 
     if config["debug_rules"]:
-        logger.info("  Executing: %s" % " ".join(x.decode("utf-8") for x in command_utf8))
+        logger.info("  Executing: %s", " ".join(x.decode("utf-8") for x in command_utf8))
 
     # FIXME: This may lock on too large buffer. We should move all "mail sending" code
     # to a general place and fix this for all our components (notification plugins,
@@ -194,25 +237,24 @@ def _send_email(config: Config, to: str, subject: str, body: str, logger: Logger
     completed_process = subprocess.run(
         command_utf8,
         close_fds=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         encoding="utf-8",
         input=body,
         check=False,
     )
 
-    logger.info("  Exitcode: %d" % completed_process.returncode)
+    logger.info("  Exitcode: %d", completed_process.returncode)
     if completed_process.returncode:
         logger.info("  Error: Failed to send the mail.")
         for line in (completed_process.stdout + completed_process.stderr).splitlines():
-            logger.info("  Output: %s" % line.rstrip())
+            logger.info("  Output: %s", line.rstrip())
         return False
 
     return True
 
 
 def _execute_script(
-    event_columns: Iterable[tuple[str, Any]], body: str, event: Event, logger: Logger
+    event_columns: Iterable[tuple[str, object]], body: str, event: Event, logger: Logger
 ) -> None:
     script_env = os.environ.copy()
     for key, value in _get_event_tags(event_columns, event).items():
@@ -230,34 +272,29 @@ def _execute_script(
         input=body,
         check=False,
     )
-    logger.info("  Exit code: %d" % completed_process.returncode)
+    logger.info("  Exit code: %d", completed_process.returncode)
     if completed_process.stdout:
-        logger.info("  Output: '%s'" % completed_process.stdout)
+        logger.info("  Output: '%s'", completed_process.stdout)
 
 
 def _get_event_tags(
-    event_columns: Iterable[tuple[str, Any]],
+    event_columns: Iterable[tuple[str, object]],
     event: Event,
 ) -> dict[str, str]:
-    substs: list[tuple[str, Any]] = [
-        ("match_group_%d" % (nr + 1), g) for (nr, g) in enumerate(event.get("match_groups", ()))
+    substs: list[tuple[str, object]] = [
+        (f"match_group_{nr + 1}", g) for nr, g in enumerate(event.get("match_groups", ()))
     ]
 
     for key, defaultvalue in event_columns:
         varname = key[6:]
         substs.append((varname, event.get(varname, defaultvalue)))
 
-    def to_string(v: Any) -> str:
-        if isinstance(v, str):
-            return v
-        return "%s" % v
+    def to_string(v: object) -> str:
+        return v if isinstance(v, str) else str(v)
 
     tags: dict[str, str] = {}
     for key, value in substs:
-        if isinstance(value, tuple):
-            value = " ".join(map(to_string, value))
-        else:
-            value = to_string(value)
+        value = " ".join(map(to_string, value)) if isinstance(value, tuple) else to_string(value)
 
         tags[key] = value
 
@@ -284,18 +321,21 @@ def _get_event_tags(
 # - Das muss sich in den Hilfetexten wiederspiegeln
 
 
-# This function creates a Checkmk Notification for a locally running Checkmk.
-# We simulate a *service* notification.
 def do_notify(
     host_config: HostConfig,
     logger: Logger,
     event: Event,
-    username: Optional[str] = None,
+    username: str | None = None,
     is_cancelling: bool = False,
 ) -> None:
+    """
+    Creates a Checkmk Notification for a locally running Checkmk.
+
+    We simulate a *service* notification.
+    """
     if not _core_has_notifications_enabled(logger):
         logger.info(
-            "Notifications are currently disabled. Skipped notification for event %d" % event["id"]
+            "Notifications are currently disabled. Skipped notification for event %d", event["id"]
         )
         return
 
@@ -308,8 +348,9 @@ def do_notify(
 
     if context["HOSTDOWNTIME"] != "0":
         logger.info(
-            "Host %s is currently in scheduled downtime. "
-            "Skipping notification of event %s." % (context["HOSTNAME"], event["id"])
+            "Host %s is currently in scheduled downtime. Skipping notification of event %s.",
+            context["HOSTNAME"],
+            event["id"],
         )
         return
 
@@ -332,15 +373,15 @@ def do_notify(
         check=False,
     )
     if completed_process.returncode:
-        logger.error("Error notifying via Check_MK: %s" % completed_process.stdout.strip())
+        logger.error("Error notifying via Check_MK: %s", completed_process.stdout.strip())
     else:
-        logger.info("Successfully forwarded notification for event %d to Check_MK" % event["id"])
+        logger.info("Successfully forwarded notification for event %d to Check_MK", event["id"])
 
 
 def _create_notification_context(
     host_config: HostConfig,
     event: Event,
-    username: Optional[str],
+    username: str | None,
     is_cancelling: bool,
     logger: Logger,
 ) -> ECEventContext:
@@ -351,7 +392,7 @@ def _create_notification_context(
 
 
 def _base_notification_context(
-    event: Event, username: Optional[str], is_cancelling: bool
+    event: Event, username: str | None, is_cancelling: bool
 ) -> ECEventContext:
     rule_id = event["rule_id"]
     return ECEventContext(
@@ -380,7 +421,7 @@ def _base_notification_context(
         SERVICEOUTPUT=event["text"],
         SERVICEPERFDATA="",
         SERVICEPROBLEMID="ec-id-" + str(event["id"]),
-        SERVICESTATE=cmk.utils.defines.service_state_name(event["state"]),
+        SERVICESTATE=service_state_name(event["state"]),
         SERVICESTATEID=str(event["state"]),
         SERVICE_EC_CONTACT=event.get("owner", ""),
         SERVICE_SL=str(event["sl"]),
@@ -401,15 +442,18 @@ def _base_notification_context(
     )
 
 
-# "CONTACTS" is allowed to be missing in the context, cmk --notify will
-# add the fallback contacts then.
 def _add_infos_from_monitoring_host(
     host_config: HostConfig, context: ECEventContext, event: Event
 ) -> None:
+    """
+    Note: "CONTACTS" is allowed to be missing in the context, cmk --notify will
+    add the fallback contacts then.
+    """
+
     def _add_artificial_context_info() -> None:
         context.update(
             {
-                "HOSTNAME": event["host"],
+                "HOSTNAME": event_context.HostName(event["host"]),
                 "HOSTALIAS": event["host"],
                 "HOSTADDRESS": event["ipaddress"],
                 "HOSTTAGS": "",
@@ -433,27 +477,29 @@ def _add_infos_from_monitoring_host(
 
     context.update(
         {
-            "HOSTNAME": config.name,
+            "HOSTNAME": event_context.HostName(config.name),
             "HOSTALIAS": config.alias,
             "HOSTADDRESS": config.address,
             "HOSTTAGS": config.custom_variables.get("TAGS", ""),
             "CONTACTS": ",".join(config.contacts),
             "SERVICECONTACTGROUPNAMES": ",".join(config.contact_groups),
+            "HOSTGROUPNAMES": ",".join(config.host_groups),
         }
     )
 
     # Add custom variables to the notification context
     for key, val in config.custom_variables.items():
-        # TypedDict with dynamic keys... The typing we have is worth the supression
-        context["HOST_%s" % key] = val  # type: ignore[literal-required]
+        # TypedDict with dynamic keys... The typing we have is worth the suppression
+        context[f"HOST_{key}"] = val  # type: ignore[literal-required]
 
     context["HOSTDOWNTIME"] = "1" if event["host_in_downtime"] else "0"
 
 
 def _add_contacts_from_rule(context: ECEventContext, event: Event, logger: Logger) -> None:
-    # Add contact information from the rule, but only if the
-    # host is unknown or if contact groups in rule have precedence
-
+    """
+    Add contact information from the rule, but only if the
+    host is unknown or if contact groups in rule have precedence.
+    """
     contact_groups = event.get("contact_groups")
     if (
         contact_groups is not None
@@ -468,11 +514,12 @@ def _add_contacts_from_rule(context: ECEventContext, event: Event, logger: Logge
 
 
 def _add_contact_information_to_context(
-    context: ECEventContext, contact_groups: Iterable[ContactgroupName], logger: Logger
+    context: ECEventContext, contact_groups: Iterable[_ContactgroupName], logger: Logger
 ) -> None:
     try:
         contact_names = query_contactgroups_members(contact_groups)
     except Exception:
+        logger.exception("Cannot get contact group members, assuming none:")
         contact_names = set()
     context["CONTACTS"] = ",".join(contact_names)
     context["SERVICECONTACTGROUPNAMES"] = ",".join(contact_groups)
@@ -488,8 +535,8 @@ def _add_contact_information_to_context(
 def _core_has_notifications_enabled(logger: Logger) -> bool:
     try:
         return query_status_enable_notifications()
-    except Exception as e:
-        logger.info(
-            "Cannot determine whether notifcations are enabled in core: %s. Assuming YES.", e
+    except Exception:
+        logger.exception(
+            "Cannot determine whether notifications are enabled in core, assuming YES."
         )
         return True

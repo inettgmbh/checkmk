@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import subprocess
 from pathlib import Path
-from typing import Tuple
 
-import pytest  # type: ignore[import]
+import pytest
 
 
-def run_script(work_python: Path, *, script: Path) -> Tuple[int, str, str]:
+def run_script(work_python: Path, *, script: Path) -> tuple[int, str, str]:
     """Returns exit code, stdout and stderr"""
 
     exe = work_python / ".venv" / "Scripts" / "python.exe"
@@ -23,8 +21,7 @@ def run_script(work_python: Path, *, script: Path) -> Tuple[int, str, str]:
 
     completed_process = subprocess.run(
         [exe, script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     return (
@@ -38,7 +35,7 @@ def run_script(work_python: Path, *, script: Path) -> Tuple[int, str, str]:
     "script,expected_code,expected_pipe,expected_err",
     [
         (
-            Path("..\\..\\..\\..\\..\\enterprise\\agents\\plugins\\cmk_update_agent.py"),
+            Path("..\\..\\..\\..\\..\\non-free\\cmk-update-agent\\cmk_update_agent.py"),
             1,
             "",
             "Missing config file at .\\cmk-update-agent.cfg. Configuration",
@@ -57,9 +54,9 @@ def run_script(work_python: Path, *, script: Path) -> Tuple[int, str, str]:
         ),
     ],
 )
-def test_other_scripts(  # type:ignore[no-untyped-def]
+def test_other_scripts(
     python_to_test: Path, script: Path, expected_code: int, expected_pipe: str, expected_err: str
-):
+) -> None:
     pythons = python_to_test
     for python_name in os.listdir(pythons):
         # Call the script using deployed python as client does

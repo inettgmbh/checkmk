@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name
 
-from typing import List, Optional, Tuple
+from argparse import Namespace as Args
+from collections.abc import Callable
 
 import pytest
 
@@ -13,35 +13,46 @@ from cmk.special_agents.agent_aws import (
     AWSConfig,
     CloudwatchAlarms,
     CloudwatchAlarmsLimits,
+    NamingConvention,
     ResultDistributor,
 )
 
 from .agent_aws_fake_clients import FakeCloudwatchClient
 
+CreateCloudwatchAlarmSections = Callable[
+    [object | None], tuple[CloudwatchAlarmsLimits, CloudwatchAlarms]
+]
+
 
 @pytest.fixture()
-def get_cloudwatch_alarms_sections():
-    def _create_cloudwatch_alarms_sections(alarm_names):
+def get_cloudwatch_alarms_sections() -> CreateCloudwatchAlarmSections:
+    def _create_cloudwatch_alarms_sections(
+        alarm_names: object | None,
+    ) -> tuple[CloudwatchAlarmsLimits, CloudwatchAlarms]:
         region = "region"
-        config = AWSConfig("hostname", [], (None, None))
+        config = AWSConfig("hostname", Args(), ([], []), NamingConvention.ip_region_instance)
         config.add_single_service_config("cloudwatch_alarms", alarm_names)
 
         fake_cloudwatch_client = FakeCloudwatchClient()
 
-        cloudwatch_alarms_limits_distributor = ResultDistributor()
+        distributor = ResultDistributor()
 
+        # TODO: FakeCloudwatchClient shoud actually subclass CloudWatchClient, etc.
         cloudwatch_alarms_limits = CloudwatchAlarmsLimits(
-            fake_cloudwatch_client, region, config, cloudwatch_alarms_limits_distributor
+            fake_cloudwatch_client,  # type: ignore[arg-type]
+            region,
+            config,
+            distributor,
         )
-        cloudwatch_alarms = CloudwatchAlarms(fake_cloudwatch_client, region, config)
+        cloudwatch_alarms = CloudwatchAlarms(fake_cloudwatch_client, region, config)  # type: ignore[arg-type]
 
-        cloudwatch_alarms_limits_distributor.add(cloudwatch_alarms)
+        distributor.add(cloudwatch_alarms_limits.name, cloudwatch_alarms)
         return cloudwatch_alarms_limits, cloudwatch_alarms
 
     return _create_cloudwatch_alarms_sections
 
 
-cloudwatch_params: List[Tuple[Optional[List[str]], int]] = [
+cloudwatch_params: list[tuple[list[str] | None, int]] = [
     (None, 2),
     ([], 2),
     (["AlarmName-0"], 1),
@@ -76,11 +87,13 @@ def test_agent_aws_cloudwatch_alarms_limits(
 
 
 @pytest.mark.parametrize("alarm_names,amount_alarms", cloudwatch_params)
-def test_agent_aws_cloudwatch_alarms(  # type:ignore[no-untyped-def]
-    get_cloudwatch_alarms_sections, alarm_names, amount_alarms
+def test_agent_aws_cloudwatch_alarms(
+    get_cloudwatch_alarms_sections: CreateCloudwatchAlarmSections,
+    alarm_names: list[str] | None,
+    amount_alarms: int,
 ) -> None:
     cloudwatch_alarms_limits, cloudwatch_alarms = get_cloudwatch_alarms_sections(alarm_names)
-    _cloudwatch_alarms_limits_results = cloudwatch_alarms_limits.run().results  # noqa: F841
+    _cloudwatch_alarms_limits_results = cloudwatch_alarms_limits.run().results
     cloudwatch_alarms_results = cloudwatch_alarms.run().results
 
     assert cloudwatch_alarms.cache_interval == 300

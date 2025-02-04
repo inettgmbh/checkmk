@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Mode for searching hosts"""
 
-from typing import Collection, Optional, Type
+from collections.abc import Collection
 
-import cmk.gui.forms as forms
+from cmk.gui import forms
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
 from cmk.gui.i18n import _
 from cmk.gui.page_menu import make_simple_form_page_menu, PageMenu
-from cmk.gui.plugins.wato.utils import configure_attributes, mode_registry
-from cmk.gui.plugins.wato.utils.base_modes import redirect, WatoMode
 from cmk.gui.type_defs import ActionResult, HTTPVariables, PermissionName
+from cmk.gui.utils.csrf_token import check_csrf_token
 from cmk.gui.utils.urls import makeuri_contextless
 from cmk.gui.valuespec import TextInput
 from cmk.gui.wato.pages.folders import ModeFolder
-from cmk.gui.watolib.hosts_and_folders import Folder
+from cmk.gui.watolib.hosts_and_folders import folder_from_request
+from cmk.gui.watolib.mode import ModeRegistry, redirect, WatoMode
+
+from ._host_attributes import configure_attributes
 
 
-@mode_registry.register
+def register(mode_registry: ModeRegistry) -> None:
+    mode_registry.register(ModeSearch)
+
+
 class ModeSearch(WatoMode):
     @classmethod
     def name(cls) -> str:
         return "search"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["hosts"]
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeFolder
 
     def __init__(self) -> None:
         super().__init__()
-        self._folder = Folder.current()
+        self._folder = folder_from_request(request.var("folder"), request.get_ascii_input("host"))
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
         return make_simple_form_page_menu(
@@ -54,6 +59,8 @@ class ModeSearch(WatoMode):
         return _("Search for hosts below %s") % self._folder.title()
 
     def action(self) -> ActionResult:
+        check_csrf_token()
+
         return redirect(
             makeuri_contextless(
                 request,
@@ -92,34 +99,40 @@ class ModeSearch(WatoMode):
         return list(search_vars.items())
 
     def page(self) -> None:
-        # Show search form
-        html.begin_form("edit_host", method="POST")
-        html.prevent_password_auto_completion()
-
-        basic_attributes = [
-            (
-                "host_search_host",
-                TextInput(
-                    title=_(
-                        "Hostname",
-                    )
-                ),
-                "",
-            ),
-        ]
-        html.set_focus("host_search_host")
-
-        # Attributes
-        configure_attributes(
-            new=False,
-            hosts={},
-            for_what="host_search",
-            parent=None,
-            varprefix="host_search_",
-            basic_attributes=basic_attributes,
+        html.help(
+            _(
+                "For the host name field, a partial word search (infix search) is used "
+                "— the entered text is searched, at any position, in the host name. "
+                "Furthermore, you can limit the search using other host attributes. Please note "
+                "that you can search for the attributes configured in the hosts and folders and "
+                "not the final settings applied to the monitoring once it's activated. For "
+                "in the labels field you are only searching for the explicitly configured labels "
+                "and not the effective labels of a host."
+            )
         )
+        # Show search form
+        with html.form_context("edit_host", method="POST"):
+            html.prevent_password_auto_completion()
 
-        forms.end()
-        html.hidden_field("host_search", "1")
-        html.hidden_fields()
-        html.end_form()
+            basic_attributes = [
+                (
+                    "host_search_host",
+                    TextInput(title=_("Host name")),
+                    "",
+                ),
+            ]
+            html.set_focus("host_search_host")
+
+            # Attributes
+            configure_attributes(
+                new=False,
+                hosts={},
+                for_what="host_search",
+                parent=None,
+                varprefix="host_search_",
+                basic_attributes=basic_attributes,
+            )
+
+            forms.end()
+            html.hidden_field("host_search", "1")
+            html.hidden_fields()

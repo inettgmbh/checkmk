@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-# type: ignore[attr-defined]  # TODO: see which are needed in this file
+
+from collections.abc import Mapping
+
+from cmk.agent_based.v2 import DiscoveryResult, Service
 
 from .elphase import check_elphase
 from .humidity import check_humidity
 from .temperature import check_temperature
-
-
-def scan_didactum(oid):
-    return "didactum" in oid(".1.3.6.1.2.1.1.1.0").lower()
 
 
 # elements (not excatly sensors!) can be:
@@ -30,7 +29,7 @@ def parse_didactum_sensors(info):
         "off": 3,
     }
 
-    parsed = {}
+    parsed: dict = {}
     for line in info:
         ty, name, status = line[:3]
         if status in map_states:
@@ -52,7 +51,7 @@ def parse_didactum_sensors(info):
         if len(line) >= 4:
             value_str = line[3]
             if value_str.isdigit():
-                value = int(value_str)
+                value: float = int(value_str)
             else:
                 try:
                     value = float(value_str)
@@ -72,12 +71,14 @@ def parse_didactum_sensors(info):
     return parsed
 
 
-def inventory_didactum_sensors(parsed, what):
-    return [
-        (sensorname, {})
+def discover_didactum_sensors(
+    parsed: Mapping[str, Mapping[str, Mapping[str, str]]], what: str
+) -> DiscoveryResult:
+    yield from (
+        Service(item=sensorname)
         for sensorname, attrs in parsed.get(what, {}).items()
         if attrs["state_readable"] not in ["off", "not connected"]
-    ]
+    )
 
 
 def check_didactum_sensors_temp(item, params, parsed):

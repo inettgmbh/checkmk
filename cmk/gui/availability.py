@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,39 +9,38 @@ import functools
 import itertools
 import os
 import time
-from typing import Any, Callable, Dict, Iterator, List, Literal, NamedTuple
-from typing import Optional as _Optional
-from typing import Set
-from typing import Tuple as _Tuple
-from typing import Union
+from collections.abc import Callable, Generator, Iterator, Sequence
+from typing import Any, Literal, NamedTuple
 
-from livestatus import LivestatusOutputFormat, OnlySites, SiteId
-
-import cmk.utils.defines as defines
-import cmk.utils.paths
-import cmk.utils.store as store
-import cmk.utils.version as cmk_version
-from cmk.utils.bi.bi_data_fetcher import (
-    BIHostSpec,
-    BIHostStatusInfoRow,
-    BIServiceWithFullState,
-    BIStatusInfo,
+from livestatus import (
+    LivestatusRow,
+    lq_logic,
+    lqencode,
+    MKLivestatusPayloadTooLargeError,
+    OnlySites,
+    Query,
+    QuerySpecification,
+    SiteId,
 )
-from cmk.utils.bi.bi_lib import NodeComputeResult, NodeResultBundle
-from cmk.utils.bi.bi_trees import BICompiledAggregation, BICompiledRule
-from cmk.utils.cpu_tracking import CPUTracker
-from cmk.utils.prediction import lq_logic
-from cmk.utils.type_defs import HostName, ServiceName
 
-import cmk.gui.sites as sites
+import cmk.ccc.version as cmk_version
+from cmk.ccc import store
+
+import cmk.utils.paths
+from cmk.utils import dateutils
+from cmk.utils.cpu_tracking import CPUTracker
+from cmk.utils.hostaddress import HostName
+from cmk.utils.servicename import ServiceName
+
+from cmk.gui import sites
 from cmk.gui.bi import BIManager
+from cmk.gui.data_source import query_livestatus
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.http import request
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
 from cmk.gui.logged_in import user
 from cmk.gui.num_split import key_num_split
-from cmk.gui.plugins.views.utils import cmp_service_name_equiv
 from cmk.gui.type_defs import (
     FilterHeader,
     HTTPVariables,
@@ -50,6 +49,7 @@ from cmk.gui.type_defs import (
     ViewProcessTracking,
     VisualContext,
 )
+from cmk.gui.utils import cmp_service_name_equiv
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.urls import makeuri, makeuri_contextless, urlencode_vars
 from cmk.gui.utils.user_errors import user_errors
@@ -64,18 +64,29 @@ from cmk.gui.valuespec import (
     Percentage,
     Timerange,
     Tuple,
+    ValueSpec,
 )
 from cmk.gui.view_utils import CSSClass
 
+from cmk.bi.lib import (
+    BIHostSpec,
+    BIHostStatusInfoRow,
+    BIServiceWithFullState,
+    BIStatusInfo,
+    NodeComputeResult,
+    NodeResultBundle,
+)
+from cmk.bi.trees import BICompiledAggregation, BICompiledRule, CompiledAggrTree
+
 AVMode = str  # TODO: Improve this type
-AVObjectType = Literal["host", "service", "bi"]  # TODO: Improve this type
-AVOptions = Dict[str, Any]  # TODO: Improve this type
-AVOptionValueSpecs = List  # TODO: Be more specific here
-AVBIObjectSpec = _Tuple[None, None, str]
-AVHostOrServiceObjectSpec = _Tuple[SiteId, HostName, ServiceName]
-AVObjectSpec = Union[None, AVBIObjectSpec, AVHostOrServiceObjectSpec]
-AVOutageStatisticsAggregations = List[Literal["min", "max", "avg", "cnt"]]
-AVOutageStatisticsStates = List[
+AVObjectType = Literal["host", "service", "bi"]
+AVOptions = dict[str, Any]  # TODO: Improve this type
+AVOptionValueSpecs = list[tuple[str, Literal["double", "single"], bool, ValueSpec]]
+AVBIObjectSpec = tuple[None, None, str]
+AVHostOrServiceObjectSpec = tuple[SiteId, HostName, ServiceName]
+AVObjectSpec = None | AVBIObjectSpec | AVHostOrServiceObjectSpec
+AVOutageStatisticsAggregations = list[Literal["min", "max", "avg", "cnt"]]
+AVOutageStatisticsStates = list[
     Literal[
         "ok",
         "warn",
@@ -87,24 +98,24 @@ AVOutageStatisticsStates = List[
         "outof_notification_period",
     ]
 ]
-AVOutageStatistics = _Tuple[AVOutageStatisticsAggregations, AVOutageStatisticsStates]
-AVSpan = Dict[str, Any]  # TODO: Improve this type
-SiteHost = _Tuple[SiteId, HostName]
-AVRawServices = Dict[ServiceName, List[AVSpan]]
-AVRawData = Dict[SiteHost, AVRawServices]
+AVOutageStatistics = tuple[AVOutageStatisticsAggregations, AVOutageStatisticsStates]
+AVSpan = dict[str, Any]  # TODO: Improve this type
+SiteHost = tuple[SiteId, HostName]
+AVRawServices = dict[ServiceName, list[AVSpan]]
+AVRawData = dict[SiteHost, AVRawServices]
 AVEntry = Any
-AVData = List[AVEntry]
-AVTimelineSpan = _Tuple[_Optional[int], str, float, CSSClass]
-AVObjectCells = List[_Tuple[str, str]]
-AVRowCells = List[_Tuple[Union[HTML, str], CSSClass]]
-AVGroups = List[_Tuple[_Optional[str], AVData]]
+AVData = list[AVEntry]
+AVTimelineSpan = tuple[int | None, str, float, CSSClass]
+AVObjectCells = list[tuple[str, str]]
+AVRowCells = list[tuple[HTML | str, CSSClass]]
+AVGroups = list[tuple[str | None, AVData]]
 HostOrServiceGroupName = str
-AVGroupKey = Union[SiteHost, HostOrServiceGroupName, None]
-AVGroupIds = Union[None, List[SiteHost], Set[HostOrServiceGroupName]]
+AVGroupKey = SiteHost | HostOrServiceGroupName | None
+AVGroupIds = list[SiteHost] | set[HostOrServiceGroupName] | None
 AVTimeStamp = float
-AVTimeRange = _Tuple[AVTimeStamp, AVTimeStamp]
-AVTimeFormats = List[_Tuple[str, Callable[[AVTimeStamp, int], str]]]
-AVRangeSpec = _Tuple[AVTimeRange, str]
+AVTimeRange = tuple[AVTimeStamp, AVTimeStamp]
+AVTimeFormats = list[tuple[str, Callable[[AVTimeStamp, int], str]]]
+AVRangeSpec = tuple[AVTimeRange, str]
 AVTimeformatSpecLegacy = Literal[
     "percentage_0",
     "percentage_1",
@@ -115,14 +126,14 @@ AVTimeformatSpecLegacy = Literal[
     "hours",
     "hhmmss",
 ]
-AVTimeformatSpec = Union[
-    AVTimeformatSpecLegacy,
-    _Tuple[
+AVTimeformatSpec = (
+    AVTimeformatSpecLegacy
+    | tuple[
         Literal["both", "perc", "time"],
         Literal["percentage_0", "percentage_1", "percentage_2", "percentage_3"],
         Literal["seconds", "minutes", "hours", "hhmmss"],
-    ],
-]
+    ]
+)
 AVTimelineLabelling = Literal[
     "omit_headers",
     "omit_host",
@@ -134,13 +145,14 @@ AVTimelineLabelling = Literal[
     "display_timeline_legend",
     "omit_av_levels",
 ]
-AVIconSpec = _Tuple[str, str, str]
+AVIconSpec = tuple[str, str, str]
 
 AVTimelineStateName = str
-AVTimelineRows = List[_Tuple[AVSpan, AVTimelineStateName]]
-AVTimelineStates = Dict[AVTimelineStateName, int]
-AVTimelineStatistics = Dict[AVTimelineStateName, _Tuple[int, int, int]]
-AVTimelineStyle = str
+AVTimelineRow = tuple[AVSpan, AVTimelineStateName]
+AVTimelineRows = list[AVTimelineRow]
+AVTimelineStates = dict[AVTimelineStateName, int]
+AVTimelineStatistics = dict[AVTimelineStateName, tuple[int, int, int]]
+AVTimelineStyle = Literal["standalone", "inline"]
 
 
 # Example for annotations:
@@ -158,22 +170,22 @@ AVTimelineStyle = str
 #         # ... further entries
 #      ]
 # }
-AVAnnotationKey = _Tuple[SiteId, HostName, _Optional[ServiceName]]
-AVAnnotationEntry = Dict[str, Any]
-AVAnnotations = Dict[AVAnnotationKey, List[AVAnnotationEntry]]
+AVAnnotationKey = tuple[SiteId, HostName, ServiceName | None]
+AVAnnotationEntry = dict[str, Any]
+AVAnnotations = dict[AVAnnotationKey, list[AVAnnotationEntry]]
 
-AVLayoutTimeline = Dict[str, Any]  # TODO: Improve this type
-AVLayoutTimelineRow = Dict[str, Any]  # TODO: Improve this type
-AVLayoutTable = Dict[str, Any]  # TODO: Improve this type
-AVLayoutTableRow = Dict[str, Any]  # TODO: Improve this type
+AVLayoutTimeline = dict[str, Any]  # TODO: Improve this type
+AVLayoutTimelineRow = dict[str, Any]  # TODO: Improve this type
+AVLayoutTable = dict[str, Any]  # TODO: Improve this type
+AVLayoutTableRow = dict[str, Any]  # TODO: Improve this type
 
-AVBIPhaseData = Dict[_Tuple[HostName, ServiceName], Row]
-AVBIPhases = List[_Tuple[int, AVBIPhaseData]]
-AVBITimelineState = _Tuple[int, str, bool, bool]  # state, output, in_downtime, in_service_period
-AVBITimelineStates = Dict[_Tuple[SiteId, HostName, ServiceName], AVBITimelineState]
-AVLevels = _Tuple[float, float]
+AVBIPhaseData = dict[tuple[HostName, ServiceName], Row]
+AVBIPhases = list[tuple[int, AVBIPhaseData]]
+AVBITimelineState = tuple[int, str, bool, bool]  # state, output, in_downtime, in_service_period
+AVBITimelineStates = dict[tuple[SiteId, HostName, ServiceName], AVBITimelineState]
+AVLevels = tuple[float, float]
 
-ColumnSpec = _Tuple[str, str, str, _Optional[str]]
+ColumnSpec = tuple[str, str, str, str | None]
 
 #   .--Declarations--------------------------------------------------------.
 #   |       ____            _                 _   _                        |
@@ -192,10 +204,10 @@ class AvailabilityColumns:
         self.service = self._service_availability_columns()
         self.bi = self._bi_availability_columns()
 
-    def __getitem__(self, key) -> List[ColumnSpec]:  # type:ignore[no-untyped-def]
+    def __getitem__(self, key: str) -> list[ColumnSpec]:
         return getattr(self, key)
 
-    def _host_availability_columns(self) -> List[ColumnSpec]:
+    def _host_availability_columns(self) -> list[ColumnSpec]:
         return [
             ("up", "state0", _("UP"), None),
             ("down", "state2", _("DOWN"), None),
@@ -212,7 +224,7 @@ class AvailabilityColumns:
             ),
         ]
 
-    def _service_availability_columns(self) -> List[ColumnSpec]:
+    def _service_availability_columns(self) -> list[ColumnSpec]:
         return [
             ("ok", "state0", _("OK"), None),
             ("warn", "state1", _("WARN"), None),
@@ -236,7 +248,7 @@ class AvailabilityColumns:
             ),
         ]
 
-    def _bi_availability_columns(self) -> List[ColumnSpec]:
+    def _bi_availability_columns(self) -> list[ColumnSpec]:
         return [
             ("ok", "state0", _("OK"), None),
             ("warn", "state1", _("WARN"), None),
@@ -282,17 +294,17 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
     if what == "bi":
         grouping_choices = [
             (None, _("Do not group")),
-            ("host", _("By Aggregation Group")),
+            ("host", _("By aggregation group")),
         ]
     else:
         grouping_choices = [
             (None, _("Do not group")),
-            ("host", _("By Host")),
-            ("host_groups", _("By Host group")),
-            ("service_groups", _("By Service group")),
+            ("host", _("By host")),
+            ("host_groups", _("By host group")),
+            ("service_groups", _("By service group")),
         ]
 
-    if not cmk_version.is_raw_edition():
+    if cmk_version.edition(cmk.utils.paths.omd_root) is not cmk_version.Edition.CRE:
         ruleset_search_url = makeuri_contextless(
             request,
             [
@@ -321,14 +333,14 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
             "double",
             True,
             ListChoice(
-                title=_("Labelling Options"),
+                title=_("Labelling options"),
                 choices=[
                     ("omit_headers", _("Do not display column headers")),
                     ("omit_host", _("Do not display the host name")),
                     ("show_alias", _("Display the host alias")),
                     ("use_display_name", _("Use alternative display name for services")),
                     ("omit_buttons", _("Do not display icons for history and timeline")),
-                    ("omit_timeline_plugin_output", _("Do not display plugin output in timeline")),
+                    ("omit_timeline_plugin_output", _("Do not display plug-in output in timeline")),
                 ]
                 + long_output_labelling
                 + [
@@ -348,18 +360,17 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
                         Percentage(
                             title=_("Warning below"),
                             default_value=99,
-                            display_format="%.3f",
                             size=7,
                         ),
                         Percentage(
                             title=_("Critical below"),
                             default_value=95,
-                            display_format="%.3f",
                             size=7,
                         ),
                     ]
                 ),
-                title=_("Visual levels for the availability (OK percentage)"),
+                title=_("Visual levels for the availability"),
+                label=_("Visual levels for the availability (OK percentage)"),
             ),
         ),
         # Show colummns for min, max, avg duration and count
@@ -389,7 +400,7 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
                             ("crit", _("Crit/Down")),
                             ("unknown", _("Unknown/Unreach")),
                             ("flapping", _("Flapping")),
-                            ("host_down", _("Host Down")),
+                            ("host_down", _("Host down")),
                             ("in_downtime", _("Downtime")),
                             ("outof_notification_period", _("OO/Notif")),
                         ],
@@ -476,7 +487,11 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
                 title=_("Summary line"),
                 choices=[
                     (None, _("Do not show a summary line")),
-                    ("sum", _("Display total sum (for % the average)")),
+                    (
+                        "sum",
+                        # xgettext: no-python-format
+                        _("Display total sum (for % the average)"),
+                    ),
                     ("average", _("Display average")),
                 ],
                 default_value="sum",
@@ -497,7 +512,7 @@ def get_av_display_options(what: AVObjectType) -> AVOptionValueSpecs:
 
 def vs_rangespec() -> Timerange:
     return Timerange(
-        title=_("Time Range"),
+        title=_("Time range"),
         default_value="d0",
     )
 
@@ -510,7 +525,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "double",
             True,
             Dictionary(
-                title=_("Scheduled Downtimes"),
+                title=_("Scheduled downtimes"),
                 columns=2,
                 elements=[
                     (
@@ -541,7 +556,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "double",
             True,
             Dictionary(
-                title=_("Status Classification"),
+                title=_("Status classification"),
                 columns=2,
                 elements=[
                     (
@@ -569,13 +584,13 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "double",
             True,
             Dictionary(
-                title=_("Service Status Grouping"),
+                title=_("Service status grouping"),
                 columns=2,
                 elements=[
                     (
                         "warn",
                         DropdownChoice(
-                            title=_("Treat Warning as"),
+                            title=_("Treat warning as"),
                             choices=[
                                 ("ok", _("OK")),
                                 ("warn", _("WARN")),
@@ -588,7 +603,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
                     (
                         "unknown",
                         DropdownChoice(
-                            title=_("Treat Unknown/Unreachable as"),
+                            title=_("Treat unknown/unreachable as"),
                             choices=[
                                 ("ok", _("OK")),
                                 ("warn", _("WARN")),
@@ -601,7 +616,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
                     (
                         "host_down",
                         DropdownChoice(
-                            title=_("Treat Host Down as"),
+                            title=_("Treat host down as"),
                             choices=[
                                 ("ok", _("OK")),
                                 ("warn", _("WARN")),
@@ -653,14 +668,14 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             True,
             Dictionary(
-                title=_("Host Status Grouping"),
+                title=_("Host status grouping"),
                 columns=2,
                 elements=[
                     (
                         "unreach",
                         DropdownChoice(
                             # TOOD: aligned
-                            title=_("Treat Unreachable as"),
+                            title=_("Treat unreachable as"),
                             choices=[
                                 ("up", _("UP")),
                                 ("down", _("DOWN")),
@@ -679,7 +694,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             True,
             DropdownChoice(
-                title=_("Service Time"),
+                title=_("Service time"),
                 choices=[
                     ("honor", _("Base report only on service times")),
                     ("ignore", _("Include both service and non-service times")),
@@ -694,7 +709,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             True,
             DropdownChoice(
-                title=_("Notification Period"),
+                title=_("Notification period"),
                 choices=[
                     ("honor", _("Distinguish times in and out of notification period")),
                     ("exclude", _("Exclude times out of notification period")),
@@ -709,7 +724,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             True,
             Integer(
-                title=_("Short Time Intervals"),
+                title=_("Short time intervals"),
                 label=_("Ignore intervals shorter or equal"),
                 minvalue=0,
                 unit=_("sec"),
@@ -722,7 +737,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             True,
             Checkbox(
-                title=_("Phase Merging"),
+                title=_("Phase merging"),
                 label=_("Do not merge consecutive phases with equal state"),
             ),
         ),
@@ -731,7 +746,7 @@ def get_av_computation_options() -> AVOptionValueSpecs:
             "single",
             False,
             Age(
-                title=_("Query Time Limit"),
+                title=_("Query time limit"),
                 help=_(
                     "Limit the execution time of the query, in order to avoid a hanging system."
                 ),
@@ -828,9 +843,11 @@ def prepare_avo_timeformats(timeformat: AVTimeformatSpec) -> AVTimeFormats:
     return this_timeformat
 
 
-def get_default_avoptions() -> AVOptions:
+def get_default_avoptions(range_spec: tuple[float, float] | None = None) -> AVOptions:
+    if range_spec is None:
+        range_spec = time.time() - 86400, time.time()
     return {
-        "range": ((time.time() - 86400, time.time()), ""),
+        "range": (range_spec, ""),
         "rangespec": "d0",
         "labelling": [],
         "av_levels": None,
@@ -947,8 +964,8 @@ def get_availability_rawdata(
     include_output: bool,
     include_long_output: bool,
     avoptions: AVOptions,
-    view_process_tracking: _Optional[ViewProcessTracking] = None,
-) -> _Tuple[AVRawData, bool]:
+    view_process_tracking: ViewProcessTracking | None = None,
+) -> tuple[AVRawData, bool]:
     # 'view_process_tracking=None': this function is also called from the grafana module
     # which has not the task to track the processed rows/cpu time but the views module does
     # track these steps.
@@ -962,19 +979,13 @@ def get_availability_rawdata(
     av_filter = "Filter: time >= %d\nFilter: time < %d\n" % time_range
     if av_object:
         tl_site, tl_host, tl_service = av_object
-        av_filter += "Filter: host_name = %s\nFilter: service_description = %s\n" % (
-            tl_host,
-            tl_service,
-        )
+        av_filter += f"Filter: host_name = {lqencode(str(tl_host))}\nFilter: service_description = {lqencode(tl_service)}\n"
         assert tl_site is not None
         only_sites = [tl_site]
     elif what == "service":
         av_filter += "Filter: service_description !=\n"
     else:
         av_filter += "Filter: service_description =\n"
-
-    query = "GET statehist\n" + av_filter
-    query += "Timelimit: %d\n" % avoptions["timelimit"]
 
     # Add Columns needed for object identification
     columns = ["host_name", "service_description"]
@@ -996,6 +1007,8 @@ def get_availability_rawdata(
         columns.append("log_output")
     if include_long_output:
         columns.append("long_log_output")
+        columns.append("service_check_command")
+        columns.append("service_custom_variables")
     if "use_display_name" in avoptions["labelling"]:
         columns.append("service_display_name")
     if "show_alias" in avoptions["labelling"]:
@@ -1005,21 +1018,31 @@ def get_availability_rawdata(
     if avoptions["grouping"] not in [None, "host"]:
         columns.append(avoptions["grouping"])
 
-    query += "Columns: %s\n" % " ".join(columns)
-    query += filterheaders
+    headers = av_filter
+    headers += "Timelimit: %d\n" % avoptions["timelimit"]
+    headers += filterheaders
     logrow_limit = avoptions["logrow_limit"]
 
-    with sites.only_sites(only_sites), sites.prepend_site(), sites.set_limit(
-        logrow_limit or None
-    ), CPUTracker() as fetch_rows_tracker:
-        data = sites.live().query(query)
+    with CPUTracker(logger.debug) as fetch_rows_tracker:
+        data = query_livestatus(
+            Query(
+                QuerySpecification(
+                    table="statehist",
+                    columns=columns,
+                    headers=headers,
+                )
+            ),
+            only_sites=only_sites,
+            limit=logrow_limit or None,
+            auth_domain="read",
+        )
 
     columns = ["site"] + columns
-    spans: List[AVSpan] = [dict(zip(columns, span)) for span in data]
+    spans: list[AVSpan] = [dict(zip(columns, span)) for span in data]
     amount_filtered_rows = len(spans)
 
     # When a group filter is set, only care about these groups in the group fields
-    with CPUTracker() as filter_rows_tracker:
+    with CPUTracker(logger.debug) as filter_rows_tracker:
         if avoptions["grouping"] not in [None, "host"]:
             filter_groups_of_entries(context, avoptions, spans)
 
@@ -1043,7 +1066,7 @@ def get_availability_rawdata(
 
 
 def filter_groups_of_entries(
-    context: VisualContext, avoptions: AVOptions, spans: List[AVSpan]
+    context: VisualContext, avoptions: AVOptions, spans: list[AVSpan]
 ) -> None:
     group_by = avoptions["grouping"]
 
@@ -1110,7 +1133,7 @@ def filter_groups_of_entries(
 
 # Sort the raw spans into a tree of dicts, so that we
 # have easy access to the timeline of each object
-def spans_by_object(spans: List[AVSpan]) -> AVRawData:
+def spans_by_object(spans: list[AVSpan]) -> AVRawData:
     # Sort by site/host and service, while keeping native order
     av_rawdata: AVRawData = {}
     for span in spans:
@@ -1123,7 +1146,7 @@ def spans_by_object(spans: List[AVSpan]) -> AVRawData:
 
 
 # Compute an availability table. what is one of "bi", "host", "service".
-def compute_availability(  # pylint: disable=too-many-branches
+def compute_availability(
     what: AVObjectType,
     av_rawdata: AVRawData,
     avoptions: AVOptions,
@@ -1153,7 +1176,6 @@ def compute_availability(  # pylint: disable=too-many-branches
     # Note: in case of timeline, we have data from exacly one host/service
     for site_host, site_host_entry in reclassified_rawdata.items():
         for service, service_entry in site_host_entry.items():
-
             if grouping == "host":
                 group_ids: AVGroupIds = [site_host]
             elif grouping in ["host_groups", "service_groups"]:
@@ -1166,7 +1188,6 @@ def compute_availability(  # pylint: disable=too-many-branches
             total_duration = 0
             considered_duration = 0
             for span in service_entry:
-
                 # Information about host/service groups are in the actual entries
                 if grouping in ["host_groups", "service_groups"] and what != "bi":
                     assert isinstance(group_ids, set)
@@ -1300,7 +1321,7 @@ def reclassify_by_annotations(what: AVObjectType, av_rawdata: AVRawData) -> AVRa
         new_entries: AVRawServices = {}
         reclassified_rawdata[(site, host_name)] = new_entries
         for service_description, history in history_entries.items():
-            cycles: List[AVAnnotationKey] = []
+            cycles: list[AVAnnotationKey] = []
             cycles.append((site, host_name, service_description or None))
             if what == "service":
                 cycles.insert(0, (site, host_name, None))
@@ -1318,14 +1339,14 @@ def reclassify_by_annotations(what: AVObjectType, av_rawdata: AVRawData) -> AVRa
 
 
 class ReclassifyConfig(NamedTuple):
-    downtime: _Optional[Any]
-    host_state: _Optional[Any]
-    service_state: _Optional[Any]
+    downtime: Any | None
+    host_state: Any | None
+    service_state: Any | None
 
 
 def reclassify_history_by_annotations(
-    history: List[AVSpan], annotation_entries: List[AVAnnotationEntry]
-) -> List[AVSpan]:
+    history: list[AVSpan], annotation_entries: list[AVAnnotationEntry]
+) -> list[AVSpan]:
     new_history = history
     for annotation in annotation_entries:
         downtime = annotation.get("downtime")
@@ -1345,11 +1366,11 @@ def reclassify_history_by_annotations(
 
 
 def reclassify_history_by_annotation(
-    history: List[AVSpan],
+    history: list[AVSpan],
     annotation: AVAnnotationEntry,
     new_config: ReclassifyConfig,
-) -> List[AVSpan]:
-    new_history: List[AVSpan] = []
+) -> list[AVSpan]:
+    new_history: list[AVSpan] = []
     for history_entry in history:
         new_history += reclassify_times_by_annotation(history_entry, annotation, new_config)
 
@@ -1360,7 +1381,7 @@ def reclassify_times_by_annotation(
     history_entry: AVSpan,
     annotation: AVAnnotationEntry,
     new_config: ReclassifyConfig,
-) -> List[AVSpan]:
+) -> list[AVSpan]:
     new_history = []
     if annotation["from"] < history_entry["until"] and annotation["until"] > history_entry["from"]:
         for is_in, p_from, p_until in [
@@ -1395,7 +1416,7 @@ def reclassify_config_by_annotation(
     new_entry: AVSpan,
     new_config: ReclassifyConfig,
 ) -> AVSpan:
-    if new_config.downtime:
+    if new_config.downtime is not None:
         new_entry["in_downtime"] = 1 if annotation["downtime"] else 0
         # If the annotation removes a downtime from the services, but
         # the actual reason for the service being in downtime is a host
@@ -1461,7 +1482,7 @@ def compute_availability_groups(
     if grouping != "host":
         group_titles = dict(sites.all_groups(grouping[:-7]))
 
-    titled_groups: List[_Tuple[str, AVGroupKey]] = []
+    titled_groups: list[tuple[str, AVGroupKey]] = []
     for group_id in all_group_ids:
         if grouping == "host":
             assert isinstance(group_id, tuple)
@@ -1582,7 +1603,7 @@ def load_annotations(lock: bool = False) -> AVAnnotations:
 def update_annotations(
     site_host_svc: AVAnnotationKey,
     annotation: AVAnnotationEntry,
-    replace_existing: _Optional[AVAnnotationEntry],
+    replace_existing: AVAnnotationEntry | None,
 ) -> None:
     annotations = load_annotations(lock=True)
     entries = annotations.get(site_host_svc, [])
@@ -1599,11 +1620,11 @@ def update_annotations(
 def find_annotation(
     annotations: AVAnnotations,
     site_host_svc: AVAnnotationKey,
-    host_state: _Optional[str],
-    service_state: _Optional[str],
+    host_state: str | None,
+    service_state: str | None,
     fromtime: AVTimeStamp,
     untiltime: AVTimeStamp,
-) -> _Optional[AVAnnotationEntry]:
+) -> AVAnnotationEntry | None:
     entries = annotations.get(site_host_svc)
     if not entries:
         return None
@@ -1616,8 +1637,8 @@ def find_annotation(
 def delete_annotation(
     annotations: AVAnnotations,
     site_host_svc: AVAnnotationKey,
-    host_state: _Optional[str],
-    service_state: _Optional[str],
+    host_state: str | None,
+    service_state: str | None,
     fromtime: AVTimeStamp,
     untiltime: AVTimeStamp,
 ) -> None:
@@ -1640,7 +1661,7 @@ def get_relevant_annotations(annotations, by_host, what, avoptions):
     from_time, until_time = time_range
 
     annos_to_render = []
-    annos_rendered: Set[int] = set()
+    annos_rendered: set[int] = set()
 
     for site_host, avail_entries in by_host.items():
         for service in avail_entries.keys():
@@ -1709,9 +1730,9 @@ def _annotation_affects_time_range(annotation_from, annotation_until, from_time,
 #    "urls" : { "timeline": "view.py..." },
 #    "object" : ( "Host123", "Foobar" ),
 # }
-def layout_availability_table(  # pylint: disable=too-many-branches
+def layout_availability_table(
     what: AVObjectType,
-    group_title: _Optional[str],
+    group_title: str | None,
     availability_table: AVData,
     avoptions: AVOptions,
 ) -> AVLayoutTable:
@@ -1723,8 +1744,8 @@ def layout_availability_table(  # pylint: disable=too-many-branches
     labelling = avoptions["labelling"]
     av_levels = avoptions["av_levels"]
     show_summary = avoptions.get("summary")
-    summary: Dict[str, float] = {}
-    summary_counts: Dict[str, int] = {}
+    summary: dict[str, float] = {}
+    summary_counts: dict[str, int] = {}
     unmonitored_objects = 0
     av_table: AVLayoutTable = {
         "title": group_title,
@@ -1773,7 +1794,7 @@ def layout_availability_table(  # pylint: disable=too-many-branches
                 if not cell_active(sid, avoptions):
                     continue
 
-                ssid = "%s-%s" % (sid, timeformat)
+                ssid = f"{sid}-{timeformat}"
                 number = entry["states"].get(sid, 0)
                 considered_duration = entry["considered_duration"]
                 if not number:
@@ -1838,7 +1859,7 @@ def layout_availability_table(  # pylint: disable=too-many-branches
 
         for timeformat, render_number in timeformats:
             for sid, css, _sname, _help_txt in availability_columns[what]:
-                ssid = "%s-%s" % (sid, timeformat)
+                ssid = f"{sid}-{timeformat}"
                 if not cell_active(sid, avoptions):
                     continue
 
@@ -1899,8 +1920,8 @@ def omit_urls(
     site: SiteId,
     time_range: AVTimeRange,
     what: AVObjectType,
-) -> List[AVIconSpec]:
-    urls: List[AVIconSpec] = []
+) -> list[AVIconSpec]:
+    urls: list[AVIconSpec] = []
     if what != "bi":
         timeline_url = makeuri(
             request,
@@ -1929,7 +1950,7 @@ def omit_urls(
     return urls
 
 
-def object_column_titles(labelling: AVTimelineLabelling, what: AVObjectType) -> List[str]:
+def object_column_titles(labelling: AVTimelineLabelling, what: AVObjectType) -> list[str]:
     titles = []
     if what == "bi":
         titles.append(_("Aggregate"))
@@ -1955,7 +1976,7 @@ def _availability_cell_headers(
     os_states: AVOutageStatisticsStates,
     timeformats: AVTimeFormats,
     what: AVObjectType,
-) -> List[_Tuple[str, _Optional[str]]]:
+) -> list[tuple[str, str | None]]:
     statistics_headers = {
         "min": _("Shortest"),
         "max": _("Longest"),
@@ -1979,7 +2000,7 @@ def _availability_cell_headers(
     return cell_titles
 
 
-def get_object_cells(what: AVObjectType, av_entry: AVEntry, labelling: List[str]) -> AVObjectCells:
+def get_object_cells(what: AVObjectType, av_entry: AVEntry, labelling: list[str]) -> AVObjectCells:
     host = av_entry["host"]
     service = av_entry["service"]
 
@@ -2025,7 +2046,7 @@ def get_object_cells(what: AVObjectType, av_entry: AVEntry, labelling: List[str]
 #    "spans" : [ spans... ],
 #    "legend" : [ legendentries... ],
 # }
-def layout_timeline(  # pylint: disable=too-many-branches
+def layout_timeline(
     what: AVObjectType,
     timeline_rows: AVTimelineRows,
     considered_duration: int,
@@ -2053,8 +2074,8 @@ def layout_timeline(  # pylint: disable=too-many-branches
         return render_date
 
     render_date = render_date_func(time_format)
-    spans: List[AVTimelineSpan] = []
-    table: List[AVLayoutTimelineRow] = []
+    spans: list[AVTimelineSpan] = []
+    table: list[AVLayoutTimelineRow] = []
     timeline_layout: AVLayoutTimeline = {
         "range": time_range,
         "spans": spans,
@@ -2097,6 +2118,8 @@ def layout_timeline(  # pylint: disable=too-many-branches
     for row_nr, (row, state_id) in enumerate(timeline_rows):
         this_from_time = row["from"]
         this_until_time = row["until"]
+        # If timeline span begins after timeline beginning time, add
+        # unmonitored span in front
         if this_from_time > current_time:  # GAP
             spans.append(
                 (
@@ -2143,7 +2166,14 @@ def layout_timeline(  # pylint: disable=too-many-branches
                 if "log_output" in row and row["log_output"]:
                     table[-1]["log_output"] = row["log_output"]
                 if "long_log_output" in row and row["long_log_output"]:
-                    table[-1]["long_log_output"] = row["long_log_output"]
+                    long_log_output = row["long_log_output"]
+                    # see f062002476470213a35787cfd4dd5e676e3fa53d
+                    if (
+                        row["service_check_command"] == "check_mk-ps"
+                        and row["service_custom_variables"].get("ESCAPE_PLUGIN_OUTPUT", "1") == "0"
+                    ):
+                        long_log_output = long_log_output.replace("&bsol%3B", "\\")
+                    table[-1]["long_log_output"] = long_log_output
 
             # If the width is very small then we group several phases into
             # one single "chaos period".
@@ -2168,6 +2198,17 @@ def layout_timeline(  # pylint: disable=too-many-branches
 
             width += min_percentage
             spans.append((row_nr, title, width, css))
+    # If timeline span ends before the current time, fill it up with
+    # unmonitored entry until end
+    if avoptions["service_period"] == "honor" and current_time < until_time:  # GAP
+        spans.append(
+            (
+                None,
+                "",
+                100.0 * (until_time - current_time) / total_duration,
+                "unmonitored",
+            )
+        )
 
     if chaos_count > 1 and chaos_begin and chaos_end:
         spans.append(chaos_period(chaos_begin, chaos_end, chaos_count, chaos_width))
@@ -2178,7 +2219,7 @@ def layout_timeline(  # pylint: disable=too-many-branches
     return timeline_layout
 
 
-def layout_timeline_choords(time_range: AVTimeRange) -> Iterator[_Tuple[float, str]]:
+def layout_timeline_choords(time_range: AVTimeRange) -> Iterator[tuple[float, str]]:
     from_time, until_time = time_range
     duration = until_time - from_time
 
@@ -2195,7 +2236,10 @@ def layout_timeline_choords(time_range: AVTimeRange) -> Iterator[_Tuple[float, s
 
 def _dispatch_scale(
     hours: float,
-) -> _Tuple[Callable[[time.struct_time], time.struct_time], Callable[[time.struct_time], str],]:
+) -> tuple[
+    Callable[[time.struct_time], time.struct_time],
+    Callable[[time.struct_time], str],
+]:
     """decide automatically whether to use hours, days, weeks or months
 
     Days and weeks needs to take local time into account. Months are irregular.
@@ -2223,23 +2267,23 @@ def _render_hour(tst: time.struct_time) -> str:
 
 
 def _render_2hours(tst: time.struct_time) -> str:
-    return defines.weekday_name(tst.tm_wday) + time.strftime(" %H:%M", tst)
+    return dateutils.weekday_name(tst.tm_wday) + time.strftime(" %H:%M", tst)
 
 
 def _render_6hours(tst: time.struct_time) -> str:
-    return defines.weekday_name(tst.tm_wday) + time.strftime(" %H:%M", tst)
+    return dateutils.weekday_name(tst.tm_wday) + time.strftime(" %H:%M", tst)
 
 
 def _render_day(tst: time.struct_time) -> str:
-    return defines.weekday_name(tst.tm_wday) + time.strftime(", %d.%m. 00:00", tst)
+    return dateutils.weekday_name(tst.tm_wday) + time.strftime(", %d.%m. 00:00", tst)
 
 
 def _render_week(tst: time.struct_time) -> str:
-    return defines.weekday_name(tst.tm_wday) + time.strftime(", %d.%m.", tst)
+    return dateutils.weekday_name(tst.tm_wday) + time.strftime(", %d.%m.", tst)
 
 
 def _render_month(tst: time.struct_time) -> str:
-    return "%s %d" % (defines.month_name(tst.tm_mon - 1), tst.tm_year)
+    return "%s %d" % (dateutils.month_name(tst.tm_mon - 1), tst.tm_year)
 
 
 def _make_struct(year: int, month: int, day: int, hour: int, *, offset: int) -> time.struct_time:
@@ -2308,15 +2352,17 @@ def _increment_month(tst: time.struct_time) -> time.struct_time:
 #   '----------------------------------------------------------------------'
 
 BIAggregationGroupTitle = str
-BIAggregationTree = Dict[str, Any]
 BIAggregationTitle = str
 BITreeState = Any
 BITimelineEntry = Any
 
 
+DEFAULT_MAX_TIME_RANGE = 31 * 24 * 60 * 60  # One month
+
+
 def get_bi_availability(
-    avoptions: AVOptions, aggr_rows: Rows, timewarp: _Optional[AVTimeStamp]
-) -> _Tuple[List[TimelineContainer], AVRawData, bool]:
+    avoptions: AVOptions, aggr_rows: Rows, timewarp: AVTimeStamp | None
+) -> tuple[list[TimelineContainer], AVRawData, bool]:
     logrow_limit = avoptions["logrow_limit"]
     if logrow_limit == 0:
         livestatus_limit = None
@@ -2329,7 +2375,7 @@ def get_bi_availability(
 
     has_reached_logrow_limit = bool(livestatus_limit and fetched_rows > livestatus_limit)
 
-    spans: List[AVSpan] = []
+    spans: list[AVSpan] = []
     for timeline_container in timeline_containers:
         spans.extend(timeline_container.timeline)
 
@@ -2344,16 +2390,16 @@ def get_bi_availability_rawdata(
     av_object: AVObjectSpec,
     include_output: bool,
     avoptions: AVOptions,
-) -> _Tuple[AVRawData, bool]:
+) -> tuple[AVRawData, bool]:
     raise Exception("Not implemented yet. Sorry.")
 
 
 def get_timeline_containers(
     aggr_rows: Rows,
     avoptions: AVOptions,
-    timewarp: _Optional[AVTimeStamp],
-    livestatus_limit: _Optional[int],
-) -> _Tuple[List[TimelineContainer], int]:
+    timewarp: AVTimeStamp | None,
+    livestatus_limit: int | None,
+) -> tuple[list[TimelineContainer], int]:
     time_range: AVTimeRange = avoptions["range"][0]
     phases_list, timeline_containers, fetched_rows = get_bi_leaf_history(
         aggr_rows, time_range, livestatus_limit
@@ -2366,7 +2412,7 @@ def get_timeline_containers(
 
 # Not a real class, more a struct
 class TimelineContainer:
-    def __init__(self, aggr_row) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, aggr_row: Row) -> None:
         self._aggr_row = aggr_row
 
         # PUBLIC accessible data
@@ -2374,26 +2420,51 @@ class TimelineContainer:
             "aggr_compiled_aggregation"
         ]
         self.aggr_compiled_branch: BICompiledRule = self._aggr_row["aggr_compiled_branch"]
-        self.aggr_tree: BIAggregationTree = self._aggr_row["aggr_tree"]
+        self.aggr_tree: CompiledAggrTree = self._aggr_row["aggr_tree"]
         self.aggr_group: BIAggregationGroupTitle = self._aggr_row["aggr_group"]
 
         # Data fetched from livestatus query
-        self.host_service_info: Set[_Tuple[HostName, ServiceName]] = set()
+        self.host_service_info: set[tuple[HostName, ServiceName]] = set()
 
         # Computed data
-        self.timeline: List[BITimelineEntry] = []
+        self.timeline: list[BITimelineEntry] = []
         self.states: AVBITimelineStates = {}
 
         # Can be optional after computation
-        self.node_compute_result: _Optional[NodeComputeResult] = None
-        self.timewarp_state: _Optional[BITreeState] = None
+        self.node_compute_result: NodeComputeResult | None = None
+        self.timewarp_state: BITreeState | None = None
         # Can not be optional after computation
-        self.tree_time: _Optional[AVTimeStamp] = None
+        self.tree_time: AVTimeStamp | None = None
+
+
+def split_time_range(
+    start: AVTimeStamp, end: AVTimeStamp, interval: AVTimeStamp
+) -> Generator[AVTimeRange]:
+    """
+    Split a time range into smaller ranges of a given interval.
+
+    Examples:
+    >>> _start, _end = 42, 1337
+    >>> list(split_time_range(_start, _end, -((_end - _start) // -2)))
+    [(42, 690), (690, 1337)]
+    >>> list(split_time_range(_start, _end, (_end - _start) // 2))
+    [(42, 689), (689, 1336), (1336, 1337)]
+    >>> list(split_time_range(_start, _end, 250))
+    [(42, 292), (292, 542), (542, 792), (792, 1042), (1042, 1292), (1292, 1337)]
+    """
+    if interval <= 0:
+        raise ValueError("Interval must be positive")
+    while start < end:
+        yield start, min(start + interval, end)
+        start += interval
 
 
 def get_bi_leaf_history(
-    aggr_rows: Rows, time_range: AVTimeRange, livestatus_limit: _Optional[int]
-) -> _Tuple[AVBIPhases, List[TimelineContainer], int]:
+    aggr_rows: Rows,
+    time_range: AVTimeRange,
+    livestatus_limit: int | None,
+    max_time_range: int = DEFAULT_MAX_TIME_RANGE,
+) -> tuple[AVBIPhases, list[TimelineContainer], int]:
     """Get state history of all hosts and services contained in the tree.
     In order to simplify the query, we always fetch the information for all hosts of the aggregates.
     """
@@ -2415,41 +2486,37 @@ def get_bi_leaf_history(
         "in_service_period",
     ]
 
-    query = (
-        "GET statehist\n"
-        + "Columns: "
-        + " ".join(columns)
-        + "\n"
-        + "Filter: time >= %d\nFilter: time < %d\n" % time_range
-    )
-
     # Create a specific filter. We really only want the services and hosts
     # of the aggregation in question. That prevents status changes
     # irrelevant services from introducing new phases.
-    by_host: Dict[HostName, Set[ServiceName]] = {}
-    timeline_containers: List[TimelineContainer] = []
+    by_host: dict[HostName, set[ServiceName]] = {}
+    timeline_containers: list[TimelineContainer] = []
     for row in aggr_rows:
         timeline_container = TimelineContainer(row)
 
-        for site, host, service in timeline_container.aggr_compiled_branch.required_elements():
+        for _site, host, service in timeline_container.aggr_compiled_branch.required_elements():
             this_service = service or ""
-            by_host.setdefault(host, set()).add(this_service)
+            by_host.setdefault(host, {""}).add(this_service)
             timeline_container.host_service_info.add((host, this_service))
             timeline_container.host_service_info.add((host, ""))
 
         timeline_containers.append(timeline_container)
 
+    headers = ""
     for host, services in by_host.items():
-        query += "Filter: host_name = %s\n" % host
-        query += lq_logic("Filter: service_description = ", list(services), "Or")
-        query += "And: 2\n"
+        headers += "Filter: host_name = %s\n" % host
+        headers += lq_logic("Filter: service_description = ", list(services), "Or")
+        headers += "And: 2\n"
     if len(hosts) != 1:
-        query += "Or: %d\n" % len(hosts)
+        headers += "Or: %d\n" % len(hosts)
 
-    with sites.output_format(LivestatusOutputFormat.JSON), sites.only_sites(
-        list(only_sites)
-    ), sites.prepend_site(), sites.set_limit(livestatus_limit):
-        data = sites.live().query(query)
+    data: list[LivestatusRow] = []
+
+    split_time_ranges = split_time_range(time_range[0], time_range[1], max_time_range)
+    for current_time_range in split_time_ranges:
+        get_bi_split_history_data(
+            data, current_time_range, columns, only_sites, headers, livestatus_limit
+        )
 
     if not data:
         return [], [], 0
@@ -2459,6 +2526,7 @@ def get_bi_leaf_history(
 
     # Reclassify base data due to annotations
     rows = reclassify_bi_rows(rows)
+    merged_rows_by_id = get_bi_merged_rows_by_id(rows)
 
     # Now comes the tricky part: recompute the state of the aggregate
     # for each step in the state history and construct a timeline from
@@ -2467,9 +2535,10 @@ def get_bi_leaf_history(
     # in the statehist table
 
     # First partition the rows into sequences with equal start time
-    phases: Dict[int, Dict[_Tuple[HostName, ServiceName], Row]] = {}
-    for row in rows:
-        phases.setdefault(row["from"], {})[(row["host_name"], row["service_description"])] = row
+    phases: dict[int, dict[tuple[HostName, ServiceName], Row]] = {}
+    for id_, merged_rows in merged_rows_by_id.items():
+        for row in merged_rows:
+            phases.setdefault(row["from"], {})[id_] = row
 
     # Convert phases to sorted list
     sorted_times = sorted(phases.keys())
@@ -2477,22 +2546,87 @@ def get_bi_leaf_history(
 
     for from_time in sorted_times:
         phases_list.append((from_time, phases[from_time]))
+    return phases_list, timeline_containers, sum(len(rows) for rows in merged_rows_by_id.values())
 
-    return phases_list, timeline_containers, len(rows)
+
+def get_bi_merged_rows_by_id(rows: list[Row]) -> dict[tuple[HostName, ServiceName], list[Row]]:
+    by_id: dict[tuple[HostName, ServiceName], list[Row]] = {}
+    for row in rows:
+        id_ = (row["host_name"], row["service_description"])
+        by_id.setdefault(id_, [])
+        by_id[id_].append(row)
+
+    for id_, service_rows in by_id.items():
+        by_id[id_] = sorted(service_rows, key=lambda x: x["from"])
+
+    merged_rows_by_id: dict[tuple[HostName, ServiceName], list[Row]] = {id_: [] for id_ in by_id}
+    for id_, service_rows in by_id.items():
+        for service_row in service_rows:
+            if not merged_rows_by_id[id_]:
+                merged_rows_by_id[id_].append(service_row)
+            elif (
+                merged_rows_by_id[id_][-1]["state"] != service_row["state"]
+                or merged_rows_by_id[id_][-1]["in_downtime"] != service_row["in_downtime"]
+                or merged_rows_by_id[id_][-1]["in_service_period"]
+                != service_row["in_service_period"]
+                or merged_rows_by_id[id_][-1]["log_output"] != service_row["log_output"]
+            ):
+                merged_rows_by_id[id_].append(service_row)
+            else:
+                merged_rows_by_id[id_][-1]["until"] = service_row["until"]
+    return merged_rows_by_id
+
+
+def get_bi_split_history_data(
+    data: list[LivestatusRow],
+    time_range: AVTimeRange,
+    columns: Sequence[str],
+    only_sites: set[Any],
+    headers: str,
+    livestatus_limit: int | None,
+) -> None:
+    try:
+        # Try to fetch complete data
+        data.extend(
+            query_livestatus(
+                Query(
+                    QuerySpecification(
+                        table="statehist",
+                        columns=columns,
+                        headers="Filter: time >= %d\nFilter: time < %d\n" % time_range + headers,
+                    )
+                ),
+                only_sites=list(only_sites),
+                limit=livestatus_limit,
+                auth_domain="read",
+            )
+        )
+    except MKLivestatusPayloadTooLargeError:
+        # If the query fails, split the time range into two and try again
+        split_time_ranges = split_time_range(
+            time_range[0],
+            time_range[1],
+            # Ceiling division in order not to split into three parts (see docstring example)
+            -((time_range[1] - time_range[0]) // -2),
+        )
+        for current_time_range in split_time_ranges:
+            get_bi_split_history_data(
+                data, current_time_range, columns, only_sites, headers, livestatus_limit
+            )
 
 
 def compute_bi_timelines(
-    timeline_containers: List[TimelineContainer],
+    timeline_containers: list[TimelineContainer],
     time_range: AVTimeRange,
-    timewarp: _Optional[AVTimeStamp],
+    timewarp: AVTimeStamp | None,
     phases_list: AVBIPhases,
-) -> List[TimelineContainer]:
+) -> list[TimelineContainer]:
     if not timeline_containers:
         return timeline_containers
 
     def update_states(
         states: AVBITimelineStates,
-        use_entries: Set[_Tuple[HostName, ServiceName]],
+        use_entries: set[tuple[HostName, ServiceName]],
         phase_entries: AVBIPhaseData,
     ) -> None:
         for element in use_entries:
@@ -2597,7 +2731,7 @@ def _get_timewarp_state(node_compute_result_bundle, timeline_container):
 
 
 def create_bi_timeline_entry(
-    tree: BIAggregationTree,
+    tree: CompiledAggrTree,
     aggr_group: BIAggregationGroupTitle,
     from_time: AVTimeStamp,
     until_time: AVTimeStamp,
@@ -2613,7 +2747,7 @@ def create_bi_timeline_entry(
         "service_description": tree["title"],
         "in_notification_period": 1,
         "in_service_period": node_compute_result.in_service_period,
-        "in_downtime": node_compute_result.downtime_state > 0,
+        "in_downtime": node_compute_result.in_downtime,
         "in_host_downtime": 0,
         "host_down": 0,
         "is_flapping": 0,
@@ -2626,12 +2760,12 @@ def _compute_node_result_bundle(
 ) -> NodeResultBundle:
     # Convert our status format into that needed by BI
     status = timeline_container.states
-    services_by_host: Dict[BIHostSpec, Dict[str, BIServiceWithFullState]] = {}
-    hosts: Dict[BIHostSpec, AVBITimelineState] = {}
+    services_by_host: dict[BIHostSpec, dict[str, BIServiceWithFullState]] = {}
+    hosts: dict[BIHostSpec, AVBITimelineState] = {}
     for site_host_service, state_output in status.items():
         site_host = BIHostSpec(site_host_service[0], site_host_service[1])
         service = site_host_service[2]
-        state: _Optional[int] = state_output[0]
+        state: int | None = state_output[0]
 
         # Create an entry for hosts that are not explicitly referenced in the timeline container.
         hosts.setdefault(site_host, (0, "", False, False))
@@ -2662,7 +2796,7 @@ def _compute_node_result_bundle(
     if not results:
         # The aggregation did not find any hosts or services. Return "Not yet monitored"
         return NodeResultBundle(
-            NodeComputeResult(-1, 0, False, _("Not yet monitored"), True, {}, {}),
+            NodeComputeResult(-1, False, False, _("Not yet monitored"), True, {}, {}),
             None,
             [],
             None,
@@ -2672,14 +2806,13 @@ def _compute_node_result_bundle(
 
 
 def _compute_status_info(
-    hosts: Dict[BIHostSpec, AVBITimelineState],
-    services_by_host: Dict[BIHostSpec, Dict[str, BIServiceWithFullState]],
+    hosts: dict[BIHostSpec, AVBITimelineState],
+    services_by_host: dict[BIHostSpec, dict[str, BIServiceWithFullState]],
 ) -> BIStatusInfo:
-
     status_info: BIStatusInfo = {}
 
     for site_host, state_output in hosts.items():
-        state: _Optional[int] = state_output[0]
+        state: int | None = state_output[0]
 
         if state == -1:
             state = None  # Means: consider this object as missing
@@ -2688,7 +2821,7 @@ def _compute_status_info(
             state,  # state
             True,  # has_been_checked
             state,  # host hard state
-            state_output[1],  # plugin output
+            state_output[1],  # plug-in output
             state_output[2],  # in_downtime
             state_output[3],  # in_service_period
             False,  # acknowledged
@@ -2774,8 +2907,8 @@ def check_av_levels(ok_seconds: float, av_levels: AVLevels, considered_duration:
     return 0
 
 
-def get_av_groups(availability_table: AVData, avoptions: AVOptions) -> Set[AVGroupKey]:
-    all_group_ids: Set[AVGroupKey] = set()
+def get_av_groups(availability_table: AVData, avoptions: AVOptions) -> set[AVGroupKey]:
+    all_group_ids: set[AVGroupKey] = set()
     for entry in availability_table:
         all_group_ids.update(entry["groups"])
         if len(entry["groups"]) == 0:
@@ -2787,9 +2920,7 @@ def get_av_groups(availability_table: AVData, avoptions: AVOptions) -> Set[AVGro
 # host (natural sort), then service
 def key_av_entry(
     a: AVEntry,
-) -> _Tuple[
-    _Tuple[Union[int, str], ...], int, _Tuple[Union[int, str], ...], _Tuple[Union[int, str], ...]
-]:
+) -> tuple[tuple[int | str, ...], int, tuple[int | str, ...], tuple[int | str, ...]]:
     return (
         key_num_split(a["service"]),
         cmp_service_name_equiv(a["service"]),

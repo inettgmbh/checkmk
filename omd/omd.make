@@ -1,4 +1,4 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,6 +16,7 @@ include $(REPO_PATH)/defines.make
 # TODO: Cleanup one of these
 PACKAGE_BASE       := $(REPO_PATH)/omd/packages
 PACKAGE_DIR        := $(PACKAGE_BASE)
+NON_FREE_PACKAGE_DIR := $(REPO_PATH)/non-free/packages
 # The OMD build (RPM, DEB, ...) needs some working directorties of several types
 # during the build. All of them should be located below this base directory to
 # make it easier to clean them up.
@@ -95,7 +96,7 @@ endef
 define pack_pkg_archive
 	@mkdir -p $(PACKAGE_CACHE_BASE)
 	@echo "+++ Load or build $1 to create local build package..."
-	@if [ -z "$(NEXUS_BUILD_CACHE_URL)" ] || ! curl -sSf -o "$1" "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)"; then \
+	@if [ -z "$(NEXUS_BUILD_CACHE_URL)" ] || ! curl -sSf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" -o "$1" "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)"; then \
 	    if [ -z "$(NEXUS_BUILD_CACHE_URL)" ]; then \
 	        echo "+++ Nexus URL not configured. Building..." ; \
 	    else \
@@ -122,7 +123,7 @@ endef
 # $2: Directory name produced by the "intermediate install" target
 # $3: BUILD_ID of the given package
 define upload_pkg_archive
-	if [ -n "$(NEXUS_BUILD_CACHE_URL)" ] && ! curl -sf --head "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)" >/dev/null; then \
+	if [ -n "$(NEXUS_BUILD_CACHE_URL)" ] && ! curl -sf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" --head "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)" >/dev/null; then \
 	    echo "+++ Package not found on nexus. Upload package..." && \
 	    if ! curl -sSf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" --upload-file "$1" "$(NEXUS_BUILD_CACHE_URL)/" ; then \
                 echo "+++ ERROR: Upload failed. Continuing with build..." ; \
@@ -140,9 +141,3 @@ $(shell echo -n "$(1)" ; \
     fi \
 )
 endef
-
-ifeq (0,$(shell gcc -Xlinker --help | grep -e "-plugin" > /dev/null; echo $$?))
-PYTHON_ENABLE_OPTIMIZATIONS ?= --enable-optimizations --with-lto
-else
-PYTHON_ENABLE_OPTIMIZATIONS ?=
-endif

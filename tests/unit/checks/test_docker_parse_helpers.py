@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-import cmk.base.plugins.agent_based.utils.docker as docker
+from cmk.plugins.lib import docker
 
 pytestmark = pytest.mark.checks
 
@@ -19,6 +19,6 @@ pytestmark = pytest.mark.checks
         ),
     ],
 )
-def test_parse_short_id(indata, expected) -> None:
-    actual = docker.get_short_id(indata)  # type: ignore[name-defined] # pylint: disable=undefined-variable
+def test_parse_short_id(indata: str, expected: str) -> None:
+    actual = docker.get_short_id(indata)
     assert actual == expected

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,40 +20,8 @@ from cmk.gui.valuespec import (
     ListOfStrings,
     MonitoringState,
     TextInput,
-    Transform,
     Tuple,
 )
-
-
-def transform_ipmi_inventory_rules(p):
-    # this rule once was a Dictionary, then it became a CascadingDropdown, now we are back to a
-    # Dictionary
-    if isinstance(p, dict):
-        if "discovery_mode" in p:
-            return p
-        if p.get("summarize", True):
-            return {
-                "discovery_mode": (
-                    "summarize",
-                    {},
-                ),
-            }
-        return {
-            "discovery_mode": (
-                "single",
-                "ignored_sensors" in p and {"ignored_sensors": p["ignored_sensors"]} or {},
-            ),
-        }
-    if p == "summarize":
-        return {
-            "discovery_mode": (
-                "summarize",
-                {},
-            ),
-        }
-    return {
-        "discovery_mode": p,
-    }
 
 
 def _valuespec_inventory_ipmi_rules_single() -> Dictionary:
@@ -87,35 +55,32 @@ def _valuespec_inventory_ipmi_rules_single() -> Dictionary:
     )
 
 
-def _valuespec_inventory_ipmi_rules() -> Transform:
-    return Transform(
-        valuespec=Dictionary(
-            title=_("IPMI sensor discovery"),
-            elements=[
-                (
-                    "discovery_mode",
-                    CascadingDropdown(
-                        title=_("Discovery mode"),
-                        orientation="vertical",
-                        choices=[
-                            (
-                                "summarize",
-                                _("Summary of all sensors"),
-                                FixedValue(value={}, totext=""),
-                            ),
-                            (
-                                "single",
-                                _("One service per sensor"),
-                                _valuespec_inventory_ipmi_rules_single(),
-                            ),
-                        ],
-                        sorted=False,
-                    ),
+def _valuespec_inventory_ipmi_rules() -> Dictionary:
+    return Dictionary(
+        title=_("IPMI sensor discovery"),
+        elements=[
+            (
+                "discovery_mode",
+                CascadingDropdown(
+                    title=_("Discovery mode"),
+                    orientation="vertical",
+                    choices=[
+                        (
+                            "summarize",
+                            _("Summary of all sensors"),
+                            FixedValue(value={}, totext=""),
+                        ),
+                        (
+                            "single",
+                            _("One service per sensor"),
+                            _valuespec_inventory_ipmi_rules_single(),
+                        ),
+                    ],
+                    sorted=False,
                 ),
-            ],
-            optional_keys=False,
-        ),
-        forth=transform_ipmi_inventory_rules,
+            ),
+        ],
+        optional_keys=False,
     )
 
 
@@ -178,7 +143,7 @@ def _parameter_valuespec_ipmi():
                                 title=_("Sensor name"),
                                 help=_(
                                     "Enter the name of the sensor. In single mode, this can be read off "
-                                    "from the service descriptions of the services 'IPMI Sensor ...'."
+                                    "from the service names of the services 'IPMI Sensor ...'."
                                 ),
                             ),
                             Dictionary(

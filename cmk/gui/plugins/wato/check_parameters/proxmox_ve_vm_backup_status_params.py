@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -53,7 +53,7 @@ def _parameter_valuespec_proxmox_ve_vm_backup_requirements():
                                 Age(
                                     title=_("Warning at"),
                                     display=["hours", "minutes"],
-                                    default_value=int(60),
+                                    default_value=60,
                                 ),
                                 Age(
                                     title=_("Critical at"),

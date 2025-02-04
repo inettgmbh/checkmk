@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import NamedTuple, Optional, Sequence, Tuple, TypedDict
+from collections.abc import Mapping, Sequence
+from typing import NamedTuple, TypedDict
 
 import pytest
 
-from tests.testlib import Check
-
-from .checktestlib import assertCheckResultsEqual, CheckResult
+from .checktestlib import assertCheckResultsEqual, Check, CheckResult
 
 # Mark all tests in this file as check related tests
 pytestmark = pytest.mark.checks
@@ -103,18 +102,18 @@ def splitter(text):
     ),
     ids=["win7", "win2012", "win2008", "win10"],
 )
-def test_parse_win_license(capture, result) -> None:
+def test_parse_win_license(capture: str, result: Mapping[str, object]) -> None:
     check = Check("win_license")
     assert result == check.run_parse(splitter(capture))
 
 
 class CheckParameters(TypedDict):
     status: Sequence[str]
-    expiration_time: Tuple[int, int]
+    expiration_time: tuple[int, int]
 
 
 class check_ref(NamedTuple):
-    parameters: Optional[CheckParameters]
+    parameters: CheckParameters | None
     check_output: CheckResult
 
 
@@ -132,7 +131,7 @@ class check_ref(NamedTuple):
                     CheckResult(
                         [
                             (0, "Software is Initial grace period"),
-                            (0, "License will expire in 9 days 0 hours"),
+                            (0, "Time until license expires: 9 days 0 hours"),
                         ]
                     ),
                 ),
@@ -146,7 +145,7 @@ class check_ref(NamedTuple):
                             (0, "Software is Licensed"),
                             (
                                 1,
-                                "License will expire in 176 days 2 hours (warn/crit at 180 days 0 hours/90 days 0 hours)",
+                                "Time until license expires: 176 days 2 hours (warn/crit below 180 days 0 hours/90 days 0 hours)",
                             ),
                         ]
                     ),
@@ -161,7 +160,7 @@ class check_ref(NamedTuple):
                             (0, "Software is Licensed"),
                             (
                                 2,
-                                "License will expire in 174 days 9 hours (warn/crit at 360 days 0 hours/180 days 0 hours)",
+                                "Time until license expires: 174 days 9 hours (warn/crit below 360 days 0 hours/180 days 0 hours)",
                             ),
                         ]
                     ),
@@ -188,7 +187,7 @@ class check_ref(NamedTuple):
                     CheckResult(
                         [
                             (2, "Software is Initial grace period Required: Registered"),
-                            (0, "License will expire in 9 days 0 hours"),
+                            (0, "Time until license expires: 9 days 0 hours"),
                         ]
                     ),
                 ),
@@ -197,7 +196,7 @@ class check_ref(NamedTuple):
                     CheckResult(
                         [
                             (0, "Software is Licensed"),
-                            (0, "License will expire in 176 days 2 hours"),
+                            (0, "Time until license expires: 176 days 2 hours"),
                         ]
                     ),
                 ),
@@ -206,7 +205,7 @@ class check_ref(NamedTuple):
     ),
     ids=[str(x) for x in range(6)],
 )
-def test_check_win_license(capture, result) -> None:
+def test_check_win_license(capture: str, result: check_ref) -> None:
     check = Check("win_license")
     output = check.run_check(
         None, result.parameters or check.default_parameters(), check.run_parse(splitter(capture))

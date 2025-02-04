@@ -6,21 +6,20 @@
 #include <filesystem>
 
 #include "common/yaml.h"
-#include "cvt.h"
 #include "lwa/types.h"
 #include "providers/logwatch_event.h"
 #include "providers/mrpe.h"
-#include "read_file.h"
-#include "test_tools.h"
 #include "tools/_misc.h"
 #include "tools/_process.h"
-#include "tools/_tgt.h"
+#include "watest/test_tools.h"
+#include "wnx/cvt.h"
+#include "wnx/read_file.h"
 
 namespace fs = std::filesystem;
 
 template <class T>
 std::string type_name() {
-    typedef typename std::remove_reference<T>::type TR;
+    typedef std::remove_reference_t<T> TR;
     std::unique_ptr<char, void (*)(void *)> own(
 #ifndef _MSC_VER
         abi::__cxa_demangle(typeid(TR).name(), nullptr, nullptr, nullptr),
@@ -29,12 +28,17 @@ std::string type_name() {
 #endif
         std::free);
     std::string r = own != nullptr ? own.get() : typeid(TR).name();
-    if (std::is_const<TR>::value) r += " const";
-    if (std::is_volatile<TR>::value) r += " volatile";
-    if (std::is_lvalue_reference<T>::value)
+    if (std::is_const_v<TR>) {
+        r += " const";
+    }
+    if (std::is_volatile_v<TR>) {
+        r += " volatile";
+    }
+    if (std::is_lvalue_reference_v<T>) {
         r += "&";
-    else if (std::is_rvalue_reference<T>::value)
+    } else if (std::is_rvalue_reference_v<T>) {
         r += "&&";
+    }
     return r;
 }
 
@@ -102,10 +106,8 @@ std::string type_name() {
 // { "mrpe", "include", KeyedListConfigurable<std::string>}
 // clang-format on
 
-#include "cvt.h"
-
 template <typename T>
-void printType(T x) {
+void printType(T /*x*/) {
     std::cout << type_name<T>();
 }
 
@@ -122,25 +124,7 @@ YAML::Node ConvertToYaml(std::string_view test_name) {
 }
 }  // namespace
 
-TEST(CvtTest, CrLf) {
-    auto yaml = YAML::Load("global:\n  test: True\n");
-    cma::OnStartTest();
-
-    ON_OUT_OF_SCOPE(tst::SafeCleanTempDir());
-    std::filesystem::path p = cma::cfg::GetTempDir();
-    p /= "tst.yml";
-    {
-        std::ofstream ofs(p);
-        ofs << yaml;
-    }
-    std::ifstream in(p.u8string(), std::ios::binary);
-    std::stringstream sstr;
-    sstr << in.rdbuf();
-    auto content = sstr.str();
-    EXPECT_TRUE(content.find("\r\n") != std::string::npos);
-}
-
-void AddKeyedPattern(YAML::Node Node, const std::string Key,
+void AddKeyedPattern(YAML::Node Node, const std::string &Key,
                      const std::string &Pattern, const std::string &Value);
 
 TEST(CvtTest, Keyed) {
@@ -212,16 +196,16 @@ TEST(CvtTest, LogWatchSection) {
 
     ASSERT_TRUE(logwatch[vars::kLogWatchEventLogFile].size() == 4);
     auto logfiles = logwatch[vars::kLogWatchEventLogFile];
-    const cma::provider::RawLogWatchData base[4] = {
-        {true, "application", EventLevels::kCrit, true},
-        {true, "system", EventLevels::kWarn, false},
-        {true, "*", EventLevels::kOff, true},
+    const provider::RawLogWatchData base[4] = {
+        {true, "application", EventLevels::kCrit, EventContext::with},
+        {true, "system", EventLevels::kWarn, EventContext::hide},
+        {true, "*", EventLevels::kOff, EventContext::with},
         {true, "microsoft-windows-grouppolicy/operational", EventLevels::kWarn,
-         true},
+         EventContext::with},
     };
 
     for (int i = 0; i < 4; ++i) {
-        cma::provider::LogWatchEntry lwe;
+        provider::LogWatchEntry lwe;
         lwe.loadFromMapNode(logfiles[i]);
         EXPECT_EQ(lwe.name(), base[i].name_);
         EXPECT_EQ(lwe.level(), base[i].level_);

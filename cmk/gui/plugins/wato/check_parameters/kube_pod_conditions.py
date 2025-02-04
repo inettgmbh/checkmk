@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,16 +16,23 @@ from cmk.gui.valuespec import Dictionary
 def _parameter_valuespec():
     return Dictionary(
         help=_(
-            (
-                "A Pod's status depends on an array of conditions through which the"
-                " Pod has or has not yet passed. You can set a time for how long a condition"
-                " is allowed to be in a failed state before the check alerts."
-            )
+            "A Pod's status depends on an array of conditions through which the"
+            " Pod has or has not yet passed. You can set a time for how long a condition"
+            " is allowed to be in a failed state before the check alerts."
         ),
         elements=[
             (
                 "scheduled",
                 age_levels_dropdown(_("Time until alert, if PODSCHEDULED condition is false")),
+            ),
+            (
+                "hasnetwork",  # If we decide against being backwards compatible, then we should rename this field.
+                age_levels_dropdown(
+                    _(
+                        "Time until alert, if PODREADYTOSTARTCONTAINERS (PODHASNETWORK in "
+                        "Kubernetes version 1.27 and below) condition is false"
+                    )
+                ),
             ),
             (
                 "initialized",

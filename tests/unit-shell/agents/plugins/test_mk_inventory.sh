@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -78,7 +78,8 @@ test__load_config_cfg_does_not_exist_bash() {
 
 test__load_config_cfg_does_not_exist_posix() {
     unset INVENTORY_INTERVAL
-    INVENTORY_INTERVAL=$(# scope effect of set -o posix
+    # The subshell below is used to scope the effect of "set -o posix".
+    INVENTORY_INTERVAL=$(
         set -o posix
         _load_config "does_not_exist.cfg"
         echo "$INVENTORY_INTERVAL"

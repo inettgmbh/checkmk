@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -44,7 +44,7 @@ def _parameter_valuespec_skype():
             (
                 "failed_locations_requests",
                 Dictionary(
-                    title=_("Failed Get Locations Requests"),
+                    title=_("Failed get locations requests"),
                     elements=[
                         (
                             "upper",
@@ -70,7 +70,7 @@ def _parameter_valuespec_skype():
             (
                 "failed_file_requests",
                 Dictionary(
-                    title=_("Failed requests to Adressbook files"),
+                    title=_("Failed requests to adress book files"),
                     elements=[
                         (
                             "upper",
@@ -132,7 +132,7 @@ def _parameter_valuespec_skype():
             (
                 "timedout_ad_requests",
                 Dictionary(
-                    title=_("Timed out Active Directory Requests"),
+                    title=_("Timed out Active Directory requests"),
                     elements=[
                         (
                             "upper",
@@ -158,7 +158,7 @@ def _parameter_valuespec_skype():
             (
                 "5xx_responses",
                 Dictionary(
-                    title=_("HTTP 5xx Responses"),
+                    title=_("HTTP 5xx responses"),
                     elements=[
                         (
                             "upper",
@@ -184,7 +184,7 @@ def _parameter_valuespec_skype():
             (
                 "asp_requests_rejected",
                 Dictionary(
-                    title=_("ASP Requests Rejected"),
+                    title=_("ASP requests rejected"),
                     elements=[
                         (
                             "upper",

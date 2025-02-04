@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+
 """Editor for global settings in main.mk and modes for these global
 settings"""
 
 import abc
-from typing import Any, Collection, Final, Iterable, Iterator, Optional, Type
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from typing import Any, Final
 
-import cmk.utils.version as cmk_version
+from cmk.ccc.exceptions import MKGeneralException
 
-import cmk.gui.forms as forms
-import cmk.gui.utils.escaping as escaping
 import cmk.gui.watolib.changes as _changes
+from cmk.gui import forms
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.config import active_config
-from cmk.gui.exceptions import MKAuthException, MKGeneralException, MKUserError
+from cmk.gui.exceptions import MKAuthException, MKUserError
+from cmk.gui.global_config import get_global_config
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
@@ -23,6 +26,7 @@ from cmk.gui.i18n import _
 from cmk.gui.log import logger
 from cmk.gui.logged_in import user
 from cmk.gui.page_menu import (
+    get_search_expression,
     make_confirmed_form_submit_link,
     make_display_options_dropdown,
     make_simple_form_page_menu,
@@ -33,31 +37,46 @@ from cmk.gui.page_menu import (
     PageMenuSearch,
     PageMenuTopic,
 )
-from cmk.gui.plugins.wato.utils import get_search_expression, mode_registry
-from cmk.gui.plugins.wato.utils.base_modes import mode_url, redirect, WatoMode
-from cmk.gui.plugins.watolib.utils import (
+from cmk.gui.type_defs import ActionResult, GlobalSettings, PermissionName
+from cmk.gui.utils import escaping
+from cmk.gui.utils.csrf_token import check_csrf_token
+from cmk.gui.utils.flashed_messages import flash
+from cmk.gui.utils.html import HTML
+from cmk.gui.utils.transaction_manager import transactions
+from cmk.gui.utils.urls import makeactionuri, makeuri_contextless
+from cmk.gui.valuespec import Checkbox, Transform, ValueSpec
+from cmk.gui.watolib.config_domain_name import (
     ABCConfigDomain,
     config_variable_group_registry,
     config_variable_registry,
     ConfigVariable,
     ConfigVariableGroup,
 )
-from cmk.gui.type_defs import ActionResult, PermissionName
-from cmk.gui.utils.escaping import escape_to_html
-from cmk.gui.utils.flashed_messages import flash
-from cmk.gui.utils.html import HTML
-from cmk.gui.utils.transaction_manager import transactions
-from cmk.gui.utils.urls import makeactionuri, makeuri_contextless
-from cmk.gui.valuespec import Checkbox, Transform
-from cmk.gui.watolib.config_domains import ConfigDomainCore
+from cmk.gui.watolib.config_domains import ConfigDomainCACertificates, ConfigDomainCore
 from cmk.gui.watolib.global_settings import load_configuration_settings, save_global_settings
 from cmk.gui.watolib.hosts_and_folders import folder_preserving_link
+from cmk.gui.watolib.mode import mode_url, ModeRegistry, redirect, WatoMode
 from cmk.gui.watolib.search import (
     ABCMatchItemGenerator,
-    match_item_generator_registry,
     MatchItem,
+    MatchItemGeneratorRegistry,
     MatchItems,
 )
+
+
+def register(
+    mode_registry: ModeRegistry,
+    match_item_generator_registry: MatchItemGeneratorRegistry,
+) -> None:
+    mode_registry.register(DefaultModeEditGlobals)
+    mode_registry.register(DefaultModeEditGlobalSetting)
+    match_item_generator_registry.register(
+        MatchItemGeneratorSettings(
+            "global_settings",
+            _("Global settings"),
+            DefaultModeEditGlobals,
+        )
+    )
 
 
 class ABCGlobalSettingsMode(WatoMode):
@@ -68,7 +87,7 @@ class ABCGlobalSettingsMode(WatoMode):
         super().__init__()
 
         self._default_values = ABCConfigDomain.get_all_default_globals()
-        self._global_settings: dict[str, Any] = {}
+        self._global_settings: GlobalSettings = {}
         self._current_settings: dict[str, Any] = {}
 
     def _from_vars(self):
@@ -110,14 +129,14 @@ class ABCGlobalSettingsMode(WatoMode):
     def _should_show_config_variable(self, config_variable: ConfigVariable) -> bool:
         varname = config_variable.ident()
 
-        if not config_variable.domain().enabled():
+        if not (domain := config_variable.domain()).enabled():
             return False
 
-        if config_variable.domain() == ConfigDomainCore and varname not in self._default_values:
+        if isinstance(domain, ConfigDomainCore) and varname not in self._default_values:
             if active_config.debug:
                 raise MKGeneralException(
                     "The configuration variable <tt>%s</tt> is unknown to "
-                    "your local Check_MK installation" % varname
+                    "your local Checkmk installation" % varname
                 )
             return False
 
@@ -125,6 +144,31 @@ class ABCGlobalSettingsMode(WatoMode):
             return False
 
         return True
+
+    def _extend_display_dropdown(self, menu: PageMenu) -> None:
+        display_dropdown = menu.get_dropdown_by_name("display", make_display_options_dropdown())
+        display_dropdown.topics.insert(
+            0,
+            PageMenuTopic(
+                title=_("Details"),
+                entries=list(self._page_menu_entries_details()),
+            ),
+        )
+
+    def _page_menu_entries_details(self) -> Iterator[PageMenuEntry]:
+        yield PageMenuEntry(
+            title=_("Show only modified settings"),
+            icon_name="toggle_on" if self._show_only_modified else "toggle_off",
+            item=make_simple_link(
+                makeactionuri(
+                    request,
+                    transactions,
+                    [
+                        ("_show_only_modified", "0" if self._show_only_modified else "1"),
+                    ],
+                )
+            ),
+        )
 
     def iter_all_configuration_variables(
         self,
@@ -142,17 +186,21 @@ class ABCGlobalSettingsMode(WatoMode):
             for group in sorted(self._groups(), key=lambda g: g.sort_index())
         )
 
-    def _show_configuration_variables(self) -> None:  # pylint: disable=too-many-branches
+    def _show_configuration_variables(self) -> None:
         search = self._search
 
         at_least_one_painted = False
         html.open_div(class_="globalvars")
+        global_config = get_global_config()
         for group, config_variables in self.iter_all_configuration_variables():
             header_is_painted = False  # needed for omitting empty groups
 
             for config_variable in config_variables:
                 varname = config_variable.ident()
                 valuespec = config_variable.valuespec()
+
+                if not global_config.global_settings.is_activated(varname):
+                    continue
 
                 if self._show_only_modified and varname not in self._current_settings:
                     continue
@@ -174,6 +222,8 @@ class ABCGlobalSettingsMode(WatoMode):
                 if not header_is_painted:
                     # always open headers when searching
                     forms.header(group.title(), isopen=bool(search) or self._show_only_modified)
+                    if warning := group.warning():
+                        forms.warning_message(warning)
                     header_is_painted = True
 
                 default_value = self._default_values[varname]
@@ -213,7 +263,7 @@ class ABCGlobalSettingsMode(WatoMode):
 
                 if varname in self._current_settings:
                     modified_cls = ["modified"]
-                    value_title: Optional[str] = _("This option has been modified.")
+                    value_title: str | None = _("This option has been modified.")
                 elif varname in self._global_settings:
                     modified_cls = ["modified globally"]
                     value_title = _("This option has been modified in global settings.")
@@ -229,12 +279,12 @@ class ABCGlobalSettingsMode(WatoMode):
                     )
                     html.toggle_switch(
                         enabled=value,
-                        help_txt=_("Immediately toggle this setting"),
+                        help_txt=(value_title + " " if value_title else "")
+                        + _("Click to toggle this setting"),
                         href=makeactionuri(
                             request, transactions, [("_action", "toggle"), ("_varname", varname)]
                         ),
-                        class_=modified_cls,
-                        title=value_title,
+                        class_=[*modified_cls, "large"],
                     )
                     html.close_div()
 
@@ -262,10 +312,12 @@ class ABCEditGlobalSettingMode(WatoMode):
         if not self._may_edit_configvar(self._varname):
             raise MKAuthException(_("You are not permitted to edit this global setting."))
 
-        self._current_settings = load_configuration_settings()
-        self._global_settings = {}
+        self._current_settings = dict(load_configuration_settings())
+        self._global_settings: GlobalSettings = {}
 
     def _may_edit_configvar(self, varname):
+        if not get_global_config().global_settings.is_activated(varname):
+            return False
         if varname in ["actions"]:
             return user.may("wato.add_or_modify_executables")
         return True
@@ -288,10 +340,8 @@ class ABCEditGlobalSettingMode(WatoMode):
                 item=make_confirmed_form_submit_link(
                     form_name="value_editor",
                     button_name="_reset",
-                    message=_(
-                        "Do you really want to reset this configuration variable "
-                        "back to its default value?"
-                    ),
+                    title=_("Reset configuration variable to default value"),
+                    confirm_button=_("Reset"),
                 ),
                 is_enabled=reset_possible,
                 is_shortcut=True,
@@ -302,6 +352,8 @@ class ABCEditGlobalSettingMode(WatoMode):
         return menu
 
     def action(self) -> ActionResult:
+        check_csrf_token()
+
         if request.var("_reset"):
             if not transactions.check_transaction():
                 return None
@@ -311,14 +363,16 @@ class ABCEditGlobalSettingMode(WatoMode):
             except KeyError:
                 pass
 
-            msg = escape_to_html(
+            msg = HTML.with_escaping(
                 _("Resetted configuration variable %s to its default.") % self._varname
             )
         else:
             new_value = self._valuespec.from_html_vars("ve")
             self._valuespec.validate_value(new_value, "ve")
+
+            current = self._current_settings.get(self._varname)
             self._current_settings[self._varname] = new_value
-            msg = HTML(
+            msg = HTML.without_escaping(
                 _("Changed global configuration variable %s to %s.")
                 % (
                     escaping.escape_attribute(self._varname),
@@ -327,12 +381,18 @@ class ABCEditGlobalSettingMode(WatoMode):
             )
 
         self._save()
+        if self._varname == "trusted_certificate_authorities":
+            ConfigDomainCACertificates.log_changes(current, new_value)
         _changes.add_change(
             "edit-configvar",
             msg,
             sites=self._affected_sites(),
-            domains=[self._config_variable.domain()],
+            domains=[(domain := self._config_variable.domain())],
             need_restart=self._config_variable.need_restart(),
+            need_apache_reload=self._config_variable.need_apache_reload(),
+            domain_settings={
+                domain.ident(): {"need_apache_reload": self._config_variable.need_apache_reload()}
+            },
         )
 
         return redirect(self._back_url())
@@ -351,6 +411,11 @@ class ABCEditGlobalSettingMode(WatoMode):
     def _is_configured(self) -> bool:
         return self._varname in self._current_settings
 
+    def _vue_field_id(self):
+        # Note: this _underscore is critical because of the hidden vars special behaviour
+        # Non _ vars are always added as hidden vars into a form
+        return "_vue_global_settings"
+
     def page(self) -> None:
         is_configured = self._is_configured()
         is_configured_globally = self._varname in self._global_settings
@@ -366,76 +431,77 @@ class ABCEditGlobalSettingMode(WatoMode):
         if hint:
             html.show_warning(hint)
 
-        html.begin_form("value_editor", method="POST")
-        title = self._valuespec.title()
-        assert isinstance(title, str)
-        forms.header(title)
-        if not active_config.wato_hide_varnames:
-            forms.section(_("Configuration variable:"))
-            html.tt(self._varname)
+        with html.form_context("value_editor", method="POST"):
+            title = self._valuespec.title()
+            assert isinstance(title, str)
+            forms.header(title)
+            if not active_config.wato_hide_varnames:
+                forms.section(_("Configuration variable:"))
+                html.tt(self._varname)
 
-        forms.section(_("Current setting"))
-        self._valuespec.render_input("ve", value)
-        self._valuespec.set_focus("ve")
-        html.help(self._valuespec.help())
+            forms.section(_("Current setting"))
+            self._valuespec.render_input("ve", value)
+            self._valuespec.set_focus("ve")
+            html.help(self._valuespec.help())
 
-        if is_configured_globally:
-            self._show_global_setting()
+            if is_configured_globally:
+                self._show_global_setting()
 
-        forms.section(_("Factory setting"))
-        html.write_text(self._valuespec.value_to_html(defvalue))
+            forms.section(_("Factory setting"))
+            html.write_text_permissive(self._valuespec.value_to_html(defvalue))
 
-        forms.section(_("Current state"))
-        if is_configured_globally:
-            html.write_text(
-                _('This variable is configured in <a href="%s">global settings</a>.')
-                % ("wato.py?mode=edit_configvar&varname=%s" % self._varname)
-            )
-        elif not is_configured:
-            html.write_text(_("This variable is at factory settings."))
-        else:
-            curvalue = self._current_settings[self._varname]
-            if is_configured_globally and curvalue == self._global_settings[self._varname]:
-                html.write_text(_("Site setting and global setting are identical."))
-            elif curvalue == defvalue:
-                html.write_text(_("Your setting and factory settings are identical."))
+            forms.section(_("Current state"))
+            if is_configured_globally:
+                html.write_text_permissive(
+                    _('This variable is configured in <a href="%s">global settings</a>.')
+                    % ("wato.py?mode=edit_configvar&varname=%s" % self._varname)
+                )
+            elif not is_configured:
+                html.write_text_permissive(_("This variable is at factory settings."))
             else:
-                html.write_text(self._valuespec.value_to_html(curvalue))
+                curvalue = self._current_settings[self._varname]
+                if is_configured_globally and curvalue == self._global_settings[self._varname]:
+                    html.write_text_permissive(_("Site setting and global setting are identical."))
+                elif curvalue == defvalue:
+                    html.write_text_permissive(
+                        _("Your setting and factory settings are identical.")
+                    )
+                else:
+                    html.write_text_permissive(self._valuespec.value_to_html(curvalue))
 
-        forms.end()
-        html.hidden_fields()
-        html.end_form()
+            forms.end()
+            html.hidden_fields()
 
     def _show_global_setting(self):
         pass
 
 
-@mode_registry.register
 class ModeEditGlobals(ABCGlobalSettingsMode):
     @classmethod
     def name(cls) -> str:
         return "globalvars"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["global"]
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        page_menu_dropdowns_postprocess: Callable[
+            [Sequence[PageMenuDropdown]], list[PageMenuDropdown]
+        ],
+    ) -> None:
         super().__init__()
-        self._current_settings = load_configuration_settings()
+        self._current_settings = dict(load_configuration_settings())
+        self._page_menu_dropdowns_postprocess = page_menu_dropdowns_postprocess
 
     def title(self) -> str:
         if self._search:
-            return _("Global settings matching '%s'") % escape_to_html(self._search)
+            return _("Global settings matching '%s'") % self._search
         return _("Global settings")
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
         dropdowns = []
-
-        if cmk_version.is_managed_edition():
-            import cmk.gui.cme.plugins.wato.managed  # pylint: disable=no-name-in-module,import-outside-toplevel
-
-            dropdowns.append(cmk.gui.cme.plugins.wato.managed.cme_global_settings_dropdown())
 
         dropdowns.append(
             PageMenuDropdown(
@@ -449,6 +515,8 @@ class ModeEditGlobals(ABCGlobalSettingsMode):
                 ],
             ),
         )
+
+        dropdowns = self._page_menu_dropdowns_postprocess(dropdowns)
 
         menu = PageMenu(
             dropdowns=dropdowns,
@@ -464,31 +532,6 @@ class ModeEditGlobals(ABCGlobalSettingsMode):
             title=_("Sites"),
             icon_name="sites",
             item=make_simple_link("wato.py?mode=sites"),
-        )
-
-    def _extend_display_dropdown(self, menu: PageMenu) -> None:
-        display_dropdown = menu.get_dropdown_by_name("display", make_display_options_dropdown())
-        display_dropdown.topics.insert(
-            0,
-            PageMenuTopic(
-                title=_("Details"),
-                entries=list(self._page_menu_entries_details()),
-            ),
-        )
-
-    def _page_menu_entries_details(self) -> Iterator[PageMenuEntry]:
-        yield PageMenuEntry(
-            title=_("Show all settings"),
-            icon_name="checked_checkbox" if self._show_only_modified else "checkbox",
-            item=make_simple_link(
-                makeactionuri(
-                    request,
-                    transactions,
-                    [
-                        ("_show_only_modified", "0" if self._show_only_modified else "1"),
-                    ],
-                )
-            ),
         )
 
     def action(self) -> ActionResult:
@@ -517,8 +560,12 @@ class ModeEditGlobals(ABCGlobalSettingsMode):
         _changes.add_change(
             "edit-configvar",
             msg,
-            domains=[config_variable.domain()],
+            domains=[(domain := config_variable.domain())],
             need_restart=config_variable.need_restart(),
+            need_apache_reload=config_variable.need_apache_reload(),
+            domain_settings={
+                domain.ident(): {"need_apache_reload": config_variable.need_apache_reload()}
+            },
         )
 
         if action == "_reset":
@@ -529,18 +576,22 @@ class ModeEditGlobals(ABCGlobalSettingsMode):
         self._show_configuration_variables()
 
 
-@mode_registry.register
+class DefaultModeEditGlobals(ModeEditGlobals):
+    def __init__(self) -> None:
+        super().__init__(list)
+
+
 class ModeEditGlobalSetting(ABCEditGlobalSettingMode):
     @classmethod
     def name(cls) -> str:
         return "edit_configvar"
 
-    @classmethod
-    def permissions(cls) -> Collection[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["global"]
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeEditGlobals
 
     def title(self) -> str:
@@ -553,7 +604,13 @@ class ModeEditGlobalSetting(ABCEditGlobalSettingMode):
         return ModeEditGlobals.mode_url()
 
 
-def is_a_checkbox(vs) -> bool:
+class DefaultModeEditGlobalSetting(ModeEditGlobalSetting):
+    @classmethod
+    def parent_mode(cls) -> type[WatoMode] | None:
+        return DefaultModeEditGlobals
+
+
+def is_a_checkbox(vs: ValueSpec) -> bool:
     """Checks if a valuespec is a Checkbox"""
     if isinstance(vs, Checkbox):
         return True
@@ -571,11 +628,11 @@ class MatchItemGeneratorSettings(ABCMatchItemGenerator):
         # RuntimeError("Working outside of request context.")
         # when registering below due to
         # ABCGlobalSettingsMode.__init__ --> _from_vars --> get_search_expression)
-        mode_class: Type[ABCGlobalSettingsMode],
+        mode_class: type[ABCGlobalSettingsMode],
     ) -> None:
         super().__init__(name)
         self._topic: Final[str] = topic
-        self._mode_class: Final[Type[ABCGlobalSettingsMode]] = mode_class
+        self._mode_class: Final[type[ABCGlobalSettingsMode]] = mode_class
 
     def _config_variable_to_match_item(
         self,
@@ -610,12 +667,3 @@ class MatchItemGeneratorSettings(ABCMatchItemGenerator):
     @property
     def is_localization_dependent(self) -> bool:
         return True
-
-
-match_item_generator_registry.register(
-    MatchItemGeneratorSettings(
-        "global_settings",
-        _("Global settings"),
-        ModeEditGlobals,
-    )
-)

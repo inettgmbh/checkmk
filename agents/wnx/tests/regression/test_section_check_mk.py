@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import re
-from typing import Optional
 
 import pytest
 
@@ -17,7 +15,7 @@ class Globals:
     section = "check_mk"
     alone = True
     output_file = "agentoutput.txt"
-    only_from: Optional[str] = None
+    only_from: str | None = None
     ipv4_to_ipv6 = {"127.0.0.1": "0:0:0:0:0:ffff:7f00:1", "10.1.2.3": "0:0:0:0:0:ffff:a01:203"}
 
 
@@ -56,13 +54,17 @@ def testconfig_only_from_engine(request, testconfig_host):
 
 
 # live example of valid output
-"""
+_EXAMPLE = """
 <<<check_mk>>>
-Version: 2.0.0i1
-BuildDate: Jun  7 2019
+Version: 2.3.0-2024.03.15
+BuildDate: Mar 15 2024
 AgentOS: windows
-Hostname: SERG-DELL
-Architecture: 32bit
+Hostname: klapp-0336
+Architecture: 64bit
+OSName: Microsoft Windows 10 Pro
+OSVersion: 10.0.19045
+OSType: windows
+Time: 2024-03-19T13:42:18+0100
 WorkingDirectory: c:\\dev\\shared
 ConfigFile: c:\\dev\\shared\\check_mk.yml
 LocalConfigFile: C:\\ProgramData\\checkmk\\agent\\check_mk.user.yml
@@ -95,20 +97,18 @@ def make_only_from_array(ipv4):
 
 @pytest.fixture(name="expected_output")
 def expected_output_engine():
-    drive_letter = r"[A-Z]:"
     ipv4 = Globals.only_from.split() if Globals.only_from is not None else None
-    ___pip = make_only_from_array(ipv4)
     expected = [
-        # Note: The first two lines are output with crash_debug = yes in 1.2.8
-        # but no longer in 1.4.0:
-        # r'<<<logwatch>>>\',
-        # r'[[[Check_MK Agent]]]','
         r"<<<%s>>>" % Globals.section,
         r"Version: \d+\.\d+\.\d+([bi]\d+)?(p\d+)?",
         r"BuildDate: [A-Z][a-z]{2} (\d{2}| \d) \d{4}",
         r"AgentOS: windows",
         r"Hostname: .+",
         r"Architecture: \d{2}bit",
+        r"OSName: Microsoft .+",
+        r"OSVersion: 10.+",
+        r"OSType: windows",
+        r"Time: 20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d[\+,-]\d\d\d\d",
         r"WorkingDirectory: %s" % (re.escape(os.getcwd())),
         r"ConfigFile: %s" % (re.escape(get_main_yaml_name(root_dir))),
         r"LocalConfigFile: %s" % (re.escape(get_user_yaml_name(user_dir))),
@@ -120,20 +120,8 @@ def expected_output_engine():
         r"LogDirectory: %s" % (re.escape(os.path.join(user_dir, "log"))),
         r"SpoolDirectory: %s" % (re.escape(os.path.join(user_dir, "spool"))),
         r"LocalDirectory: %s" % (re.escape(os.path.join(user_dir, "local"))),
-        # r'ScriptStatistics: Plugin C:0 E:0 T:0 Local C:0 E:0 T:0',
-        # Note: The following three lines are output with crash_debug = yes in
-        # 1.2.8 but no longer in 1.4.0:
-        # r'ConnectionLog: %s%s' %
-        # (drive_letter,
-        #  re.escape(os.path.join(exec_dir, 'log', 'connection.log'))),
-        # r'CrashLog: %s%s' %
-        # (drive_letter,
-        #  re.escape(os.path.join(exec_dir, 'log', 'crash.log'))),
-        # r'SuccessLog: %s%s' %
-        # (drive_letter,
-        #  re.escape(os.path.join(exec_dir, 'log', 'success.log'))),
         (
-            r"OnlyFrom: %s %s" % tuple([i4 for i4 in make_only_from_array(ipv4)])
+            r"OnlyFrom: %s %s" % tuple(make_only_from_array(ipv4))
             if Globals.only_from
             else r"OnlyFrom: "
         ),
@@ -144,7 +132,7 @@ def expected_output_engine():
     return expected
 
 
-def test_section_check_mk(  # type:ignore[no-untyped-def]
+def test_section_check_mk(  # type: ignore[no-untyped-def]
     request, testconfig_only_from, expected_output, actual_output, testfile
 ) -> None:
     # request.node.name gives test name

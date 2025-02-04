@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 r"""
@@ -7,11 +7,14 @@ Send notification messages to PagerDuty
 =======================================
 
 """
+
 from typing import Any
 
 from cmk.notification_plugins.utils import (
+    get_password_from_env_or_context,
     host_url_from_context,
-    retrieve_from_passwordstore,
+    post_request,
+    process_by_status_code,
     service_url_from_context,
 )
 
@@ -47,7 +50,7 @@ def _notification_source_from_context(context: dict[str, str]) -> str:
     return context.get("HOSTADDRESS") or context.get("HOSTNAME") or "Undeclared Host identifier"
 
 
-def pagerduty_msg(context: dict[str, str]) -> dict[str, Any]:
+def _pagerduty_msg(context: dict[str, str]) -> dict[str, Any]:
     """Build the PagerDuty incident payload"""
 
     if context.get("WHAT") == "SERVICE":
@@ -64,7 +67,9 @@ def pagerduty_msg(context: dict[str, str]) -> dict[str, Any]:
         incident_url = host_url_from_context(context)
 
     msg_payload = {
-        "routing_key": retrieve_from_passwordstore(context["PARAMETER_ROUTING_KEY"]),
+        "routing_key": get_password_from_env_or_context(
+            key="PARAMETER_ROUTING_KEY", context=context
+        ),
         "event_action": pagerduty_event_type(context["NOTIFICATIONTYPE"]),
         "dedup_key": incident_key,
         "payload": {
@@ -82,3 +87,9 @@ def pagerduty_msg(context: dict[str, str]) -> dict[str, Any]:
         msg_payload.update({"client": "Check_MK", "client_url": incident_url})
 
     return msg_payload
+
+
+def main() -> int:
+    # PagerDuty replies with 202 because the request is further processed
+    # by them. Thus their reply only includes field validation checks.
+    return process_by_status_code(post_request(_pagerduty_msg), success_code=202)

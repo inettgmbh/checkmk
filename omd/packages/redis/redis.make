@@ -1,39 +1,28 @@
 REDIS := redis
 REDIS_VERS := 6.2.6
 REDIS_DIR := $(REDIS)-$(REDIS_VERS)
-# Increase this to enforce a recreation of the build cache
-REDIS_BUILD_ID := 1
 
-REDIS_UNPACK := $(BUILD_HELPER_DIR)/$(REDIS_DIR)-unpack
 REDIS_BUILD := $(BUILD_HELPER_DIR)/$(REDIS_DIR)-build
-REDIS_INTERMEDIATE_INSTALL := $(BUILD_HELPER_DIR)/$(REDIS_DIR)-install-intermediate
-REDIS_CACHE_PKG_PROCESS := $(BUILD_HELPER_DIR)/$(REDIS_DIR)-cache-pkg-process
 REDIS_INSTALL := $(BUILD_HELPER_DIR)/$(REDIS_DIR)-install
 
-REDIS_INSTALL_DIR := $(INTERMEDIATE_INSTALL_BASE)/$(REDIS_DIR)
-REDIS_BUILD_DIR := $(PACKAGE_BUILD_DIR)/$(REDIS_DIR)
-#REDIS_WORK_DIR := $(PACKAGE_WORK_DIR)/$(REDIS_DIR)
+.PHONY: $(REDIS_BUILD)
+$(REDIS_BUILD):
+	$(BAZEL_CMD) build @$(REDIS)//:build
+	$(BAZEL_CMD) build @$(REDIS)//:skel
 
-$(REDIS_BUILD): $(REDIS_UNPACK)
-	$(MAKE) -C $(REDIS_BUILD_DIR)
-	$(TOUCH) $@
-
-REDIS_CACHE_PKG_PATH := $(call cache_pkg_path,$(REDIS_DIR),$(REDIS_BUILD_ID))
-
-$(REDIS_CACHE_PKG_PATH):
-	$(call pack_pkg_archive,$@,$(REDIS_DIR),$(REDIS_BUILD_ID),$(REDIS_INTERMEDIATE_INSTALL))
-
-$(REDIS_CACHE_PKG_PROCESS): $(REDIS_CACHE_PKG_PATH)
-	$(call unpack_pkg_archive,$(REDIS_CACHE_PKG_PATH),$(REDIS_DIR))
-	$(call upload_pkg_archive,$(REDIS_CACHE_PKG_PATH),$(REDIS_DIR),$(REDIS_BUILD_ID))
-	$(TOUCH) $@
-
-$(REDIS_INTERMEDIATE_INSTALL): $(REDIS_BUILD)
-	$(MAKE) -C $(REDIS_BUILD_DIR) PREFIX=$(REDIS_INSTALL_DIR) install
-	$(MKDIR) $(REDIS_INSTALL_DIR)/skel/var/redis
-	$(TOUCH) $@
-
-
-$(REDIS_INSTALL): $(REDIS_CACHE_PKG_PROCESS)
-	$(RSYNC) $(REDIS_INSTALL_DIR)/ $(DESTDIR)$(OMD_ROOT)/
-	$(TOUCH) $@
+.PHONY: $(REDIS_INSTALL)
+$(REDIS_INSTALL): $(REDIS_BUILD)
+	$(RSYNC) --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rwx,Fg=rx,Fo=rx $(BAZEL_BIN_EXT)/redis/bin $(DESTDIR)$(OMD_ROOT)/
+	$(RSYNC) --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rwx,Fg=rwx,Fo=rx $(BAZEL_BIN_EXT)/redis/skeleton/ $(DESTDIR)$(OMD_ROOT)/skel
+	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/skel/etc/rc.d/
+	cd $(DESTDIR)$(OMD_ROOT)/skel/etc/rc.d/ && \
+	$(LN) -sf ../init.d/redis 40-redis
+	# Quick hack to get rid of old artifacts fetched from workspace
+	if [ -f "$(DESTDIR)$(OMD_ROOT)/skel/etc/rc.d/85-redis" ]; then \
+		rm -f "$(DESTDIR)$(OMD_ROOT)/skel/etc/rc.d/85-redis"; \
+	fi
+	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/skel/var/redis
+	chmod 640 $(DESTDIR)$(OMD_ROOT)/skel/etc/logrotate.d/redis
+	chmod 750 $(DESTDIR)$(OMD_ROOT)/skel/etc/redis
+	chmod 640 $(DESTDIR)$(OMD_ROOT)/skel/etc/redis/redis.conf
+	chmod 750 $(DESTDIR)$(OMD_ROOT)/skel/etc/init.d/redis

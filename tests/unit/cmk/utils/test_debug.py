@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import cmk.utils.debug
+import cmk.ccc.debug
 
 
 def test_toggle() -> None:
-    cmk.utils.debug.enable()
+    cmk.ccc.debug.enable()
 
-    assert cmk.utils.debug.enabled() is True
-    assert cmk.utils.debug.disabled() is False
+    assert cmk.ccc.debug.enabled() is True
 
-    cmk.utils.debug.disable()
+    cmk.ccc.debug.disable()
 
-    assert cmk.utils.debug.enabled() is False
-    assert cmk.utils.debug.disabled() is True
+    assert cmk.ccc.debug.enabled() is False

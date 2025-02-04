@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -15,17 +15,22 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import logging
 import os
 import sys
-from typing import List
 
 sys.path.insert(0, os.path.abspath("../../../"))
+sys.path.insert(0, os.path.abspath("../../../packages/cmk-agent-based"))
+sys.path.insert(0, os.path.abspath("../../../packages/cmk-crypto"))
+sys.path.insert(0, os.path.abspath("../../../packages/cmk-graphing"))
+sys.path.insert(0, os.path.abspath("../../../packages/cmk-rulesets"))
+sys.path.insert(0, os.path.abspath("../../../packages/cmk-server-side-calls"))
 
 # -- Project information -----------------------------------------------------
 
-project = "Checkmk's Plugin API"
-copyright = "2020, tribe29 GmbH"  # pylint: disable=redefined-builtin
-author = "tribe29"
+project = "Checkmk's Plug-in APIs"
+copyright = "2023, Checkmk GmbH"  # noqa: A001
+author = "Checkmk GmbH"
 
 # -- General configuration ---------------------------------------------------
 
@@ -39,13 +44,41 @@ extensions = [
     "sphinx_rtd_theme",
 ]
 
+# Ignore unneeded dependencies during sphinx doc build time for now.
+#
+# The better way to deal with it would be to create a dedicated venv for the plugin API doc
+# generator which pulls in our packages as dependencies. This way we would ensure that all
+# dependencies are available during the sphinx execution. But since the documented modules
+# cmk.base.plugins.bakery.bakery_api and
+# cmk.cee.dcd.plugins.connectors.connectors_api
+# are not separate packages right now, we can not move on with this.
+autodoc_mock_imports = [
+    "cmk.trace",
+    "livestatus",
+    "cryptography",
+]
+
+suppress_warnings = [
+    # Our v1 and v2 APIs expose Result and Metric which is totally fine. Silence the warning.
+    "ref.python",
+]
+
+# The warnings "*:docstring of cmk.agent_based.v1._value_store_utils.GetRateError:1: WARNING:
+# duplicate object description of cmk.agent_based.v1._value_store_utils.GetRateError, other instance
+# in cmk.agent_based/v1, use :no-index: for one of them" is similar to the warning suppressed above
+# and built like this intentionally. Since this warning can not be suppressed using the sphinx
+# suppress_warnings feature we filter out the log message.
+logging.getLogger("sphinx").addFilter(
+    lambda s: "duplicate object description of cmk.agent_based.v1" not in s.getMessage()
+)
+
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = []
+exclude_patterns: list[str] = []
 
 # Instead of absolute module names like "cmk.gui.plugins.dashboard.dashboard_api.v0.IFrameDashlet",
 # that fill the whole page, use the plain module local names of the classes.

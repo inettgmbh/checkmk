@@ -1,5 +1,5 @@
 param ([switch] $Debug)
-$CMK_VERSION = "2.2.0i1"
+$CMK_VERSION = "2.5.0b1"
 ## VEEAM Backups
 ## This powershell script needs to be run with the 64bit powershell
 ## and thus from a 64bit check_mk agent
@@ -66,7 +66,8 @@ foreach ($mycdpjobs in $cdpjobs)
 	$MyCdpJobsName = $mycdpjobs.Name -replace "\'","_" -replace " ","_"
 
 	$MyCdpJobsNextRun = $mycdpjobs.NextRun
-    $MyCdpJobsNextRun = get-date -date $MyCdpJobsNextRun -Uformat %s
+	if ($MyCdpJobsNextRun -ne $null) { $MyCdpJobsNextRun = get-date -date $MyCdpJobsNextRun -Uformat %s }
+	else { $MyCdpJobsNextRun = "null" }
 
 	$MyCdpJobsPolicyState = $mycdpjobs.PolicyState
 

@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# ruff: noqa: A005
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pprint
 import re
+import time
+import typing
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union
+from typing import Any, Literal, overload
+
+from flask import current_app, session
+
+import cmk.ccc.version as cmk_version
 
 import cmk.utils.paths
-import cmk.utils.version as cmk_version
 
-import cmk.gui.log as log
-import cmk.gui.utils as utils
-import cmk.gui.utils.escaping as escaping
+from cmk.gui import log, utils
 from cmk.gui.config import active_config
 from cmk.gui.ctx_stack import request_local_attr
 from cmk.gui.exceptions import MKUserError
@@ -24,6 +31,8 @@ from cmk.gui.http import Request
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
 from cmk.gui.page_menu_entry import enable_page_menu_entry
+from cmk.gui.theme import Theme
+from cmk.gui.theme.current_theme import theme
 from cmk.gui.type_defs import (
     Choice,
     ChoiceGroup,
@@ -33,10 +42,10 @@ from cmk.gui.type_defs import (
     GroupedChoices,
     Icon,
 )
+from cmk.gui.utils import escaping
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.output_funnel import OutputFunnel
 from cmk.gui.utils.popups import PopupMethod
-from cmk.gui.utils.theme import theme
 from cmk.gui.utils.transaction_manager import transactions
 from cmk.gui.utils.urls import doc_reference_url, DocReference, requested_file_name
 from cmk.gui.utils.user_errors import user_errors
@@ -51,6 +60,26 @@ from .tag_rendering import (
     render_end_tag,
     render_start_tag,
 )
+from .type_defs import RequireConfirmation
+
+
+class _Manifest(typing.NamedTuple):
+    main: str
+    main_stylesheets: list[str]
+    stage1: str
+
+
+def inject_js_profiling_code():
+    return active_config.inject_js_profiling_code or html.request.has_var(
+        "inject_js_profiling_code"
+    )
+
+
+EncType = typing.Literal[
+    "application/x-url-encoded",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+]
 
 
 class HTMLGenerator(HTMLWriter):
@@ -66,11 +95,10 @@ class HTMLGenerator(HTMLWriter):
         self._logger = log.logger.getChild("html")
         self._header_sent = False
         self._body_classes = ["main"]
-        self._default_javascripts = ["main"]
         self.have_help = False
 
         # Forms
-        self.form_name: Optional[str] = None
+        self.form_name: str | None = None
         self.form_vars: list[str] = []
         self.form_has_submit_button: bool = False
 
@@ -83,27 +111,19 @@ class HTMLGenerator(HTMLWriter):
 
     def set_focus(self, varname: str) -> None:
         self.final_javascript(
-            "cmk.utils.set_focus_by_name(%s, %s)"
-            % (json.dumps(self.form_name), json.dumps(varname))
+            f"cmk.utils.set_focus_by_name({json.dumps(self.form_name)}, {json.dumps(varname)})"
         )
 
     def set_focus_by_id(self, dom_id: str) -> None:
         self.final_javascript("cmk.utils.set_focus_by_id(%s)" % (json.dumps(dom_id)))
 
-    def clear_default_javascript(self) -> None:
-        del self._default_javascripts[:]
-
-    def add_default_javascript(self, name: str) -> None:
-        if name not in self._default_javascripts:
-            self._default_javascripts.append(name)
-
     def immediate_browser_redirect(self, secs: float, url: str) -> None:
-        self.javascript("cmk.utils.set_reload(%s, '%s');" % (secs, url))
+        self.javascript(f"cmk.utils.set_reload({secs}, '{url}');")
 
     def add_body_css_class(self, cls: str) -> None:
         self._body_classes.append(cls)
 
-    def reload_whole_page(self, url: Optional[str] = None) -> None:
+    def reload_whole_page(self, url: str | None = None) -> None:
         if not self.request.has_var("_ajaxid"):
             return self.final_javascript("cmk.utils.reload_whole_page(%s)" % json.dumps(url))
         return None
@@ -126,7 +146,7 @@ class HTMLGenerator(HTMLWriter):
             )
         )
 
-    def help(self, text: Union[None, HTML, str]) -> None:
+    def help(self, text: None | HTML | str) -> None:
         """Embed help box, whose visibility is controlled by a global button in the page.
 
         You may add macros like this to the help texts to create links to the user
@@ -135,31 +155,32 @@ class HTMLGenerator(HTMLWriter):
         """
         self.write_html(self.render_help(text))
 
-    def render_help(self, text: Union[None, HTML, str]) -> HTML:
+    def render_help(self, text: None | HTML | str) -> HTML:
         if isinstance(text, str):
             text = escaping.escape_text(text)
         elif isinstance(text, HTML):
             text = "%s" % text
 
         if not text:
-            return HTML("")
+            return HTML.empty()
 
-        stripped = text.strip()
+        stripped: str = text.strip()
         if not stripped:
-            return HTML("")
+            return HTML.empty()
 
-        help_text = HTMLGenerator.resolve_help_text_macros(stripped)
+        help_text = HTML.without_escaping(self.resolve_help_text_macros(stripped))
 
         self.enable_help_toggle()
-        style = "display:%s;" % ("block" if user.show_help else "none")
-        return HTMLWriter.render_div(HTML(help_text), class_="help", style=style)
+        inner_html: HTML = HTMLWriter.render_div(self.render_icon("info"), class_="info_icon")
+        inner_html += HTMLWriter.render_div(help_text, class_="help_text")
+        return HTMLWriter.render_div(inner_html, class_="help")
 
     @staticmethod
     def resolve_help_text_macros(text: str) -> str:
         # text = ".*[<page_name>#<anchor_name>|<link_title>].*"
         # e.g. text = "[intro_setup#install|Welcome]" returns
         #      <a href="https://docs.checkmk.com/master/en/intro_setup.html#install">Welcome</a>
-        urls: list[Optional[str]] = []
+        urls: list[str | None] = []
         if matches := re.findall(r"(\[([a-z0-9_-]+#?[a-z0-9_-]+|)\|([^\]]+)\])", text):
             for match in matches:
                 try:
@@ -172,9 +193,7 @@ class HTMLGenerator(HTMLWriter):
             if not urls[n]:
                 text = text.replace(match[0], match[2])
             else:
-                text = text.replace(
-                    match[0], '<a href="%s" target="_blank">%s</a>' % (urls[n], match[2])
-                )
+                text = text.replace(match[0], f'<a href="{urls[n]}" target="_blank">{match[2]}</a>')
         return text
 
     def enable_help_toggle(self) -> None:
@@ -200,41 +219,96 @@ class HTMLGenerator(HTMLWriter):
             )
         )
 
-    def _head(self, title: str, javascripts: Optional[Sequence[str]] = None) -> None:
+    def _head(self, title: str, javascripts: Sequence[str] | None = None) -> None:
         javascripts = javascripts if javascripts else []
 
         self.open_head()
+        if inject_js_profiling_code():
+            self._inject_profiling_code()
 
         self.default_html_headers()
         self.title(title)
 
         # If the variable _link_target is set, then all links in this page
-        # should be targetted to the HTML frame named by _link_target. This
-        # is e.g. useful in the dash-board
+        # should be targeted to the HTML frame named by _link_target.
+        # This is e.g. useful in the dashboard
         if self.link_target:
             self.base(target=self.link_target)
 
-        fname = HTMLGenerator._css_filename_for_browser(theme.url("theme"))
-        if fname is not None:
-            self.stylesheet(fname)
+        font_css_filepath = "themes/facelift/fonts_inter.css"
+        css_filepath = theme.url("theme.css")
+
+        if current_app.debug and not current_app.testing:
+            HTMLGenerator._verify_file_exists_in_web_dirs(css_filepath)
+            HTMLGenerator._verify_file_exists_in_web_dirs(font_css_filepath)
+        self.stylesheet(HTMLGenerator._append_cache_busting_query(font_css_filepath))
+        self.stylesheet(HTMLGenerator._append_cache_busting_query(css_filepath))
 
         self._add_custom_style_sheet()
 
         # Load all scripts
-        for js in self._default_javascripts + list(javascripts):
-            filename_for_browser = HTMLGenerator.javascript_filename_for_browser(js)
-            if filename_for_browser:
-                self.javascript_file(filename_for_browser)
+        for js in javascripts:
+            js_filepath = f"js/{js}_min.js"
+            js_url = HTMLGenerator._append_cache_busting_query(js_filepath)
+            if current_app.debug and not current_app.testing:
+                HTMLGenerator._verify_file_exists_in_web_dirs(js_filepath)
+            self.javascript_file(js_url)
 
-        self._set_js_csrf_token()
+        if "main" in javascripts:
+            self._inject_vue_frontend()
+
+        self.set_js_csrf_token()
 
         if self.browser_reload != 0.0:
-            self.javascript("cmk.utils.set_reload(%s)" % (self.browser_reload))
+            self.javascript(f"cmk.utils.set_reload({self.browser_reload})")
 
         self.close_head()
 
-    def _set_js_csrf_token(self) -> None:
-        session = request_local_attr("session")
+    @lru_cache
+    def _load_vue_manifest(self) -> _Manifest:
+        base = Path(cmk.utils.paths.web_dir, "htdocs", "cmk-frontend-vue")
+        with (base / ".manifest.json").open() as fo:
+            manifest = json.load(fo)
+
+        main = f"cmk-frontend-vue/{manifest['src/main.ts']['file']}"
+        main_stylesheets = manifest["src/main.ts"]["css"]
+        stage1 = f"cmk-frontend-vue/{manifest['src/stage1.ts']['file']}"
+        return _Manifest(main, main_stylesheets, stage1)
+
+    def _inject_vue_frontend(self):
+        manifest = self._load_vue_manifest()
+        if active_config.load_frontend_vue == "inject":
+            # stage1 will try to load the hot reloading files. if this fails,
+            # an error will be shown and the fallback files will be loaded.
+            self.js_entrypoint(
+                json.dumps({"fallback": [manifest.main]}),
+                type_="cmk-entrypoint-vue-stage1",
+            )
+            self.javascript_file(manifest.stage1)
+        else:
+            # production setup
+            self.javascript_file(manifest.main, type_="module")
+            for stylesheet in manifest.main_stylesheets:
+                self.stylesheet(f"cmk-frontend-vue/{stylesheet}")
+
+    def _inject_profiling_code(self):
+        self.javascript("const startTime = Date.now();")
+        # A lambda, so it will get evaluated at the end of the request, not the beginning.
+        self.final_javascript(
+            lambda: f"""
+                const generationDuration = {round((time.monotonic() - self.request.started) * 1000, 0)};
+                const currentUrl = window.location.pathname + window.location.search;
+                document.addEventListener(
+                    'DOMContentLoaded',
+                    () => {{
+                        activate_tracking(currentUrl, startTime, generationDuration);
+                    }}
+                );
+            """
+        )
+        self.javascript_file(HTMLGenerator._append_cache_busting_query("js/tracking_entry_min.js"))
+
+    def set_js_csrf_token(self) -> None:
         # session is LocalProxy, only on access it is None, so we cannot test on 'is None'
         if not hasattr(session, "session_info"):
             return
@@ -265,57 +339,46 @@ class HTMLGenerator(HTMLWriter):
                         plugin_stylesheets.add(entry.name)
         return plugin_stylesheets
 
-    # Make the browser load specified javascript files. We have some special handling here:
-    # a) files which can not be found shal not be loaded
-    # b) in OMD environments, add the Checkmk version to the version (prevents update problems)
-    # c) load the minified javascript when not in debug mode
     @staticmethod
-    def javascript_filename_for_browser(jsname: str) -> Optional[str]:
-        filename_for_browser = None
-        rel_path = "share/check_mk/web/htdocs/js"
-        if active_config.debug:
-            min_parts = ["", "_min"]
-        else:
-            min_parts = ["_min", ""]
-
-        for min_part in min_parts:
-            fname = f"{jsname}{min_part}.js"
-            if (cmk.utils.paths.omd_root / rel_path / fname).exists() or (
-                cmk.utils.paths.omd_root / "local" / rel_path / fname
-            ).exists():
-                filename_for_browser = f"js/{jsname}{min_part}-{cmk_version.__version__}.js"
-                break
-
-        return filename_for_browser
+    def _verify_file_exists_in_web_dirs(file_path: str) -> None:
+        path = _path(cmk.utils.paths.web_dir) / "htdocs" / file_path
+        local_path = _path(cmk.utils.paths.local_web_dir) / "htdocs" / file_path
+        file_missing = not (path.exists() or local_path.exists())
+        if file_missing:
+            raise FileNotFoundError(f"Neither {path} nor {local_path} exist.")
 
     @staticmethod
-    def _css_filename_for_browser(css: str) -> Optional[str]:
-        rel_path = f"share/check_mk/web/htdocs/{css}.css"
-        if (cmk.utils.paths.omd_root / rel_path).exists() or (
-            cmk.utils.paths.omd_root / "local" / rel_path
-        ).exists():
-            return f"{css}-{cmk_version.__version__}.css"
-        return None
+    def _append_cache_busting_query(filename: str) -> str:
+        return f"{filename}?v={cmk_version.__version__}"
 
     def html_head(
-        self, title: str, javascripts: Optional[Sequence[str]] = None, force: bool = False
+        self,
+        title: str,
+        main_javascript: str = "main",
+        force: bool = False,
     ) -> None:
+        javascript_files = [main_javascript]
         if force or not self._header_sent:
-            self.write_html(HTML("<!DOCTYPE HTML>\n"))
+            self.write_html(HTML.without_escaping("<!DOCTYPE HTML>\n"))
             self.open_html()
-            self._head(title, javascripts)
+            self._head(title, javascript_files)
             self._header_sent = True
 
     def body_start(
-        self, title: str = "", javascripts: Optional[Sequence[str]] = None, force: bool = False
+        self,
+        title: str = "",
+        main_javascript: Literal["main", "side"] = "main",
+        force: bool = False,
     ) -> None:
-        self.html_head(title, javascripts, force)
+        self.html_head(title, main_javascript, force)
         self.open_body(class_=self._get_body_css_classes(), data_theme=theme.get())
 
     def _get_body_css_classes(self) -> list[str]:  # TODO: Sequence!
         classes = self._body_classes[:]
         if self.screenshotmode:
             classes += ["screenshotmode"]
+        if user.show_help:
+            classes += ["show_help"]
         return classes
 
     def html_foot(self) -> None:
@@ -342,20 +405,55 @@ class HTMLGenerator(HTMLWriter):
         self.close_body()
         self.close_html()
 
+    @contextlib.contextmanager
+    def form_context(
+        self,
+        name: str,
+        action: str | None = None,
+        method: str = "GET",
+        onsubmit: str | None = None,
+        add_transid: bool = True,
+        require_confirmation: RequireConfirmation | None = None,
+        only_close: bool = False,
+    ) -> typing.Iterator[None]:
+        html.begin_form(
+            name=name,
+            action=action,
+            method=method,
+            onsubmit=onsubmit,
+            add_transid=add_transid,
+            require_confirmation=require_confirmation,
+        )
+
+        try:
+            yield
+        finally:
+            if only_close:
+                html.close_form()
+            else:
+                html.end_form()
+
     def begin_form(
         self,
         name: str,
-        action: Optional[str] = None,
+        action: str | None = None,
         method: str = "GET",
-        onsubmit: Optional[str] = None,
+        onsubmit: str | None = None,
         add_transid: bool = True,
+        require_confirmation: RequireConfirmation | None = None,
     ) -> None:
         self.form_name = name
         self.form_vars = []
         self.form_has_submit_button = False
 
+        data_cmk_form_confirmation = None
+        if require_confirmation:
+            data_cmk_form_confirmation = require_confirmation.serialize()
+
         if action is None:
             action = requested_file_name(self.request) + ".py"
+
+        enctype: EncType = "multipart/form-data"
         self.open_form(
             id_="form_%s" % name,
             name=name,
@@ -363,12 +461,11 @@ class HTMLGenerator(HTMLWriter):
             action=action,
             method=method,
             onsubmit=onsubmit,
-            enctype="multipart/form-data" if method.lower() == "post" else None,
+            data_cmk_form_confirmation=data_cmk_form_confirmation,
+            enctype=enctype if method.lower() == "post" else None,
         )
-
-        session = request_local_attr("session")
         if hasattr(session, "session_info"):
-            self.hidden_field("csrf_token", session.session_info.csrf_token)
+            self.hidden_field("_csrf_token", session.session_info.csrf_token)
 
         self.hidden_field("filled_in", name, add_var=True)
         if add_transid:
@@ -383,13 +480,6 @@ class HTMLGenerator(HTMLWriter):
             self.input(name="_save", type_="submit", cssclass="hidden_submit")
         self.close_form()
         self.form_name = None
-
-    def add_confirm_on_submit(self, form_name: str, msg: str) -> None:
-        """Adds a confirm dialog to a form that is shown before executing a form submission"""
-        self.javascript(
-            "cmk.forms.add_confirm_on_submit(%s, %s)"
-            % (json.dumps("form_%s" % form_name), json.dumps(escaping.escape_text(msg)))
-        )
 
     def in_form(self) -> bool:
         return self.form_name is not None
@@ -412,7 +502,7 @@ class HTMLGenerator(HTMLWriter):
     # field. (this is the reason why you must not add any further
     # input fields after this method has been called).
     def hidden_fields(
-        self, varlist: Optional[Sequence[str]] = None, add_action_vars: bool = False
+        self, varlist: Sequence[str] | None = None, add_action_vars: bool = False
     ) -> None:
         if varlist is not None:
             for var in varlist:
@@ -428,9 +518,9 @@ class HTMLGenerator(HTMLWriter):
         self,
         var: str,
         value: HTMLTagValue,
-        id_: Optional[str] = None,
+        id_: str | None = None,
         add_var: bool = False,
-        class_: Optional[CSSSpec] = None,
+        class_: CSSSpec | None = None,
     ) -> None:
         self.write_html(
             self.render_hidden_field(var=var, value=value, id_=id_, add_var=add_var, class_=class_)
@@ -440,12 +530,12 @@ class HTMLGenerator(HTMLWriter):
         self,
         var: str,
         value: HTMLTagValue,
-        id_: Optional[str] = None,
+        id_: str | None = None,
         add_var: bool = False,
-        class_: Optional[CSSSpec] = None,
+        class_: CSSSpec | None = None,
     ) -> HTML:
         if value is None:
-            return HTML("")
+            return HTML.empty()
         if add_var:
             self.add_form_var(var)
         return self.render_input(
@@ -463,7 +553,7 @@ class HTMLGenerator(HTMLWriter):
     # Check if the given form is currently filled in (i.e. we display
     # the form a second time while showing value typed in at the first
     # time and complaining about invalid user input)
-    def form_submitted(self, form_name: Optional[str] = None) -> bool:
+    def form_submitted(self, form_name: str | None = None) -> bool:
         if form_name is None:
             return self.request.has_var("filled_in")
         return self.request.var("filled_in") == form_name
@@ -472,7 +562,7 @@ class HTMLGenerator(HTMLWriter):
     # that no form has been submitted. The problem here is the distintion
     # between False and None. The browser does not set the variables for
     # Checkboxes that are not checked :-(
-    def get_checkbox(self, varname: str) -> Optional[bool]:
+    def get_checkbox(self, varname: str) -> bool | None:
         if self.request.has_var(varname):
             return bool(self.request.var(varname))
         if self.form_submitted(self.form_name):
@@ -483,10 +573,10 @@ class HTMLGenerator(HTMLWriter):
         self,
         varname: str,
         title: str,
-        cssclass: Optional[str] = None,
-        style: Optional[str] = None,
-        help_: Optional[str] = None,
-        form: Optional[str] = None,
+        cssclass: str | None = None,
+        style: str | None = None,
+        help_: str | None = None,
+        form: str | None = None,
         formnovalidate: bool = False,
     ) -> None:
         self.write_html(
@@ -505,10 +595,10 @@ class HTMLGenerator(HTMLWriter):
         self,
         varname: str,
         title: str,
-        cssclass: Optional[str] = None,
-        style: Optional[str] = None,
-        help_: Optional[str] = None,
-        form: Optional[str] = None,
+        cssclass: str | None = None,
+        style: str | None = None,
+        help_: str | None = None,
+        form: str | None = None,
         formnovalidate: bool = False,
     ) -> HTML:
         self.add_form_var(varname)
@@ -529,11 +619,11 @@ class HTMLGenerator(HTMLWriter):
         href: str,
         text: str,
         add_transid: bool = False,
-        obj_id: Optional[str] = None,
-        style: Optional[str] = None,
-        title: Optional[str] = None,
-        disabled: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        obj_id: str | None = None,
+        style: str | None = None,
+        title: str | None = None,
+        disabled: str | None = None,
+        class_: CSSSpec | None = None,
     ) -> None:
         if add_transid:
             href += "&_transid=%s" % transactions.get()
@@ -574,10 +664,10 @@ class HTMLGenerator(HTMLWriter):
         text: str,
         onclick: str,
         style: str = "",
-        cssclass: Optional[str] = None,
+        cssclass: str | None = None,
         title: str = "",
         disabled: bool = False,
-        class_: Optional[CSSSpec] = None,
+        class_: CSSSpec | None = None,
     ) -> None:
         classes = (
             ["button"]
@@ -587,12 +677,12 @@ class HTMLGenerator(HTMLWriter):
 
         if disabled:
             classes.append("disabled")
-            disabled_arg: Optional[str] = ""
+            disabled_arg: str | None = ""
         else:
             disabled_arg = None
 
         # autocomplete="off": Is needed for firefox not to set "disabled="disabled" during page reload
-        # when it has been set on a page via javascript before. Needed for WATO activate changes page.
+        # when it has been set on a page via javascript before. Needed for Setup activate changes page.
         self.input(
             name=varname,
             type_="button",
@@ -606,20 +696,27 @@ class HTMLGenerator(HTMLWriter):
             title=title,
         )
 
-    def user_error(self, e: MKUserError) -> None:
+    def user_error(self, e: MKUserError, show_as_warning: bool = False) -> None:
         """Display the given MKUserError and store message for later use"""
-        self.show_error(str(e))
+        if show_as_warning:
+            self.show_warning(str(e))
+        else:
+            self.show_error(str(e))
         user_errors.add(e)
 
     def show_user_errors(self) -> None:
         """Show all previously created user errors"""
         if user_errors:
-            self.show_error(
-                HTMLWriter.render_br().join(
-                    escaping.escape_to_html_permissive(s, escape_links=False)
-                    for s in user_errors.values()
-                )
+            self.write_html(self.render_user_errors())
+
+    def render_user_errors(self) -> HTML:
+        """Render all previously created user errors"""
+        return self.render_error(
+            HTMLWriter.render_br().join(
+                escaping.escape_to_html_permissive(s, escape_links=False)
+                for s in user_errors.values()
             )
+        )
 
     # TODO: Try and thin out this method's list of parameters - remove unused ones
     def text_input(
@@ -627,24 +724,22 @@ class HTMLGenerator(HTMLWriter):
         varname: str,
         default_value: str = "",
         cssclass: str = "text",
-        size: Union[None, str, int] = None,
-        label: Optional[str] = None,
-        id_: Optional[str] = None,
-        submit: Optional[str] = None,
+        size: None | str | int = None,
+        label: str | None = None,
+        id_: str | None = None,
+        submit: str | None = None,
         try_max_width: bool = False,
         read_only: bool = False,
-        autocomplete: Optional[str] = None,
-        style: Optional[str] = None,
-        type_: Optional[str] = None,
-        onkeyup: Optional[str] = None,
-        onblur: Optional[str] = None,
-        placeholder: Optional[str] = None,
-        data_world: Optional[str] = None,
-        data_max_labels: Optional[int] = None,
+        autocomplete: str | None = None,
+        style: str | None = None,
+        type_: str | None = None,
+        oninput: str | None = None,
+        onblur: str | None = None,
+        placeholder: str | None = None,
+        data_attrs: HTMLTagAttributes | None = None,
         required: bool = False,
-        title: Optional[str] = None,
+        title: str | None = None,
     ) -> None:
-
         # Model
         error = user_errors.get(varname)
         value = self.request.get_str_input(varname, default_value)
@@ -654,26 +749,28 @@ class HTMLGenerator(HTMLWriter):
             self.set_focus(varname)
         self.form_vars.append(varname)
 
+        if data_attrs is not None:
+            assert all(data_attr_key.startswith("data-") for data_attr_key in data_attrs.keys())
+
         # View
         # TODO: Move styling away from py code
         # Until we get there: Try to simplify these width stylings and put them in a helper function
         # that's shared by text_input and text_area
         style_size: list[str] = []
-        field_size: Optional[str] = None
+        field_size: str | None = None
 
         if size is not None:
             if try_max_width:
                 assert isinstance(size, int)
                 style_size = ["min-width: %d.8ex;" % size]
                 cssclass += " try_max_width"
+            elif size == "max":
+                style_size = ["width: 100%;"]
             else:
-                if size == "max":
-                    style_size = ["width: 100%;"]
-                else:
-                    assert isinstance(size, int)
-                    field_size = "%d" % (size + 1)
-                    if (style is None or "width:" not in style) and not self.mobile:
-                        style_size = ["width: %d.8ex;" % size]
+                assert isinstance(size, int)
+                field_size = "%d" % (size + 1)
+                if (style is None or "width:" not in style) and not self.mobile:
+                    style_size = ["width: %d.8ex;" % size]
 
         attributes: HTMLTagAttributes = {
             "class": cssclass,
@@ -684,15 +781,16 @@ class HTMLGenerator(HTMLWriter):
             "readonly": "true" if read_only else None,
             "value": value,
             "onblur": onblur,
-            "onkeyup": onkeyup,
-            "onkeydown": ("cmk.forms.textinput_enter_submit(event, %s);" % json.dumps(submit))
-            if submit
-            else None,
+            "oninput": oninput,
+            "onkeydown": (
+                ("cmk.forms.textinput_enter_submit(event, %s);" % json.dumps(submit))
+                if submit
+                else None
+            ),
             "placeholder": placeholder,
-            "data-world": data_world,
-            "data-max-labels": None if data_max_labels is None else str(data_max_labels),
             "required": "" if required else None,
             "title": title,
+            **(data_attrs or {}),
         }
 
         if error:
@@ -712,7 +810,7 @@ class HTMLGenerator(HTMLWriter):
     def status_label(
         self, content: HTMLContent, status: str, title: str, **attrs: HTMLTagAttributeValue
     ) -> None:
-        """Shows a colored badge with text (used on WATO activation page for the site status)"""
+        """Shows a colored badge with text (used on Setup activation page for the site status)"""
         self.status_label_button(content, status, title, onclick=None, **attrs)
 
     def status_label_button(
@@ -720,10 +818,10 @@ class HTMLGenerator(HTMLWriter):
         content: HTMLContent,
         status: str,
         title: str,
-        onclick: Optional[str],
+        onclick: str | None,
         **attrs: HTMLTagAttributeValue,
     ) -> None:
-        """Shows a colored button with text (used in site and customer status snapins)"""
+        """Shows a colored button with text (used in site and customer status snap-ins)"""
         self.div(
             content,
             title=title,
@@ -736,39 +834,34 @@ class HTMLGenerator(HTMLWriter):
         self,
         enabled: bool,
         help_txt: str,
-        class_: Optional[CSSSpec] = None,
+        class_: CSSSpec | None = None,
         href: str = "javascript:void(0)",
-        **attrs: HTMLTagAttributeValue,
+        onclick: str | None = None,
     ) -> None:
-        classes = [] if class_ is None else class_
-        classes += [
-            "toggle_switch",
-            "on" if enabled else "off",
-        ]
-        onclick = attrs.pop("onclick", None)
+        class_ = [] if class_ is None else class_
+        class_ += ["toggle_switch"]
 
-        self.open_div(class_=classes, **attrs)
-        self.a(
-            content=_("on") if enabled else _("off"),
-            href=href,
+        self.icon_button(
+            url=href,
             title=help_txt,
+            icon="toggle_" + ("on" if enabled else "off"),
             onclick=onclick,
+            class_=class_,
         )
-        self.close_div()
 
     def password_input(
         self,
         varname: str,
         default_value: str = "",
         cssclass: str = "text",
-        size: Union[None, str, int] = None,
-        label: Optional[str] = None,
-        id_: Optional[str] = None,
-        submit: Optional[str] = None,
+        size: None | str | int = None,
+        label: str | None = None,
+        id_: str | None = None,
+        submit: str | None = None,
         try_max_width: bool = False,
         read_only: bool = False,
-        autocomplete: Optional[str] = None,
-        placeholder: Optional[str] = None,
+        autocomplete: str | None = None,
+        placeholder: str | None = None,
     ) -> None:
         self.text_input(
             varname,
@@ -785,6 +878,36 @@ class HTMLGenerator(HTMLWriter):
             placeholder=placeholder,
         )
 
+    def password_meter(self) -> None:
+        """The call should be right behind the password_input call, since the
+        meter looks for inputs in the same parent...
+
+        Relies on the "zxcvbn-ts" package utilized within the
+        "js/password_meter.ts" module"""
+        # the class_name must be in sync with password_meter.ts
+        class_name = "password_meter"
+        # <label>
+        self.write_html(render_start_tag(tag_name="label", close_tag=False))
+        self.write_text_permissive(str(_("Strength:")))
+        # <meter>
+        self.write_html(
+            render_start_tag(
+                tag_name="meter",
+                close_tag=False,
+                max="5",
+                class_=class_name,
+                data_password_strength_1=_("Very Weak"),
+                data_password_strength_2=_("Weak"),
+                data_password_strength_3=_("Medium"),
+                data_password_strength_4=_("Good"),
+                data_password_strength_5=_("Strong"),
+            )
+        )
+        # </meter>
+        self.write_html(render_end_tag("meter"))
+        # </label>
+        self.write_html(render_end_tag("label"))
+
     def text_area(
         self,
         varname: str,
@@ -794,7 +917,6 @@ class HTMLGenerator(HTMLWriter):
         try_max_width: bool = False,
         **attrs: HTMLTagAttributeValue,
     ) -> None:
-
         value = self.request.get_str_input(varname, deflt)
         error = user_errors.get(varname)
 
@@ -841,15 +963,15 @@ class HTMLGenerator(HTMLWriter):
 
     # Choices is a list pairs of (key, title). They keys of the choices
     # and the default value must be of type None, str or unicode.
-    def dropdown(  # pylint: disable=too-many-branches
+    def dropdown(
         self,
         varname: str,
-        choices: Union[Iterable[Choice], Iterable[ChoiceGroup]],
-        locked_choice: Optional[ChoiceText] = None,
+        choices: Iterable[Choice] | Iterable[ChoiceGroup],
+        locked_choice: ChoiceText | None = None,
         deflt: ChoiceId = "",
         ordered: bool = False,
-        label: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        label: str | None = None,
+        class_: CSSSpec | None = None,
         size: int = 1,
         read_only: bool = False,
         **attrs: HTMLTagAttributeValue,
@@ -941,6 +1063,7 @@ class HTMLGenerator(HTMLWriter):
         self.close_select()
 
     def upload_file(self, varname: str) -> None:
+        # We need this to upload files, other enctypes won't work.
         error = user_errors.get(varname)
         if error:
             self.open_x(class_="inputerror")
@@ -958,13 +1081,13 @@ class HTMLGenerator(HTMLWriter):
         if self.mobile:
             self._write(render_end_tag("fieldset"))
 
-    def radiobutton(self, varname: str, value: str, checked: bool, label: Optional[str]) -> None:
+    def radiobutton(self, varname: str, value: str, checked: bool, label: str | None) -> None:
         self.form_vars.append(varname)
 
         if self.request.has_var(varname):
             checked = self.request.var(varname) == value
 
-        id_ = "rb_%s_%s" % (varname, value) if label else None
+        id_ = f"rb_{varname}_{value}" if label else None
         self.open_span(class_="radiobutton_group")
         self.input(
             name=varname, type_="radio", value=value, checked="" if checked else None, id_=id_
@@ -984,7 +1107,7 @@ class HTMLGenerator(HTMLWriter):
         varname: str,
         deflt: bool = False,
         label: HTMLContent = "",
-        id_: Optional[str] = None,
+        id_: str | None = None,
         **add_attr: HTMLTagAttributeValue,
     ) -> None:
         self._write(self.render_checkbox(varname, deflt, label, id_, **add_attr))
@@ -994,7 +1117,7 @@ class HTMLGenerator(HTMLWriter):
         varname: str,
         deflt: bool = False,
         label: HTMLContent = "",
-        id_: Optional[str] = None,
+        id_: str | None = None,
         **add_attr: HTMLTagAttributeValue,
     ) -> HTML:
         # Problem with checkboxes: The browser will add the variable
@@ -1028,7 +1151,7 @@ class HTMLGenerator(HTMLWriter):
         self,
         name: str,
         height: str,
-        title: Optional[str],
+        title: str | None,
         renderer: Callable[[], None],
     ) -> None:
         self.open_div(class_=["floatfilter", height, name])
@@ -1038,23 +1161,23 @@ class HTMLGenerator(HTMLWriter):
         self.close_div()
         self.close_div()
 
-    def render_input(self, name: Optional[str], type_: str, **attrs: HTMLTagAttributeValue) -> HTML:
+    def render_input(self, name: str | None, type_: str, **attrs: HTMLTagAttributeValue) -> HTML:
         if type_ == "submit":
             self.form_has_submit_button = True
         attrs["type_"] = type_
         attrs["name"] = name
         return render_start_tag("input", close_tag=True, **attrs)
 
-    def input(self, name: Optional[str], type_: str, **attrs: HTMLTagAttributeValue) -> None:
+    def input(self, name: str | None, type_: str, **attrs: HTMLTagAttributeValue) -> None:
         self.write_html(self.render_input(name, type_, **attrs))
 
     def icon(
         self,
         icon: Icon,
-        title: Optional[str] = None,
-        id_: Optional[str] = None,
-        cssclass: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        title: str | None = None,
+        id_: str | None = None,
+        cssclass: str | None = None,
+        class_: CSSSpec | None = None,
     ) -> None:
         self.write_html(
             HTMLGenerator.render_icon(
@@ -1072,10 +1195,14 @@ class HTMLGenerator(HTMLWriter):
     @staticmethod
     def render_icon(
         icon: Icon,
-        title: Optional[str] = None,
-        id_: Optional[str] = None,
-        cssclass: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        title: str | None = None,
+        id_: str | None = None,
+        cssclass: str | None = None,
+        class_: CSSSpec | None = None,
+        *,
+        # Temporary measure for not having to change all call-sites at once.
+        # The first step was to only change call sites from painters.
+        theme: Theme = theme,
     ) -> HTML:
         classes = ["icon"] + ([] if cssclass is None else [cssclass])
         if isinstance(class_, list):
@@ -1109,9 +1236,9 @@ class HTMLGenerator(HTMLWriter):
     @staticmethod
     def render_emblem(
         emblem: str,
-        title: Optional[str],
-        id_: Optional[str],
-        icon_element: Optional[HTML] = None,
+        title: str | None,
+        id_: str | None,
+        icon_element: HTML | None = None,
     ) -> HTML:
         """Render emblem to corresponding icon (icon_element in function call)
         or render emblem itself as icon image, used e.g. in view options."""
@@ -1134,15 +1261,18 @@ class HTMLGenerator(HTMLWriter):
 
     @staticmethod
     def render_icon_button(
-        url: Union[None, str, str],
+        url: None | str,
         title: str,
         icon: Icon,
-        id_: Optional[str] = None,
-        onclick: Optional[HTMLTagAttributeValue] = None,
-        style: Optional[str] = None,
-        target: Optional[str] = None,
-        cssclass: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        id_: str | None = None,
+        onclick: HTMLTagAttributeValue | None = None,
+        style: str | None = None,
+        target: str | None = None,
+        cssclass: str | None = None,
+        class_: CSSSpec | None = None,
+        # Temporary measure for not having to change all call-sites at once.
+        # The first step was to only change call sites from painters.
+        theme: Theme = theme,
     ) -> HTML:
         classes = [] if cssclass is None else [cssclass]
         if isinstance(class_, list):
@@ -1154,7 +1284,7 @@ class HTMLGenerator(HTMLWriter):
         assert href is not None
 
         return HTMLWriter.render_a(
-            content=HTML(HTMLGenerator.render_icon(icon, cssclass="iconbutton")),
+            content=HTMLGenerator.render_icon(icon, cssclass="iconbutton", theme=theme),
             href=href,
             title=title,
             id_=id_,
@@ -1167,19 +1297,22 @@ class HTMLGenerator(HTMLWriter):
 
     def icon_button(
         self,
-        url: Optional[str],
+        url: str | None,
         title: str,
         icon: Icon,
-        id_: Optional[str] = None,
-        onclick: Optional[HTMLTagAttributeValue] = None,
-        style: Optional[str] = None,
-        target: Optional[str] = None,
-        cssclass: Optional[str] = None,
-        class_: Optional[CSSSpec] = None,
+        id_: str | None = None,
+        onclick: HTMLTagAttributeValue | None = None,
+        style: str | None = None,
+        target: str | None = None,
+        cssclass: str | None = None,
+        class_: CSSSpec | None = None,
+        # Temporary measure for not having to change all call-sites at once.
+        # The first step was to only change call sites from painters.
+        theme: Theme = theme,
     ) -> None:
         self.write_html(
             HTMLGenerator.render_icon_button(
-                url, title, icon, id_, onclick, style, target, cssclass, class_
+                url, title, icon, id_, onclick, style, target, cssclass, class_, theme=theme
             )
         )
 
@@ -1199,11 +1332,11 @@ class HTMLGenerator(HTMLWriter):
         )
         self.open_div(title=_("Show more") if not with_text else "", class_="show_more")
         if with_text:
-            self.write_text(_("show more"))
+            self.write_text_permissive(_("show more"))
         self.close_div()
         self.open_div(title=_("Show less") if not with_text else "", class_="show_less")
         if with_text:
-            self.write_text(_("show less"))
+            self.write_text_permissive(_("show less"))
         self.close_div()
         self.close_a()
 
@@ -1213,13 +1346,13 @@ class HTMLGenerator(HTMLWriter):
         ident: str,
         method: PopupMethod,
         data: Any = None,
-        style: Optional[str] = None,
-        cssclass: Optional[CSSSpec] = None,
-        onclose: Optional[str] = None,
-        onopen: Optional[str] = None,
+        style: str | None = None,
+        cssclass: CSSSpec | None = None,
+        onclose: str | None = None,
+        onopen: str | None = None,
         resizable: bool = False,
-        popup_group: Optional[str] = None,
-        hover_switch_delay: Optional[int] = None,
+        popup_group: str | None = None,
+        hover_switch_delay: int | None = None,
     ) -> None:
         self.write_html(
             HTMLGenerator.render_popup_trigger(
@@ -1243,16 +1376,15 @@ class HTMLGenerator(HTMLWriter):
         ident: str,
         method: PopupMethod,
         data: Any = None,
-        style: Optional[str] = None,
-        cssclass: Optional[CSSSpec] = None,
-        onclose: Optional[str] = None,
-        onopen: Optional[str] = None,
+        style: str | None = None,
+        cssclass: CSSSpec | None = None,
+        onclose: str | None = None,
+        onopen: str | None = None,
         resizable: bool = False,
-        popup_group: Optional[str] = None,
-        hover_switch_delay: Optional[int] = None,
+        popup_group: str | None = None,
+        hover_switch_delay: int | None = None,
     ) -> HTML:
-
-        onclick = "cmk.popup_menu.toggle_popup(event, this, %s, %s, %s, %s, %s,  %s);" % (
+        onclick = "cmk.popup_menu.toggle_popup(event, this, {}, {}, {}, {}, {},  {});".format(
             json.dumps(ident),
             json.dumps(method.asdict()),
             json.dumps(data if data else None),
@@ -1262,11 +1394,10 @@ class HTMLGenerator(HTMLWriter):
         )
 
         if popup_group:
-            onmouseenter: Optional[str] = "cmk.popup_menu.switch_popup_menu_group(this, %s, %s)" % (
-                json.dumps(popup_group),
-                json.dumps(hover_switch_delay),
+            onmouseenter: str | None = (
+                f"cmk.popup_menu.switch_popup_menu_group(this, {json.dumps(popup_group)}, {json.dumps(hover_switch_delay)})"
             )
-            onmouseleave: Optional[str] = "cmk.popup_menu.stop_popup_menu_group_switch(this)"
+            onmouseleave: str | None = "cmk.popup_menu.stop_popup_menu_group_switch(this)"
         else:
             onmouseenter = None
             onmouseleave = None
@@ -1290,7 +1421,10 @@ class HTMLGenerator(HTMLWriter):
 
         # TODO: Make method.content return HTML
         return HTMLWriter.render_div(
-            atag + HTML(method.content), class_=classes, id_="popup_trigger_%s" % ident, style=style
+            atag + HTML.without_escaping(method.content),
+            class_=classes,
+            id_="popup_trigger_%s" % ident,
+            style=style,
         )
 
     def element_dragger_url(self, dragging_tag: str, base_url: str) -> None:
@@ -1308,8 +1442,7 @@ class HTMLGenerator(HTMLWriter):
         self.write_html(
             HTMLGenerator.render_element_dragger(
                 dragging_tag,
-                drop_handler="function(new_index){return %s(%s, new_index);})"
-                % (drop_handler, json.dumps(handler_args)),
+                drop_handler=f"function(new_index){{return {drop_handler}({json.dumps(handler_args)}, new_index);}})",
             )
         )
 
@@ -1321,9 +1454,57 @@ class HTMLGenerator(HTMLWriter):
             HTMLGenerator.render_icon("drag", _("Move this entry")),
             href="javascript:void(0)",
             class_=["element_dragger"],
-            onmousedown="cmk.element_dragging.start(event, this, %s, %s"
-            % (json.dumps(dragging_tag.upper()), drop_handler),
+            onmousedown=f"cmk.element_dragging.start(event, this, {json.dumps(dragging_tag.upper())}, {drop_handler}",
+        )
+
+    def date(
+        self,
+        var: str,
+        value: str,
+        id_: str,
+        onchange: str | None = None,
+    ) -> None:
+        self.write_html(
+            self.render_input(
+                name=var,
+                value=value,
+                type_="date",
+                id=id_,
+                onchange=onchange,
+            )
+        )
+
+    def time(
+        self,
+        var: str,
+        value: str,
+        id_: str,
+        onchange: str | None = None,
+    ) -> None:
+        self.write_html(
+            self.render_input(
+                name=var,
+                value=value,
+                type_="time",
+                id=id_,
+                onchange=onchange,
+            )
         )
 
 
-html: HTMLGenerator = request_local_attr("html")
+@overload
+def _path(path_or_str: Path) -> Path: ...
+
+
+@overload
+def _path(path_or_str: str) -> Path: ...
+
+
+def _path(path_or_str: Path | str) -> Path:
+    if isinstance(path_or_str, str):
+        return Path(path_or_str)
+    else:
+        return path_or_str
+
+
+html = request_local_attr("html", HTMLGenerator)

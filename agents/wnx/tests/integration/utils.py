@@ -1,29 +1,55 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import asyncio
 import os
 import platform
 import subprocess
 import sys
-import telnetlib  # nosec
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Final, Iterator, List, NamedTuple
+from typing import Any, Final, NamedTuple
 
+import telnetlib3  # type: ignore[import-untyped]
 import yaml
 
-YamlDict = Dict[str, Dict[str, Any]]
+# check_mk section, example of output
+# <<<check_mk>>>
+# Version: 2.3.0b1
+# BuildDate: Jan  5 2024
+# AgentOS: windows
+# OSName: Microsoft Windows 10 Pro
+# OSVersion: 10.0.19045
+# OSType: windows
+# Hostname: klapp-9999
+# Architecture: 64bit
+# Time: 2024-01-05T14:47:46+0100
+# WorkingDirectory: C:\Program Files (x86)\checkmk\service
+# ConfigFile: C:\Program Files (x86)\checkmk\service\check_mk.yml
+# LocalConfigFile: C:\ProgramData\checkmk\agent\check_mk.user.yml
+# AgentDirectory: C:\Program Files (x86)\checkmk\service
+# PluginsDirectory: C:\ProgramData\checkmk\agent\plugins
+# StateDirectory: C:\ProgramData\checkmk\agent\state
+# ConfigDirectory: C:\ProgramData\checkmk\agent\config
+# TempDirectory: C:\ProgramData\checkmk\agent\tmp
+# LogDirectory: C:\ProgramData\checkmk\agent\log
+# SpoolDirectory: C:\ProgramData\checkmk\agent\spool
+# LocalDirectory: C:\ProgramData\checkmk\agent\local
+# OnlyFrom:
+
+
+YamlDict = dict[str, dict[str, Any]]
 INTEGRATION_PORT: Final = 25998
 AGENT_EXE_NAME: Final = "check_mk_agent.exe"
 _HOST: Final = "localhost"
 USER_YAML_CONFIG: Final = "check_mk.user.yml"
 SECTION_COUNT: Final = 18
-ONLY_FROM_LINE: Final = 17
-CTL_STATUS_LINE: Final = 19
+ONLY_FROM_LINE: Final = 21
+CTL_STATUS_LINE: Final = ONLY_FROM_LINE + 2
 PYTHON_CAB_NAME: Final = "python-3.cab"
 CMK_UPDATER_PY: Final = "cmk_update_agent.py"
 CMK_UPDATER_CHECKMK_PY: Final = "cmk_update_agent.checkmk.py"
@@ -59,16 +85,36 @@ def create_legacy_pull_file(directory: Path) -> None:
         f.write("Created by integration tests")
 
 
-def _get_data_using_telnet(host: str, port: int) -> List[str]:
+_result = ""
+
+
+async def _telnet_shell(reader: telnetlib3.TelnetReader, _: telnetlib3.TelnetWriter) -> None:
+    global _result
+    while True:
+        data = await reader.read(1024)
+        if not data:
+            break
+        _result += data
+
+
+def _read_client_data(host: str, port: int) -> None:
+    loop = asyncio.get_event_loop()
+    coro = telnetlib3.open_connection(host, port, shell=_telnet_shell)
+    _, writer = loop.run_until_complete(coro)
+    loop.run_until_complete(writer.protocol.waiter_closed)
+
+
+def _get_data_using_telnet(host: str, port: int) -> list[str]:
     # overloaded CI Node may delay start/init of the agent process
     # we must retry connection few times to avoid complaints
+    global _result
+    _result = ""
     for _ in range(5):
         try:
-            with telnetlib.Telnet(host, port, timeout=10) as telnet:  # nosec
-                result = telnet.read_all().decode(encoding="cp1252")
-                if result:
-                    return result.splitlines()
-                time.sleep(2)
+            _read_client_data(host, port)
+            if _result:
+                return _result.splitlines()
+            time.sleep(2)
         except Exception as _:
             # print('No connect, waiting for agent')
             time.sleep(2)
@@ -90,7 +136,7 @@ def check_os() -> None:
 def _write_config(work_config: YamlDict, data_dir: Path) -> Iterator[None]:
     yaml_file = data_dir / USER_YAML_CONFIG
     try:
-        with open(yaml_file, "wt") as f:
+        with open(yaml_file, "w") as f:
             ret = yaml.dump(work_config)
             f.write(ret)
         yield
@@ -103,7 +149,7 @@ def obtain_agent_data(
     *,
     main_exe: Path,
     data_dir: Path,
-) -> List[str]:
+) -> list[str]:
     with (
         _write_config(work_config, data_dir),
         subprocess.Popen(
@@ -160,7 +206,7 @@ def unpack_modules(root_dir: Path, *, module_dir: Path) -> int:
         subprocess.Popen(
             [
                 "expand.exe",
-                f"{root_dir / PYTHON_CAB_NAME }",
+                f"{root_dir / PYTHON_CAB_NAME}",
                 "-F:*",
                 f"{module_dir}",
             ],
@@ -177,8 +223,10 @@ def unpack_modules(root_dir: Path, *, module_dir: Path) -> int:
 def _change_dir(to_dir: Path) -> Iterator[None]:
     p = os.getcwd()
     os.chdir(to_dir)
-    yield
-    os.chdir(p)
+    try:
+        yield
+    finally:
+        os.chdir(p)
 
 
 def postinstall_module(module_dir: Path) -> int:

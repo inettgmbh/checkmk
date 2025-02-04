@@ -1,90 +1,148 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# ruff: noqa: A005
+
+from __future__ import annotations
 
 import ast
 import glob
+import inspect
+import json
 import logging
 import os
-import pipes
-import pwd
-import shutil
+import pprint
+import re
 import subprocess
 import sys
 import time
 import urllib.parse
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext, suppress
+from dataclasses import dataclass
+from getpass import getuser
 from pathlib import Path
-from typing import List, Literal, Mapping, MutableMapping, Optional, Union
+from pprint import pformat
+from typing import Any, Final, Literal, overload
 
 import pytest
+import pytest_check  # type: ignore[import-untyped]
 
-from tests.testlib.openapi_session import CMKOpenApiSession
-from tests.testlib.utils import (
-    cmc_path,
-    cme_path,
-    cmk_path,
-    current_base_branch_name,
-    virtualenv_path,
+from tests.testlib.cse.utils import (  # type: ignore[import-untyped, unused-ignore]
+    create_cse_initial_config,
+    cse_openid_oauth_provider,
 )
-from tests.testlib.version import CMKVersion
+from tests.testlib.openapi_session import CMKOpenApiSession
+from tests.testlib.repo import current_base_branch_name, repo_path
+from tests.testlib.utils import (
+    check_output,
+    execute,
+    is_containerized,
+    makedirs,
+    PExpectDialog,
+    restart_httpd,
+    run,
+    ServiceInfo,
+    spawn_expect_process,
+    wait_until,
+    write_file,
+)
+from tests.testlib.version import CMKVersion, get_min_version, version_from_env
 from tests.testlib.web_session import CMKWebSession
 
 import livestatus
 
-logger = logging.getLogger(__name__)
+from cmk.ccc.version import Edition, Version
 
+from cmk import trace
+from cmk.crypto.password import Password
+from cmk.crypto.secrets import Secret
+
+logger = logging.getLogger(__name__)
+tracer = trace.get_tracer()
+
+ADMIN_USER: Final[str] = "cmkadmin"
+AUTOMATION_USER: Final[str] = "not_automation"
 PYTHON_VERSION_MAJOR, PYTHON_VERSION_MINOR = sys.version_info.major, sys.version_info.minor
 
 
+@dataclass
+class TracingConfig:
+    collect_traces: bool
+    otlp_endpoint: str
+    extra_resource_attributes: Mapping[str, str]
+
+
+NO_TRACING = TracingConfig(collect_traces=False, otlp_endpoint="", extra_resource_attributes={})
+
+
 class Site:
+    _GLOBAL_SETTINGS_FILE: Final = "etc/check_mk/multisite.d/wato/global.mk"
+
     def __init__(
         self,
+        version: CMKVersion,
         site_id: str,
         reuse: bool = True,
-        version: str = CMKVersion.DEFAULT,
-        edition: str = CMKVersion.CEE,
-        branch: str = "master",
-        update_from_git: bool = False,
-        install_test_python_modules: bool = True,
         admin_password: str = "cmk",
+        update: bool = False,
+        update_conflict_mode: str = "install",
+        enforce_english_gui: bool = True,
+        check_wait_timeout: int = 20,
     ) -> None:
         assert site_id
         self.id = site_id
-        self.root = "/omd/sites/%s" % self.id
-        self.version = CMKVersion(version, edition, branch)
-
-        self.update_from_git = update_from_git
-        self.install_test_python_modules = install_test_python_modules
+        self.root = Path("/omd/sites") / self.id
+        self.version: Final = version
 
         self.reuse = reuse
 
         self.http_proto = "http"
         self.http_address = "127.0.0.1"
-        self._apache_port: Optional[int] = None  # internal cache for the port
+        self._apache_port: int | None = None  # internal cache for the port
+        self._message_broker_port: int | None = None
 
-        self._livestatus_port: Optional[int] = None
+        self._livestatus_port: int | None = None
         self.admin_password = admin_password
+        self._automation_secret: Password | None = None
 
+        self.update = update
+        self.update_conflict_mode = update_conflict_mode
+        self.enforce_english_gui = enforce_english_gui
+
+        self.check_wait_timeout = check_wait_timeout
+
+        # We start with ADMIN_USER and change it to the automation user once it is created
         self.openapi = CMKOpenApiSession(
             host=self.http_address,
             port=self.apache_port if self.exists() else 80,
-            user="automation" if self.exists() else "cmkadmin",
-            password=self.get_automation_secret() if self.exists() else self.admin_password,
+            user=ADMIN_USER,
+            password=self.admin_password,
             site=self.id,
+            site_version=self.version,
         )
+
+        self.result_dir().mkdir(parents=True, exist_ok=True)
 
     @property
     def apache_port(self) -> int:
         if self._apache_port is None:
-            self._apache_port = int(self.get_config("APACHE_TCP_PORT"))
+            self._apache_port = int(self.get_config("APACHE_TCP_PORT", "5000"))
         return self._apache_port
 
     @property
     def internal_url(self) -> str:
         """This gives the address-port combination where the site-Apache process listens."""
         return f"{self.http_proto}://{self.http_address}:{self.apache_port}/{self.id}/check_mk/"
+
+    @property
+    def internal_url_mobile(self) -> str:
+        return self.internal_url + "mobile.py"
+
+    @property
+    def licensing_dir(self) -> Path:
+        return self.root / "var" / "check_mk" / "licensing"
 
     # Previous versions of integration/composition tests needed this distinction. This is no
     # longer the case and can be safely removed once all tests switch to either one of url
@@ -101,15 +159,17 @@ class Site:
     def live(self) -> livestatus.SingleSiteConnection:
         # Note: If the site comes from a SiteFactory instance, the TCP connection
         # is insecure, i.e. no TLS.
-        live = (
-            livestatus.LocalConnection()
-            if self._is_running_as_site_user()
-            else livestatus.SingleSiteConnection(
-                "tcp:%s:%d" % (self.http_address, self.livestatus_port)
-            )
+        live = livestatus.SingleSiteConnection(
+            "tcp:%s:%d" % (self.http_address, self.livestatus_port)
         )
         live.set_timeout(2)
         return live
+
+    @property
+    def message_broker_port(self) -> int:
+        if self._message_broker_port is None:
+            self._message_broker_port = int(self.get_config("RABBITMQ_PORT", "5672"))
+        return self._message_broker_port
 
     def url_for_path(self, path: str) -> str:
         """
@@ -120,30 +180,40 @@ class Site:
         assert "://" not in path
 
         if "/" not in urllib.parse.urlparse(path).path:
-            path = "/%s/check_mk/%s" % (self.id, path)
+            path = f"/{self.id}/check_mk/{path}"
         return f"{self.http_proto}://{self.http_address}:{self.apache_port}{path}"
 
-    def wait_for_core_reloaded(self, after) -> None:
+    def wait_for_core_reloaded(self, after: float) -> None:
         # Activating changes can involve an asynchronous(!) monitoring
         # core restart/reload, so e.g. querying a Livestatus table immediately
         # might not reflect the changes yet. Ask the core for a successful reload.
-        def config_reloaded():
+        def config_reloaded() -> bool:
             try:
-                new_t = self.live.query_value("GET status\nColumns: program_start\n")
+                new_t: int = self.live.query_value("GET status\nColumns: program_start\n")
             except livestatus.MKLivestatusException:
                 # Seems like the socket may vanish for a short time. Keep waiting in case
                 # of livestatus (connection) issues...
                 return False
             return new_t > after
 
-        reload_time, timeout = time.time(), 40
+        reload_time, timeout = time.time(), 120
         while not config_reloaded():
             if time.time() > reload_time + timeout:
-                raise Exception("Config did not update within %d seconds" % timeout)
+                ps_proc = subprocess.run(
+                    ["ps", "-ef"],
+                    capture_output=True,
+                    encoding="utf-8",
+                    check=True,
+                )
+                raise Exception(
+                    f"Config did not update within {timeout} seconds.\nOutput of ps -ef "
+                    f"(to check if core is actually running):\n{ps_proc.stdout}"
+                )
             time.sleep(0.2)
 
         assert config_reloaded()
 
+    @tracer.instrument("Site.restart_core")
     def restart_core(self) -> None:
         # Remember the time for the core reload check and wait a second because the program_start
         # is reported as integer and wait_for_core_reloaded() compares with ">".
@@ -152,8 +222,14 @@ class Site:
         self.omd("restart", "core")
         self.wait_for_core_reloaded(before_restart)
 
+    @tracer.instrument("Site.send_host_check_result")
     def send_host_check_result(
-        self, hostname: str, state: int, output: str, expected_state: Optional[int] = None
+        self,
+        hostname: str,
+        state: int,
+        output: str,
+        expected_state: int | None = None,
+        wait_timeout: int | None = None,
     ) -> None:
         if expected_state is None:
             expected_state = state
@@ -163,45 +239,173 @@ class Site:
             f"[{command_timestamp:.0f}] PROCESS_HOST_CHECK_RESULT;{hostname};{state};{output}"
         )
         self._wait_for_next_host_check(
-            hostname, last_check_before, command_timestamp, expected_state
+            hostname,
+            last_check_before,
+            command_timestamp,
+            expected_state,
+            wait_timeout,
         )
 
+    @tracer.instrument("Site.send_service_check_result")
     def send_service_check_result(
         self,
         hostname: str,
         service_description: str,
         state: int,
         output: str,
-        expected_state: Optional[int] = None,
+        expected_state: int | None = None,
+        wait_timeout: int | None = None,
     ) -> None:
         if expected_state is None:
             expected_state = state
         last_check_before = self._last_service_check(hostname, service_description)
         command_timestamp = self._command_timestamp(last_check_before)
         self.live.command(
-            f"[{command_timestamp:.0f}] PROCESS_SERVICE_CHECK_RESULT;{hostname};{service_description};{state};{output}"
+            f"[{command_timestamp:.0f}] PROCESS_SERVICE_CHECK_RESULT;{hostname};"
+            f"{service_description};{state};{output}"
         )
         self._wait_for_next_service_check(
-            hostname, service_description, last_check_before, command_timestamp, expected_state
+            hostname,
+            service_description,
+            last_check_before,
+            command_timestamp,
+            expected_state,
+            wait_timeout,
         )
 
-    def schedule_check(self, hostname: str, service_description: str, expected_state: int) -> None:
+    @tracer.instrument("Site.schedule_check")
+    def schedule_check(
+        self,
+        hostname: str,
+        service_description: str,
+        expected_state: int | None = None,
+        wait_timeout: int | None = None,
+    ) -> None:
         logger.debug("%s;%s schedule check", hostname, service_description)
         last_check_before = self._last_service_check(hostname, service_description)
         logger.debug("%s;%s last check before %r", hostname, service_description, last_check_before)
 
         command_timestamp = self._command_timestamp(last_check_before)
 
-        command = f"[{command_timestamp:.0f}] SCHEDULE_FORCED_SVC_CHECK;{hostname};{service_description};{command_timestamp:.0f}"
+        command = (
+            f"[{command_timestamp:.0f}] SCHEDULE_FORCED_SVC_CHECK;{hostname};"
+            f"{service_description};{command_timestamp:.0f}"
+        )
 
         logger.debug("%s;%s: %r", hostname, service_description, command)
+
         self.live.command(command)
 
         self._wait_for_next_service_check(
-            hostname, service_description, last_check_before, command_timestamp, expected_state
+            hostname,
+            service_description,
+            last_check_before,
+            command_timestamp,
+            expected_state,
+            wait_timeout,
         )
 
-    def _command_timestamp(self, last_check_before: float) -> float:
+    @tracer.instrument("Site.reschedule_services")
+    def reschedule_services(self, hostname: str, max_count: int = 10) -> None:
+        """Reschedule services in the test-site for a given host until no pending services are
+        found."""
+        count = 0
+        while (
+            len(pending_services := self.get_host_services(hostname, pending=True)) > 0
+            and count < max_count
+        ):
+            logger.info(
+                "The following services in %s host are in pending state:\n%s\n"
+                "Rescheduling checks...",
+                hostname,
+                pformat(pending_services),
+            )
+            self.schedule_check(hostname, "Check_MK", 0)
+            count += 1
+
+        assert len(pending_services) == 0, (
+            "The following services are in pending state after rescheduling checks:"
+            f"\n{pformat(pending_services)}\n"
+        )
+
+    @tracer.instrument("Site.wait_for_service_state_update")
+    def wait_for_services_state_update(
+        self,
+        hostname: str,
+        service_description: str,
+        expected_state: int,
+        wait_timeout: int,
+        max_count: int = 10,
+    ) -> None:
+        """Wait for the update of the provided service util no pending services are found"""
+        count = 0
+        while (
+            len(pending_services := self.get_host_services(hostname, pending=True)) > 0
+            and count < max_count
+        ):
+            logger.info(
+                "The following services in %s host are in pending state:\n%s\n"
+                "Waiting for the next update...",
+                hostname,
+                pformat(pending_services),
+            )
+            last_check_before = self._last_service_check(hostname, service_description)
+            logger.debug(
+                "%s;%s last check before %r", hostname, service_description, last_check_before
+            )
+
+            command_timestamp = self._command_timestamp(last_check_before)
+            self._wait_for_next_service_check(
+                hostname,
+                service_description,
+                last_check_before,
+                command_timestamp,
+                expected_state,
+                wait_timeout,
+            )
+            count += 1
+
+        assert len(pending_services) == 0, (
+            "The following services are in pending state after waiting:"
+            f"\n{pformat(pending_services)}\n"
+        )
+
+    def get_host_services(
+        self,
+        hostname: str,
+        pending: bool | None = None,
+    ) -> dict[str, ServiceInfo]:
+        """Return dict for all services in the given site and host.
+
+        If pending=True, return the pending services only.
+        """
+        services = {}
+        for service in self.openapi.services.get_host_services(
+            hostname, columns=["state", "plugin_output"], pending=pending
+        ):
+            services[service["extensions"]["description"]] = ServiceInfo(
+                state=service["extensions"]["state"],
+                summary=service["extensions"]["plugin_output"],
+            )
+        return services
+
+    def set_timezone(self, timezone: str) -> None:
+        """Set the timezone of the site."""
+        if not timezone:
+            return
+        restart_site = self.is_running()
+        self.stop()
+        environment = [
+            _
+            for _ in self.read_file("etc/environment").splitlines()
+            if not _.strip().startswith("TZ=")
+        ] + [f"TZ={timezone}"]
+        self.write_text_file("etc/environment", "\n".join(environment) + "\n")
+        if restart_site:
+            self.start()
+
+    @staticmethod
+    def _command_timestamp(last_check_before: float) -> float:
         # Ensure the next check result is not in same second as the previous check
         timestamp = time.time()
         while int(last_check_before) == int(timestamp):
@@ -210,19 +414,25 @@ class Site:
         return timestamp
 
     def _wait_for_next_host_check(
-        self, hostname: str, last_check_before: float, command_timestamp: float, expected_state: int
+        self,
+        hostname: str,
+        last_check_before: float,
+        command_timestamp: float,
+        expected_state: int | None = None,
+        wait_timeout: int | None = None,
     ) -> None:
-        wait_timeout = 20
-        last_check, state, plugin_output = self.live.query_row(
+        query: str = (
             "GET hosts\n"
             "Columns: last_check state plugin_output\n"
             f"Filter: host_name = {hostname}\n"
             f"WaitObject: {hostname}\n"
-            f"WaitTimeout: {wait_timeout*1000:d}\n"
+            f"WaitTimeout: {wait_timeout or self.check_wait_timeout * 1000:d}\n"
+            f"WaitTrigger: check\n"
             f"WaitCondition: last_check > {last_check_before:.0f}\n"
-            f"WaitCondition: state = {expected_state}\n"
-            "WaitTrigger: check\n"
         )
+        if expected_state is not None:
+            query += f"WaitCondition: state = {expected_state}\n"
+        last_check, state, plugin_output = self.live.query_row(query)
         self._verify_next_check_output(
             command_timestamp,
             last_check,
@@ -239,21 +449,23 @@ class Site:
         service_description: str,
         last_check_before: float,
         command_timestamp: float,
-        expected_state: int,
+        expected_state: int | None = None,
+        wait_timeout: int | None = None,
     ) -> None:
-        wait_timeout = 20
-        last_check, state, plugin_output = self.live.query_row(
+        query: str = (
             "GET services\n"
             "Columns: last_check state plugin_output\n"
             f"Filter: host_name = {hostname}\n"
             f"Filter: description = {service_description}\n"
             f"WaitObject: {hostname};{service_description}\n"
-            f"WaitTimeout: {wait_timeout*1000:d}\n"
+            f"WaitTimeout: {(wait_timeout or self.check_wait_timeout) * 1000:d}\n"
             f"WaitCondition: last_check > {last_check_before:.0f}\n"
-            f"WaitCondition: state = {expected_state}\n"
             "WaitCondition: has_been_checked = 1\n"
             "WaitTrigger: check\n"
         )
+        if expected_state is not None:
+            query += f"WaitCondition: state = {expected_state}\n"
+        last_check, state, plugin_output = self.live.query_row(query)
         self._verify_next_check_output(
             command_timestamp,
             last_check,
@@ -270,187 +482,263 @@ class Site:
         last_check: float,
         last_check_before: float,
         state: int,
-        expected_state: int,
+        expected_state: int | None,
         plugin_output: str,
-        wait_timeout: int,
+        wait_timeout: int | None = None,
     ) -> None:
         logger.debug("processing check result took %0.2f seconds", time.time() - command_timestamp)
-        assert last_check > last_check_before, (
-            f"Check result not processed within {wait_timeout} seconds "
-            f"(last check before reschedule: {last_check_before:.0f}, "
-            f"scheduled at: {command_timestamp:.0f}, last check: {last_check:.0f})"
+        if not last_check > last_check_before:
+            raise TimeoutError(
+                f"Check result not processed within {wait_timeout or self.check_wait_timeout} seconds "
+                f"(last check before reschedule: {last_check_before:.0f}, "
+                f"scheduled at: {command_timestamp:.0f}, last check: {last_check:.0f})"
+            )
+        if expected_state is None:
+            return
+        assert state == expected_state, (
+            f"Expected {expected_state} state, got {state} state, output {plugin_output}"
         )
-        assert (
-            state == expected_state
-        ), f"Expected {expected_state} state, got {state} state, output {plugin_output}"
 
     def _last_host_check(self, hostname: str) -> float:
-        return self.live.query_value(
+        last_check: int = self.live.query_value(
             f"GET hosts\nColumns: last_check\nFilter: host_name = {hostname}\n"
         )
+        return last_check
 
     def _last_service_check(self, hostname: str, service_description: str) -> float:
-        return self.live.query_value(
+        last_check: int = self.live.query_value(
             "GET services\n"
             "Columns: last_check\n"
             f"Filter: host_name = {hostname}\n"
             f"Filter: service_description = {service_description}\n"
         )
+        return last_check
 
     def get_host_state(self, hostname: str) -> int:
-        return self.live.query_value(f"GET hosts\nColumns: state\nFilter: host_name = {hostname}")
-
-    def _is_running_as_site_user(self) -> bool:
-        return pwd.getpwuid(os.getuid()).pw_name == self.id
-
-    def execute(self, cmd: List[str], *args, **kwargs) -> subprocess.Popen:
-        assert isinstance(cmd, list), "The command must be given as list"
-
-        kwargs.setdefault("encoding", "utf-8")
-        cmd_txt = (
-            subprocess.list2cmdline(cmd)
-            if self._is_running_as_site_user()
-            else " ".join(  #
-                [
-                    "sudo",
-                    "su",
-                    "-l",
-                    self.id,
-                    "-c",
-                    pipes.quote(" ".join(pipes.quote(p) for p in cmd)),
-                ]
-            )
+        state: int = self.live.query_value(
+            f"GET hosts\nColumns: state\nFilter: host_name = {hostname}"
         )
-        logger.info("Executing: %s", cmd_txt)
-        kwargs["shell"] = True
-        return subprocess.Popen(cmd_txt, *args, **kwargs)
+        return state
+
+    def execute(
+        self,
+        cmd: list[str],
+        preserve_env: list[str] | None = None,
+        **kwargs: Any,
+    ) -> subprocess.Popen:
+        return execute(cmd, preserve_env=preserve_env, sudo=True, substitute_user=self.id, **kwargs)
+
+    def run(
+        self,
+        args: list[str],
+        capture_output: bool = True,
+        check: bool = True,
+        encoding: str | None = "utf-8",
+        input: str | None = None,
+        preserve_env: list[str] | None = None,
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess:
+        return run(
+            args=args,
+            capture_output=capture_output,
+            check=check,
+            input=input,
+            encoding=encoding,
+            preserve_env=preserve_env,
+            sudo=True,
+            substitute_user=self.id,
+            **kwargs,
+        )
+
+    @overload
+    def check_output(
+        self,
+        cmd: list[str],
+        encoding: str = "utf-8",
+        input: str | None = None,
+        preserve_env: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str: ...
+
+    @overload
+    def check_output(
+        self,
+        cmd: list[str],
+        encoding: None,
+        input: str | None = None,
+        preserve_env: list[str] | None = None,
+        **kwargs: Any,
+    ) -> bytes: ...
+
+    def check_output(
+        self,
+        cmd: list[str],
+        encoding: str | None = "utf-8",
+        input: str | None = None,
+        preserve_env: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str | bytes:
+        """Mimics subprocess.check_output while running a process as the site user.
+
+        Returns the stdout of the process.
+        """
+        output = check_output(
+            cmd=cmd,
+            input=input,
+            encoding=encoding,
+            preserve_env=preserve_env,
+            sudo=True,
+            substitute_user=self.id,
+            **kwargs,
+        )
+        return output
+
+    @contextmanager
+    def copy_file(self, name: str | Path, target: str | Path) -> Iterator[None]:
+        """Copies a file from the same directory as the caller to the site"""
+        caller_file = Path(inspect.stack()[2].filename)
+        source_path = caller_file.parent / name
+        target_path = Path(target)
+        self.makedirs(target_path.parent)
+        self.write_text_file(target_path, source_path.read_text())
+        try:
+            yield
+        finally:
+            self.delete_file(target_path)
+
+    def python_helper(self, name: str) -> PythonHelper:
+        caller_file = Path(inspect.stack()[1].filename)
+        helper_file = caller_file.parent / name
+        return PythonHelper(self, helper_file)
 
     def omd(self, mode: str, *args: str) -> int:
-        sudo, site_id = ([], []) if self._is_running_as_site_user() else (["sudo"], [self.id])
-        cmd = sudo + ["/usr/bin/omd", mode] + site_id + list(args)
+        cmd = ["omd", mode] + list(args)
         logger.info("Executing: %s", subprocess.list2cmdline(cmd))
-        completed_process = subprocess.run(
+        completed_process = self.run(
             cmd,
+            capture_output=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            encoding="utf-8",
             check=False,
         )
-
-        log_level = logging.DEBUG if completed_process.returncode == 0 else logging.WARNING
-        logger.log(log_level, "Exit code: %d", completed_process.returncode)
+        logger.debug("Exit code: %d", completed_process.returncode)
         if completed_process.stdout:
-            logger.log(log_level, "Output:")
+            logger.debug("Output:")
         for line in completed_process.stdout.strip().split("\n"):
-            logger.log(log_level, "> %s", line)
+            logger.debug("> %s", line)
+
+        if mode == "status":
+            logger.info(
+                "OMD status: %d (%s)",
+                completed_process.returncode,
+                {
+                    0: "fully running",
+                    1: "fully stopped",
+                    2: "partially running",
+                }.get(completed_process.returncode, "unknown meaning"),
+            )
 
         return completed_process.returncode
 
-    def path(self, rel_path: str) -> str:
-        return os.path.join(self.root, rel_path)
+    def path(self, rel_path: str | Path) -> Path:
+        return self.root / rel_path
 
-    def read_file(self, rel_path: str) -> str:
-        if not self._is_running_as_site_user():
-            p = self.execute(["cat", self.path(rel_path)], stdout=subprocess.PIPE)
-            if p.wait() != 0:
-                raise Exception("Failed to read file %s. Exit-Code: %d" % (rel_path, p.wait()))
-            return p.stdout.read() if p.stdout is not None else ""
-        return open(self.path(rel_path)).read()
+    def read_file(self, rel_path: str | Path) -> str:
+        try:
+            stdout = self.check_output(["cat", self.path(rel_path).as_posix()])
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to read file '{rel_path}'!")
+            raise excp
+        return stdout
 
-    def delete_file(self, rel_path: str, missing_ok: bool = False) -> None:
-        if not self._is_running_as_site_user():
-            p = self.execute(["rm", "-f", self.path(rel_path)])
-            if p.wait() != 0:
-                raise Exception("Failed to delete file %s. Exit-Code: %d" % (rel_path, p.wait()))
-        else:
-            Path(self.path(rel_path)).unlink(missing_ok=missing_ok)
+    def read_binary_file(self, rel_path: str | Path) -> bytes:
+        try:
+            stdout = self.check_output(["cat", self.path(rel_path).as_posix()], encoding=None)
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to read file '{rel_path}'!")
+            raise excp
+        return stdout
 
-    def delete_dir(self, rel_path: str) -> None:
-        if not self._is_running_as_site_user():
-            p = self.execute(["rm", "-rf", self.path(rel_path)])
-            if p.wait() != 0:
-                raise Exception(
-                    "Failed to delete directory %s. Exit-Code: %d" % (rel_path, p.wait())
-                )
-        else:
-            shutil.rmtree(self.path(rel_path))
+    def delete_file(self, rel_path: str | Path) -> None:
+        try:
+            _ = self.run(["rm", "-f", self.path(rel_path).as_posix()])
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to read file '{rel_path}'!")
+            raise excp
 
-    def _call_tee(self, rel_target_path: str, content: Union[bytes, str]) -> None:
-        with self.execute(
-            ["tee", self.path(rel_target_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            encoding=None
-            if isinstance(
-                content,
-                bytes,
-            )
-            else "utf-8",
-        ) as p:
-            p.communicate(content)
-        if p.returncode != 0:
-            raise Exception(
-                "Failed to write file %s. Exit-Code: %d"
-                % (
-                    rel_target_path,
-                    p.returncode,
-                )
-            )
+    def delete_dir(self, rel_path: str | Path) -> None:
+        try:
+            _ = self.run(["rm", "-rf", self.path(rel_path).as_posix()])
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to delete directory '{rel_path}'!")
+            raise excp
 
-    def write_text_file(self, rel_path: str, content: str) -> None:
-        if not self._is_running_as_site_user():
-            self._call_tee(rel_path, content)
-        else:
-            file_path = Path(self.path(rel_path))
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with file_path.open("w", encoding="utf-8") as f:
-                f.write(content)
+    def write_text_file(self, rel_path: str | Path, content: str) -> None:
+        write_file(self.path(rel_path), content, sudo=True, substitute_user=self.id)
 
-    def write_binary_file(self, rel_path: str, content: bytes) -> None:
-        if not self._is_running_as_site_user():
-            self._call_tee(rel_path, content)
-        else:
-            file_path = Path(self.path(rel_path))
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with file_path.open("wb") as f:
-                f.write(content)
+    def write_binary_file(self, rel_path: str | Path, content: bytes) -> None:
+        write_file(self.path(rel_path), content, sudo=True, substitute_user=self.id)
 
-    def create_rel_symlink(self, link_rel_target: str, rel_link_name: str) -> None:
-        if not self._is_running_as_site_user():
-            with self.execute(
-                ["ln", "-s", link_rel_target, rel_link_name],
-                stdout=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-            ) as p:
-                p.wait()
-            if p.returncode != 0:
-                raise Exception(
-                    "Failed to create symlink from %s to ./%s. Exit-Code: %d"
-                    % (rel_link_name, link_rel_target, p.returncode)
-                )
-        else:
-            os.symlink(link_rel_target, os.path.join(self.root, rel_link_name))
+    def create_rel_symlink(self, link_rel_target: str | Path, rel_link_name: str) -> None:
+        try:
+            _ = self.run(["ln", "-s", Path(link_rel_target).as_posix(), rel_link_name])
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to create symlink from {rel_link_name} to ./{link_rel_target}!")
+            raise excp
 
-    def resolve_path(self, rel_path: Path) -> Path:
-        if not self._is_running_as_site_user():
-            p = self.execute(["readlink", "-e", self.path(str(rel_path))], stdout=subprocess.PIPE)
-            if p.wait() != 0:
-                raise Exception(f"Failed to read symlink at {rel_path}. Exit-Code: {p.wait()}")
-            if p.stdout is None:
-                raise Exception(f"Failed to read symlink at {rel_path}. No stdout.")
-            return Path(p.stdout.read().strip())
-        return Path(self.path(str(rel_path))).resolve()
+    def resolve_path(self, rel_path: str | Path) -> Path:
+        try:
+            stdout = self.check_output(["readlink", "-e", self.path(rel_path).as_posix()])
+        except subprocess.CalledProcessError as excp:
+            excp.add_note(f"Failed to read symlink at {rel_path}!")
+            raise excp
+        return Path(stdout.strip())
 
-    def file_exists(self, rel_path: str) -> bool:
-        if not self._is_running_as_site_user():
-            p = self.execute(["test", "-e", self.path(rel_path)], stdout=subprocess.PIPE)
-            return p.wait() == 0
+    def file_exists(self, rel_path: str | Path) -> bool:
+        p = self.run(["test", "-e", self.path(rel_path).as_posix()], check=False)
+        return p.returncode == 0
 
-        return os.path.exists(self.path(rel_path))
+    def is_file(self, rel_path: str | Path) -> bool:
+        return self.run(["test", "-f", self.path(rel_path).as_posix()], check=False).returncode == 0
 
-    def makedirs(self, rel_path: str) -> bool:
-        p = self.execute(["mkdir", "-p", self.path(rel_path)])
-        return p.wait() == 0
+    def is_dir(self, rel_path: str | Path) -> bool:
+        return self.run(["test", "-d", self.path(rel_path).as_posix()], check=False).returncode == 0
+
+    def file_mode(self, rel_path: str | Path) -> int:
+        return int(
+            self.check_output(["stat", "-c", "%f", self.path(rel_path).as_posix()]).rstrip(),
+            base=16,
+        )
+
+    def file_timestamp(self, rel_path: str | Path) -> int:
+        return int(self.check_output(["stat", "-c", "%Y", self.path(rel_path).as_posix()]).rstrip())
+
+    def inode(self, rel_path: str | Path) -> int:
+        return int(self.check_output(["stat", "-c", "%i", self.path(rel_path).as_posix()]).rstrip())
+
+    def makedirs(self, rel_path: str | Path) -> None:
+        makedirs(self.path(rel_path), sudo=True, substitute_user=self.id)
+
+    def reset_admin_password(self, new_password: str | None = None) -> None:
+        self.run(["cmk-passwd", "-i", ADMIN_USER], input=new_password or self.admin_password)
+
+    def listdir(self, rel_path: str | Path) -> list[str]:
+        output = self.check_output(["ls", "-1", self.path(rel_path).as_posix()])
+        return output.strip().split("\n") if output else []
+
+    def system_temp_dir(self) -> Iterator[str]:
+        stdout = self.check_output(["mktemp", "-d", "cmk-system-test-XXXXXXXXX", "-p", "/tmp"])
+        assert stdout is not None
+        path = stdout.strip()
+
+        try:
+            yield path
+        finally:
+            try:
+                _ = self.run(["rm", "-rf", path])
+            except subprocess.CalledProcessError as excp:
+                excp.add_note(f"Failed to delete directory '{path}'!")
+                raise excp
 
     def cleanup_if_wrong_version(self) -> None:
         if not self.exists():
@@ -465,63 +753,95 @@ class Site:
     def current_version_directory(self) -> str:
         return os.path.split(os.readlink("/omd/sites/%s/version" % self.id))[-1]
 
-    def create(self) -> None:
+    @tracer.instrument("Site.install_cmk")
+    def install_cmk(self) -> None:
         if not self.version.is_installed():
-            raise Exception(
-                "Version %s not installed. "
-                'Use "tests/scripts/install-cmk.py" or install it manually.' % self.version.version
-            )
+            logger.info("Installing Checkmk version %s", self.version.version_directory())
+            try:
+                _ = run(
+                    [
+                        f"{repo_path()}/scripts/run-uvenv",
+                        f"{repo_path()}/tests/scripts/install-cmk.py",
+                    ],
+                    env=dict(
+                        os.environ, VERSION=self.version.version, EDITION=self.version.edition.short
+                    ),
+                )
+            except subprocess.CalledProcessError as excp:
+                excp.add_note("Execute 'tests/scripts/install-cmk.py' manually to debug the issue.")
+                if excp.returncode == 22:
+                    raise RuntimeError(
+                        f"Version {self.version.version} could not be installed!"
+                    ) from excp
+                if excp.returncode == 11:
+                    raise FileNotFoundError(
+                        f"Version {self.version.version} could not be downloaded!"
+                    ) from excp
+                raise excp
 
-        if not self.reuse and self.exists():
+    @tracer.instrument("Site.create")
+    def create(self) -> None:
+        self.install_cmk()
+
+        if not (self.reuse or self.update) and self.exists():
             raise Exception("The site %s already exists." % self.id)
 
-        if not self.exists():
-            logger.info("Creating site '%s'", self.id)
-            completed_process = subprocess.run(
-                [
-                    "/usr/bin/sudo",
-                    "/usr/bin/omd",
-                    "-V",
-                    self.version.version_directory(),
-                    "create",
-                    "--admin-password",
-                    self.admin_password,
-                    "--apache-reload",
-                    self.id,
-                ],
+        if self.update or not self.exists():
+            logger.info('Updating site "%s"' if self.update else 'Creating site "%s"', self.id)
+            completed_process = run(
+                (
+                    [
+                        "omd",
+                        "-f",
+                        "-V",
+                        self.version.version_directory(),
+                        "update",
+                        f"--conflict={self.update_conflict_mode}",
+                        self.id,
+                    ]
+                    if self.update
+                    else [
+                        "omd",
+                        "-V",
+                        self.version.version_directory(),
+                        "create",
+                        "--admin-password",
+                        self.admin_password,
+                        "--apache-reload",
+                        self.id,
+                    ]
+                ),
                 check=False,
+                sudo=True,
             )
-            assert completed_process.returncode == 0
+            assert not completed_process.returncode, completed_process.stderr
             assert os.path.exists("/omd/sites/%s" % self.id)
 
             self._ensure_sample_config_is_present()
+            # This seems to cause an issue with GUI and XSS crawl (they take too long or seem to
+            # hang) job. Disable as a quick fix. We may have to parametrize this per job type.
+            # self._set_number_of_apache_processes()
             if not self.version.is_raw_edition():
-                self._log_cmc_startup()
+                self._set_number_of_cmc_helpers()
                 self._enable_cmc_core_dumps()
                 self._enable_cmc_debug_logging()
+                self._enable_cmc_tooling(tool=None)
                 self._disable_cmc_log_rotation()
-                self._enabled_liveproxyd_debug_logging()
+                self._enable_liveproxyd_debug_logging()
             self._enable_mkeventd_debug_logging()
             self._enable_gui_debug_logging()
             self._tune_nagios()
-
-        if self.install_test_python_modules:
-            self._install_test_python_modules()
-
-        if self.update_from_git:
-            self._update_with_f12_files()
 
         # The tmpfs is already mounted during "omd create". We have just created some
         # Checkmk configuration files and want to be sure they are used once the core
         # starts.
         self._update_cmk_core_config()
 
-        self.makedirs(self.result_dir())
-
         self.openapi.port = self.apache_port
-        self.openapi.set_authentication_header(
-            user="automation", password=self.get_automation_secret()
-        )
+        # set the sites timezone according to TZ
+        self.set_timezone(os.getenv("TZ", "UTC"))
+
+        self._disable_autostart()
 
     def _ensure_sample_config_is_present(self) -> None:
         if missing_files := self._missing_but_required_wato_files():
@@ -530,13 +850,11 @@ class Site:
                 "01_create-sample-config.py (Missing files: %s)" % missing_files
             )
 
-    def _missing_but_required_wato_files(self) -> List[str]:
+    def _missing_but_required_wato_files(self) -> list[str]:
         required_files = [
             "etc/check_mk/conf.d/wato/rules.mk",
             "etc/check_mk/multisite.d/wato/tags.mk",
             "etc/check_mk/conf.d/wato/global.mk",
-            "var/check_mk/web/automation",
-            "var/check_mk/web/automation/automation.secret",
         ]
 
         missing = []
@@ -545,74 +863,11 @@ class Site:
                 missing.append(f)
         return missing
 
-    def _update_with_f12_files(self) -> None:
-        paths = [
-            cmk_path() + "/omd/packages/omd",
-            cmk_path() + "/livestatus/api/python",
-            cmk_path() + "/bin",
-            cmk_path() + "/agents/special",
-            cmk_path() + "/agents/plugins",
-            cmk_path() + "/agents/windows/plugins",
-            cmk_path() + "/agents",
-            cmk_path() + "/cmk/base",
-            cmk_path() + "/cmk",
-            cmk_path() + "/checks",
-            cmk_path() + "/checkman",
-            cmk_path() + "/web",
-            cmk_path() + "/inventory",
-            cmk_path() + "/notifications",
-            cmk_path() + "/.werks",
-        ]
-
-        if self.version.is_raw_edition():
-            # The module is only used in CRE
-            paths += [
-                cmk_path() + "/livestatus",
-            ]
-
-        if os.path.exists(cmc_path()) and not self.version.is_raw_edition():
-            paths += [
-                cmc_path() + "/bin",
-                cmc_path() + "/agents/plugins",
-                cmc_path() + "/modules",
-                cmc_path() + "/cmk/base",
-                cmc_path() + "/cmk",
-                cmc_path() + "/web",
-                cmc_path() + "/alert_handlers",
-                cmc_path() + "/misc",
-                cmc_path() + "/core",
-                # TODO: Do not invoke the chroot build mechanism here, which is very time
-                # consuming when not initialized yet
-                # cmc_path() + "/agents",
-            ]
-
-        if os.path.exists(cme_path()) and self.version.is_managed_edition():
-            paths += [
-                cme_path(),
-                cme_path() + "/cmk/base",
-            ]
-
-        for path in paths:
-            if os.path.exists("%s/.f12" % path):
-                logger.info('Executing .f12 in "%s"...', path)
-                assert (
-                    os.system(  # nosec
-                        'cd "%s" ; '
-                        "sudo PATH=$PATH ONLY_COPY=1 ALL_EDITIONS=0 SITE=%s "
-                        "CHROOT_BASE_PATH=$CHROOT_BASE_PATH CHROOT_BUILD_DIR=$CHROOT_BUILD_DIR "
-                        "bash .f12" % (path, self.id)
-                    )
-                    >> 8
-                    == 0
-                )
-                logger.info('Executing .f12 in "%s" DONE', path)
-
     def _update_cmk_core_config(self) -> None:
         logger.info("Updating core configuration...")
-        p = self.execute(["cmk", "-U"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert p.wait() == 0, "Failed to execute 'cmk -U': %s" % p.communicate()[0]
+        _ = self.run(["cmk", "-U"])
 
-    def _enabled_liveproxyd_debug_logging(self) -> None:
+    def _enable_liveproxyd_debug_logging(self) -> None:
         self.makedirs("etc/check_mk/liveproxyd.d")
         # 15 = verbose
         # 10 = debug
@@ -635,21 +890,44 @@ class Site:
             },
         )
 
-    def _log_cmc_startup(self):
-        tool = None  # sensible tools for us: None, "memcheck" or "helgrind"
-        valgrind = (
-            'PATH="/opt/bin:$PATH" '
-            f"valgrind --tool={tool} --quiet --num-callers=30 --error-exitcode=42 --exit-on-first-error=yes"
-        )
-        redirect = ">> $OMD_ROOT/var/log/cmc-startup.log 2>&1"
+    def _enable_cmc_tooling(self, tool: Literal["helgrind", "memcheck"] | None) -> None:
+        if not tool:
+            return
+
+        if not os.path.exists("/opt/bin/valgrind"):
+            logger.warning("WARNING: /opt/bin/valgrind does not exist. Skip enabling it.")
+            return
+
         self.write_text_file(
-            "etc/init.d/cmc",
-            self.read_file("etc/init.d/cmc").replace(
-                "\n    if $DAEMON $CONFIGFILE; then\n",
-                "\n"  #
-                f"    date {redirect}\n"  #
-                f"    ps -fu {self.id} {redirect}\n"
-                f"    if {valgrind if tool else ''} $DAEMON $CONFIGFILE {redirect}; then\n",
+            "etc/default/cmc",
+            f'CMC_DAEMON_PREPEND="/opt/bin/valgrind --tool={tool} --quiet '
+            f'--log-file=$OMD_ROOT/var/log/cmc-{tool}.log"\n',
+        )
+
+    def _set_number_of_apache_processes(self) -> None:
+        self.makedirs("etc/apache/conf.d")
+        self.write_text_file(
+            "etc/apache/conf.d/tune-server-pool.conf",
+            "\n".join(
+                [
+                    "MinSpareServers 1",
+                    "MaxSpareServers 2",
+                    "ServerLimit 5",
+                    "MaxClients 5",
+                ]
+            ),
+        )
+
+    def _set_number_of_cmc_helpers(self) -> None:
+        self.makedirs("etc/check_mk/conf.d")
+        self.write_text_file(
+            "etc/check_mk/conf.d/cmc-helpers.mk",
+            "\n".join(
+                [
+                    "cmc_check_helpers = 2",
+                    "cmc_fetcher_helpers = 2",
+                    "cmc_checker_helpers = 2",
+                ]
             ),
         )
 
@@ -685,16 +963,22 @@ class Site:
 
     def _enable_gui_debug_logging(self) -> None:
         self.makedirs("etc/check_mk/multisite.d")
+        # 10: debug
+        # 15: verbose
+        # 20: informational
+        # 30: warning (default)
         self.write_text_file(
             "etc/check_mk/multisite.d/logging.mk",
             "log_levels = %r\n"
             % {
-                "cmk.web": 10,
-                "cmk.web.ldap": 10,
-                "cmk.web.auth": 10,
-                "cmk.web.bi.compilation": 10,
-                "cmk.web.automations": 10,
-                "cmk.web.background-job": 10,
+                "cmk.web": 15,
+                "cmk.web.ldap": 15,
+                "cmk.web.saml2": 15,
+                "cmk.web.auth": 15,
+                "cmk.web.bi.compilation": 15,
+                "cmk.web.automations": 15,
+                "cmk.web.background-job": 15,
+                "cmk.web.ui-job-scheduler": 10,
             },
         )
 
@@ -713,67 +997,26 @@ class Site:
             "log_rotation_method=n\n",
         )
 
-    def _install_test_python_modules(self) -> None:
-        venv = virtualenv_path()
-        bin_dir = venv / "bin"
-        self._copy_python_modules_from(
-            venv / f"lib/python{PYTHON_VERSION_MAJOR}.{PYTHON_VERSION_MINOR}/site-packages"
-        )
-
-        # Some distros have a separate platfrom dependent library directory, handle it....
-        platlib64 = (
-            venv / f"lib64/python{PYTHON_VERSION_MAJOR}.{PYTHON_VERSION_MINOR}/site-packages"
-        )
-        if platlib64.exists():
-            self._copy_python_modules_from(platlib64)
-
-        for file_name in ["py.test", "pytest"]:
-            assert (
-                os.system(  # nosec
-                    "sudo rsync -a --chown %s:%s %s %s/local/bin"
-                    % (self.id, self.id, bin_dir / file_name, self.root)
-                )
-                >> 8
-                == 0
-            )
-
-    def _copy_python_modules_from(self, packages_dir: Path) -> None:
-        enforce_override = ["backports"]
-
-        for file_name in os.listdir(str(packages_dir)):
-            # Only copy modules that do not exist in regular module path
-            if file_name not in enforce_override:
-                if os.path.exists("%s/lib/python/%s" % (self.root, file_name)) or os.path.exists(
-                    f"{self.root}/lib/python{PYTHON_VERSION_MAJOR}.{PYTHON_VERSION_MINOR}/site-packages/{file_name}"
-                ):
-                    continue
-
-            assert (
-                os.system(  # nosec
-                    f"sudo rsync -a --chown {self.id}:{self.id} {packages_dir / file_name} {self.root}/local/lib/python{PYTHON_VERSION_MAJOR}/"
-                )
-                >> 8
-                == 0
-            )
-
-    def rm(self, site_id: Optional[str] = None) -> None:
-        # TODO: LM: Temporarily disabled until "omd rm" issue is fixed.
-        # assert subprocess.Popen(["/usr/bin/sudo", "/usr/bin/omd",
-        subprocess.run(
+    @tracer.instrument("Site.rm")
+    def rm(self, site_id: str | None = None) -> None:
+        # Wait a bit to avoid unnecessarily stress testing the site.
+        time.sleep(1)
+        _ = run(
             [
-                "/usr/bin/sudo",
-                "/usr/bin/omd",
+                "omd",
                 "-f",
                 "rm",
                 "--apache-reload",
                 "--kill",
                 site_id or self.id,
             ],
-            check=False,
+            sudo=True,
         )
 
+    @tracer.instrument("Site.start")
     def start(self) -> None:
         if not self.is_running():
+            logger.info("Starting site")
             assert self.omd("start") == 0
             # print("= BEGIN PROCESSES AFTER START ==============================")
             # self.execute(["ps", "aux"]).wait()
@@ -782,7 +1025,7 @@ class Site:
             while not self.is_running():
                 i += 1
                 if i > 10:
-                    self.execute(["/usr/bin/omd", "status"]).wait()
+                    self.run(["omd", "status"])
                     # print("= BEGIN PROCESSES FAIL ==============================")
                     # self.execute(["ps", "aux"]).wait()
                     # print("= END PROCESSES FAIL ==============================")
@@ -793,18 +1036,22 @@ class Site:
                 time.sleep(0.2)
 
             self.ensure_running()
+        else:
+            logger.info("Site is already running")
 
-        assert os.path.ismount(
-            self.path("tmp")
-        ), "The site does not have a tmpfs mounted! We require this for good performing tests"
+        assert self.path("tmp").is_mount(), (
+            "The site does not have a tmpfs mounted! We require this for good performing tests"
+        )
 
+    @tracer.instrument("Site.stop")
     def stop(self) -> None:
         if self.is_stopped():
             return  # Nothing to do
+        logger.info("Stopping site")
 
-        # logger.debug("= BEGIN PROCESSES BEFORE =======================================")
-        # os.system("ps -fwwu %s" % self.id)  # nosec
-        # logger.debug("= END PROCESSES BEFORE =======================================")
+        logger.debug("= BEGIN PROCESSES BEFORE =======================================")
+        logger.debug(check_output(["ps", "-fwwu", str(self.id)]))
+        logger.debug("= END PROCESSES BEFORE =======================================")
 
         stop_exit_code = self.omd("stop")
         if stop_exit_code != 0:
@@ -826,24 +1073,32 @@ class Site:
     def exists(self) -> bool:
         return os.path.exists("/omd/sites/%s" % self.id)
 
+    @tracer.instrument("Site.ensure_running")
     def ensure_running(self) -> None:
         if not self.is_running():
-            pytest.exit("Site was not running completely while it should. Enforcing stop.")
+            omd_status_output = self.check_output(["omd", "status"], stderr=subprocess.STDOUT)
+            ps_output = self.check_output(["ps", "-ef"], stderr=subprocess.STDOUT)
+            self.save_results()
+
+            write_file(ps_output_file := self.result_dir() / "processes.out", ps_output, sudo=True)
+
+            self.report_crashes()
+
+            pytest.exit(
+                "Site was not running completely while it should be! Enforcing stop.\n\n"
+                f"Output of omd status:\n{omd_status_output!r}\n\n"
+                f'See "{ps_output_file}" for full "ps -ef" output!',
+                returncode=1,
+            )
 
     def is_running(self) -> bool:
-        return (
-            self.execute(["/usr/bin/omd", "status", "--bare"], stdout=subprocess.DEVNULL).wait()
-            == 0
-        )
+        return self.omd("status") == 0
 
     def is_stopped(self) -> bool:
         # 0 -> fully running
         # 1 -> fully stopped
         # 2 -> partially running
-        return (
-            self.execute(["/usr/bin/omd", "status", "--bare"], stdout=subprocess.DEVNULL).wait()
-            == 1
-        )
+        return self.omd("status") == 1
 
     def set_config(self, key: str, val: str, with_restart: bool = False) -> None:
         if self.get_config(key) == val:
@@ -861,51 +1116,54 @@ class Site:
             self.start()
             logger.debug("Started site")
 
-    def get_config(self, key: str) -> str:
-        p = self.execute(
-            ["omd", "config", "show", key], stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        stdout, stderr = p.communicate()
-        logger.debug("omd config: %s is set to %r", key, stdout.strip())
-        if stderr:
+    def get_config(self, key: str, default: str = "") -> str:
+        process = self.run(["omd", "config", "show", key])
+        logger.debug("omd config: %s is set to %r", key, stdout := process.stdout.strip())
+        if stderr := process.stderr:
             logger.error(stderr)
-        return stdout.strip()
+        return stdout.strip() or default
 
     def core_name(self) -> Literal["cmc", "nagios"]:
         return "nagios" if self.version.is_raw_edition() else "cmc"
 
-    def core_history_log(self) -> str:
+    def core_history_log(self) -> Path:
         core = self.core_name()
         if core == "nagios":
-            return "var/log/nagios.log"
+            return self.path("var/log/nagios.log")
         if core == "cmc":
-            return "var/check_mk/core/history"
+            return self.path("var/check_mk/core/history")
         raise ValueError(f"Unhandled core: {core}")
 
     def core_history_log_timeout(self) -> int:
         return 10 if self.core_name() == "cmc" else 30
 
-    # These things are needed to make the site basically being setup. So this
-    # is checked during site initialization instead of a dedicated test.
-    def verify_cmk(self) -> None:
-        p = self.execute(
-            ["cmk", "--help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
+    def _create_automation_user(self, username: str) -> None:
+        self._automation_secret = Password.random(24)
+        logger.info("Creating test-user: '%s'.", username)
+        self.openapi.users.create(
+            username=username,
+            fullname="Automation user for tests",
+            password=self._automation_secret.raw,
+            email="auomation@localhost",
+            contactgroups=[],
+            roles=["admin"],
+            is_automation_user=True,
         )
-        stdout = p.communicate()[0]
-        assert p.returncode == 0, "Failed to execute 'cmk': %s" % stdout
+        self.openapi.set_authentication_header(user=username, password=self._automation_secret.raw)
 
-        p = self.execute(
-            ["cmk", "-U"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
-        )
-        stdout = p.communicate()[0]
-        assert p.returncode == 0, "Failed to execute 'cmk -U': %s" % stdout
-
+    @tracer.instrument("Site.prepare_for_tests")
     def prepare_for_tests(self) -> None:
-        self.verify_cmk()
-
-        web = CMKWebSession(self)
-        web.login()
-        web.enforce_non_localized_gui()
+        logger.info("Prepare for tests")
+        username = AUTOMATION_USER
+        if self.openapi.users.get(username) is None:
+            self._create_automation_user(username)
+        else:
+            logger.info("Reusing existing test-user: '%s' (REUSE=1).", username)
+        if self.enforce_english_gui:
+            web = CMKWebSession(self)
+            if not self.version.is_saas_edition():
+                web.login()
+            self.enforce_non_localized_gui(web)
         self._add_wato_test_config()
 
     # Add some test configuration that is not test specific. These settings are set only to have a
@@ -916,42 +1174,70 @@ class Site:
         # load the config without loading the checks in advance, this leads into an
         # exception.
         # We set this config option here trying to catch this kind of issue.
-        self.openapi.create_rule(
+        self.openapi.rules.create(
             ruleset_name="fileinfo_groups",
             value={"group_patterns": [("TESTGROUP", ("*gwia*", ""))]},
             folder="/",
         )
 
+    def enforce_non_localized_gui(self, web: CMKWebSession) -> None:
+        r = web.get("user_profile.py")
+        assert "Edit profile" in r.text, "Body: %s" % r.text
+
+        if (user := self.openapi.users.get(ADMIN_USER)) is None:
+            raise Exception("User cmkadmin not found!")
+        user_spec, etag = user
+        user_spec["language"] = "en"
+        user_spec.pop("enforce_password_change", None)
+        self.openapi.users.edit(ADMIN_USER, user_spec, etag)
+
+        # Verify the language is as expected now
+        r = web.get("user_profile.py", allow_redirect_to_login=True)
+        assert "Edit profile" in r.text, "Body: %s" % r.text
+
+    def send_traces_to_central_collector(self, endpoint: str) -> None:
+        """Configure the site to send traces to our central collector"""
+        logger.info("Send traces to central collector (collector: %s)", endpoint)
+        self.set_config("TRACE_SEND", "on")
+        self.set_config("TRACE_SEND_TARGET", endpoint)
+
+    def write_resource_config(self, extra_resource_attributes: Mapping[str, str]) -> None:
+        self.write_text_file(
+            "etc/omd/resource_attributes_from_config.json",
+            json.dumps(extra_resource_attributes) + "\n",
+        )
+
     def open_livestatus_tcp(self, encrypted: bool) -> None:
         """This opens a currently free TCP port and remembers it in the object for later use
         Not free of races, but should be sufficient."""
-        start_again = False
+        # Check if livestatus is already enabled and has correct TLS setting
+        if self.get_config("LIVESTATUS_TCP").rstrip() == "on" and (
+            self.get_config("LIVESTATUS_TCP_TLS", "off") == ("on" if encrypted else "off")
+        ):
+            return
 
-        if not self.is_stopped():
-            start_again = True
+        was_stopped = self.is_stopped()
+        if not was_stopped:
             self.stop()
-
-        logger.info("Have livestatus port lock")
         self.set_config("LIVESTATUS_TCP", "on")
-        self._gather_livestatus_port()
+        self.gather_livestatus_port()
         self.set_config("LIVESTATUS_TCP_PORT", str(self._livestatus_port))
+        # It might happen that OMD decides for another port (e.g. in case it is already in use).
+        # So we need to read the port from the config again.
+        self.gather_livestatus_port(from_config=True)
         self.set_config("LIVESTATUS_TCP_TLS", "on" if encrypted else "off")
-
-        if start_again:
+        if not was_stopped:
             self.start()
 
-        logger.info("After livestatus port lock")
-
-    def _gather_livestatus_port(self) -> None:
-        if self.reuse and self.exists():
-            port = int(self.get_config("LIVESTATUS_TCP_PORT"))
+    def gather_livestatus_port(self, from_config: bool = False) -> None:
+        if from_config and (config_port := int(self.get_config("LIVESTATUS_TCP_PORT", "0"))):
+            self._livestatus_port = config_port
         else:
-            port = self.get_free_port_from(9123)
+            self._livestatus_port = self.get_free_port_from(9123)
 
-        self._livestatus_port = port
-
-    def get_free_port_from(self, port: int) -> int:
-        used_ports = set([])
+    @staticmethod
+    def get_free_port_from(port: int) -> int:
+        used_ports = set()
         for cfg_path in Path("/omd/sites").glob("*/etc/omd/site.conf"):
             with cfg_path.open() as cfg_file:
                 for line in cfg_file:
@@ -965,139 +1251,674 @@ class Site:
         logger.debug("Livestatus ports already in use: %r, using port: %d", used_ports, port)
         return port
 
+    def toggle_liveproxyd(self, enabled: bool = True) -> None:
+        self.set_config("LIVEPROXYD", "on" if enabled else "off", with_restart=True)
+        assert self.file_exists("tmp/run/liveproxyd.pid") == enabled
+
+    def _disable_autostart(self) -> None:
+        self.set_config("AUTOSTART", "off", with_restart=False)
+
     def save_results(self) -> None:
-        if not _is_dockerized():
-            logger.info("Not dockerized: not copying results")
+        if not is_containerized():
+            logger.info("Not containerized: not copying results")
             return
         logger.info("Saving to %s", self.result_dir())
-
-        os.makedirs(self.result_dir(), exist_ok=True)
-
-        with suppress(FileNotFoundError):
-            shutil.copy(self.path("junit.xml"), self.result_dir())
-
-        shutil.copytree(
-            self.path("var/log"),
-            "%s/logs" % self.result_dir(),
-            ignore_dangling_symlinks=True,
-            ignore=shutil.ignore_patterns(".*"),
-        )
-
-        for nagios_log_path in glob.glob(self.path("var/nagios/*.log")):
-            shutil.copy(nagios_log_path, "%s/logs" % self.result_dir())
-
-        cmc_dir = "%s/cmc" % self.result_dir()
-        os.makedirs(cmc_dir, exist_ok=True)
-
-        with suppress(FileNotFoundError):
-            shutil.copy(self.path("var/check_mk/core/history"), "%s/history" % cmc_dir)
-
-        with suppress(FileNotFoundError):
-            shutil.copy(self.path("var/check_mk/core/core"), "%s/core_dump" % cmc_dir)
-
-        with suppress(FileNotFoundError):
-            shutil.copytree(
-                self.path("var/check_mk/crashes"),
-                "%s/crashes" % self.result_dir(),
-                ignore=shutil.ignore_patterns(".*"),
+        if self.path("junit.xml").exists():
+            execute(
+                ["cp", self.path("junit.xml").as_posix(), self.result_dir().as_posix()], sudo=True
             )
 
-    def result_dir(self) -> str:
-        return os.path.join(os.environ.get("RESULT_PATH", self.path("results")), self.id)
+        execute(
+            ["cp", "-rL", self.path("var/log").as_posix(), self.result_dir().as_posix()], sudo=True
+        )
 
-    def get_automation_secret(self):
-        secret_path = "var/check_mk/web/automation/automation.secret"
-        secret = self.read_file(secret_path).strip()
+        # Rename apache logs to get better handling by the browser when opening a log file
+        for log_name in ("access_log", "error_log"):
+            orig_log_path = self.result_dir() / "log" / "apache" / log_name
+            if self.file_exists(orig_log_path):
+                execute(
+                    [
+                        "mv",
+                        orig_log_path.as_posix(),
+                        (orig_log_path.parent / log_name.replace("_", ".")).as_posix(),
+                    ],
+                    sudo=True,
+                )
 
-        if secret == "":
+        for nagios_log_path in glob.glob(self.path("var/nagios/*.log").as_posix()):
+            execute(["cp", nagios_log_path, (self.result_dir() / "log").as_posix()], sudo=True)
+
+        cmc_dir = self.result_dir() / "cmc"
+        makedirs(cmc_dir, sudo=True)
+
+        execute(
+            [
+                "cp",
+                self.path("var/check_mk/core/history").as_posix(),
+                (cmc_dir / "history").as_posix(),
+            ],
+            sudo=True,
+        )
+
+        if self.file_exists("var/check_mk/core/core"):
+            execute(
+                [
+                    "cp",
+                    self.path("var/check_mk/core/core").as_posix(),
+                    (cmc_dir / "core_dump").as_posix(),
+                ],
+                sudo=True,
+            )
+
+        execute(
+            ["cp", "-r", self.crash_report_dir.as_posix(), self.crash_archive_dir.as_posix()],
+            sudo=True,
+        )
+
+        execute(
+            [
+                "cp",
+                "-r",
+                self.path("var/check_mk/background_jobs").as_posix(),
+                self.result_dir().as_posix(),
+            ],
+            sudo=True,
+        )
+
+        # Change ownership of all copied files to testuser
+        run(["chown", "-R", getuser(), self.result_dir().as_posix()], sudo=True)
+        run(["chgrp", "-R", getuser(), self.result_dir().as_posix()], sudo=True)
+
+        # Rename files to get better handling by the browser when opening a crash file
+        for crash_info in self.crash_archive_dir.glob("**/crash.info"):
+            crash_json = crash_info.parent / (crash_info.stem + ".json")
+            crash_info.rename(crash_json)
+
+    def crash_reports_dirs(self) -> list[Path]:
+        return [
+            self.crash_report_dir / crash_type / crash_id
+            for crash_type in self.listdir(self.crash_report_dir)
+            for crash_id in self.listdir(self.crash_report_dir / crash_type)
+        ]
+
+    def report_crashes(self):
+        for crash_dir in self.crash_reports_dirs():
+            crash_file = crash_dir / "crash.info"
+            try:
+                crash = json.loads(self.read_file(crash_file))
+            except Exception:
+                pytest_check.fail(f"Crash report detected!\nSee {crash_dir} for more details.")
+                continue
+            crash_type = crash.get("exc_type", "")
+            crash_detail = crash.get("exc_value", "")
+            if re.search("list index out of range", crash_detail):
+                logger.warning("Ignored crash report due to CMK-18633!")
+                continue
+            if re.search("Cannot render negative timespan", crash_detail):
+                logger.warning("Ignored crash report due to CMK-18635!")
+                continue
+            if re.search("systime", crash_detail):
+                logger.warning("Ignored crash report. See CMK-20674")
+                continue
+            if re.search("Licensed phase: too many services.", crash_detail):
+                logger.warning("Ignored crash report due to license violation!")
+                continue
+            pytest_check.fail(
+                f"""Crash report detected! {crash_type}: {crash_detail}.
+                See {crash_file} for more details."""
+            )
+
+    def result_dir(self) -> Path:
+        base_dir = Path(os.environ.get("RESULT_PATH") or (repo_path() / "results"))
+        return base_dir / self.id
+
+    @property
+    def crash_report_dir(self) -> Path:
+        return self.root / "var" / "check_mk" / "crashes"
+
+    @property
+    def crash_archive_dir(self) -> Path:
+        return self.result_dir() / "crashes"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.root / "var" / "log"
+
+    def get_automation_secret(self) -> str:
+        if self._automation_secret is None:
+            raise RuntimeError("Automation user was not created yet")
+        return self._automation_secret.raw
+
+    def get_site_internal_secret(self) -> Secret:
+        secret_path = "etc/site_internal.secret"
+        secret = self.read_binary_file(secret_path)
+
+        if secret == b"":
             raise Exception("Failed to read secret from %s" % secret_path)
 
-        return secret
+        return Secret(secret)
 
+    @tracer.instrument("Site.activate_changes_and_wait_for_core_reload")
     def activate_changes_and_wait_for_core_reload(
-        self, allow_foreign_changes: bool = False, remote_site: Optional["Site"] = None
-    ):
+        self, allow_foreign_changes: bool = False, remote_site: Site | None = None
+    ) -> None:
+        logger.info("Activate changes and wait for reload...")
         self.ensure_running()
-        site = remote_site or self
+        try:
+            site = remote_site or self
 
-        logger.debug("Getting old program start")
-        old_t = site.live.query_value("GET status\nColumns: program_start\n")
+            logger.debug("Getting old program start")
+            old_t = site.live.query_value("GET status\nColumns: program_start\n")
 
-        logger.debug("Read replication changes of site")
-        base_dir = site.path("var/check_mk/wato")
-        for path in glob.glob(base_dir + "/replication_*"):
-            logger.debug("Replication file: %r", path)
-            with suppress(FileNotFoundError):
-                logger.debug(site.read_file(base_dir + "/" + os.path.basename(path)))
+            logger.debug("Read replication changes of site")
+            base_dir = site.path("var/check_mk/wato").as_posix()
+            for path in glob.glob(base_dir + "/replication_*"):
+                logger.debug("Replication file: %r", path)
+                with suppress(FileNotFoundError):
+                    logger.debug(site.read_file(base_dir + "/" + os.path.basename(path)))
 
-        # Ensure no previous activation is still running
-        for status_path in glob.glob(base_dir + "/replication_status_*"):
-            logger.debug("Replication status file: %r", status_path)
-            with suppress(FileNotFoundError):
-                changes = ast.literal_eval(
-                    site.read_file(base_dir + "/" + os.path.basename(status_path))
-                )
-                if changes.get("current_activation") is not None:
-                    raise RuntimeError(
-                        "A previous activation is still running. Does the wait work?"
+            # Ensure no previous activation is still running
+            for status_path in glob.glob(base_dir + "/replication_status_*"):
+                logger.debug("Replication status file: %r", status_path)
+                with suppress(FileNotFoundError):
+                    changes = ast.literal_eval(
+                        site.read_file(base_dir + "/" + os.path.basename(status_path))
                     )
+                    if changes.get("current_activation") is not None:
+                        raise RuntimeError(
+                            "A previous activation is still running. Does the wait work?"
+                        )
 
-        changed = self.openapi.activate_changes_and_wait_for_completion(
-            sites=[site.id], force_foreign_changes=allow_foreign_changes
+            changed = self.openapi.changes.activate_and_wait_for_completion(
+                force_foreign_changes=allow_foreign_changes
+            )
+            if changed:
+                logger.info("Waiting for core reloads of: %s", site.id)
+                site.wait_for_core_reloaded(old_t)
+        finally:
+            self.ensure_running()
+
+    def is_global_flag_enabled(self, column: str) -> bool:
+        return self._get_global_flag(column) == 1
+
+    def is_global_flag_disabled(self, column: str) -> bool:
+        return self._get_global_flag(column) == 0
+
+    def _get_global_flag(self, column: str) -> bool:
+        return bool(self.live.query_value(f"GET status\nColumns: {column}\n") == 1)
+
+    def stop_host_checks(self) -> None:
+        logger.info("Stopping execution of host-checks...")
+        self.live.command("STOP_EXECUTING_HOST_CHECKS")
+        wait_until(
+            lambda: self.is_global_flag_disabled("execute_host_checks"), timeout=60, interval=1
         )
-        if changed:
-            logger.info("Waiting for core reloads of: %s", site.id)
-            site.wait_for_core_reloaded(old_t)
 
-        self.ensure_running()
+    def start_host_checks(self) -> None:
+        logger.info("Starting execution of host-checks...")
+        self.live.command("START_EXECUTING_HOST_CHECKS")
+        wait_until(
+            lambda: self.is_global_flag_enabled("execute_host_checks"), timeout=60, interval=1
+        )
 
+    def stop_active_services(self) -> None:
+        logger.info("Stopping execution of active services...")
+        self.live.command("STOP_EXECUTING_SVC_CHECKS")
+        wait_until(
+            lambda: self.is_global_flag_disabled("execute_service_checks"), timeout=60, interval=1
+        )
 
-def _is_dockerized() -> bool:
-    return Path("/.dockerenv").exists()
+    def start_active_services(self) -> None:
+        logger.info("Starting execution of active services...")
+        self.live.command("START_EXECUTING_SVC_CHECKS")
+        wait_until(
+            lambda: self.is_global_flag_enabled("execute_service_checks"), timeout=60, interval=1
+        )
+
+    def read_global_settings(self) -> dict[str, object]:
+        global_settings: dict[str, object] = {}
+        exec(self.read_file(self._GLOBAL_SETTINGS_FILE), {}, global_settings)
+        return global_settings
+
+    def write_global_settings(self, global_settings: Mapping[str, object]) -> None:
+        self.write_text_file(
+            self._GLOBAL_SETTINGS_FILE,
+            "\n".join(f"{key} = {repr(val)}" for key, val in global_settings.items()),
+        )
+
+    def update_global_settings(self, update: dict[str, object]) -> None:
+        self.write_global_settings(self.read_global_settings() | update)
 
 
 class SiteFactory:
     def __init__(
         self,
-        version: str,
-        edition: str,
-        branch: str,
-        update_from_git: bool = False,
-        install_test_python_modules: bool = True,
-        prefix: Optional[str] = None,
+        version: CMKVersion,
+        prefix: str | None = None,
+        update: bool = False,
+        update_conflict_mode: str = "install",
+        enforce_english_gui: bool = True,
     ) -> None:
-        self._base_ident = prefix or "s_%s_" % branch[:6]
-        self._version = version
-        self._edition = edition
-        self._branch = branch
-        self._sites: MutableMapping[str, Site] = {}
+        self.version = version
+        self._base_ident = prefix if prefix is not None else "s_%s_" % version.branch[:6]
+        self._sites: dict[str, Site] = {}
         self._index = 1
-        self._update_from_git = update_from_git
-        self._install_test_python_modules = install_test_python_modules
+        self._update = update
+        self._update_conflict_mode = update_conflict_mode
+        self._enforce_english_gui = enforce_english_gui
 
     @property
     def sites(self) -> Mapping[str, Site]:
         return self._sites
 
     def get_site(self, name: str) -> Site:
-        if "%s%s" % (self._base_ident, name) in self._sites:
-            return self._sites["%s%s" % (self._base_ident, name)]
-        # For convenience, allow to retreive site by name or full ident
-        if name in self._sites:
-            return self._sites[name]
-        return self._new_site(name)
+        site = self._site_obj(name)
 
-    def get_existing_site(self, name: str) -> Site:
-        if "%s%s" % (self._base_ident, name) in self._sites:
-            return self._sites["%s%s" % (self._base_ident, name)]
-        # For convenience, allow to retreive site by name or full ident
-        if name in self._sites:
-            return self._sites[name]
-        return self._site_obj(name)
+        if self.version.is_saas_edition():
+            # We need to create some CSE config files before starting the site, exactly as it
+            # happens on the SaaS environment, where k8s takes care of creating the config files
+            # before the site is created.
+            create_cse_initial_config()
+        site.create()
+        return site
+
+    def initialize_site(
+        self,
+        site: Site,
+        *,
+        start: bool = True,
+        init_livestatus: bool = True,
+        prepare_for_tests: bool = True,
+        activate_changes: bool = True,
+        auto_restart_httpd: bool = False,
+        tracing_config: TracingConfig = NO_TRACING,
+    ) -> Site:
+        if init_livestatus:
+            site.open_livestatus_tcp(encrypted=False)
+        if tracing_config.collect_traces:
+            site.send_traces_to_central_collector(tracing_config.otlp_endpoint)
+            if tracing_config.extra_resource_attributes:
+                site.write_resource_config(tracing_config.extra_resource_attributes)
+
+        if not start:
+            return site
+
+        site.start()
+
+        if prepare_for_tests:
+            with (
+                cse_openid_oauth_provider(f"http://localhost:{site.apache_port}")
+                if self.version.is_saas_edition()
+                else nullcontext()
+            ):
+                site.prepare_for_tests()
+
+        if activate_changes:
+            # There seem to be still some changes that want to be activated
+            # We created a user as AUTH_USER aka cmkadmin, meanwhile we are automationuser...
+            site.activate_changes_and_wait_for_core_reload(allow_foreign_changes=True)
+
+        if auto_restart_httpd:
+            restart_httpd()
+
+        logger.debug("Created site %s", site.id)
+        return site
+
+    def setup_customers(self, site: Site, customers: Sequence[str]) -> None:
+        if not self.version.is_managed_edition():
+            return
+        customer_content = "\n".join(
+            f"customers.update({{'{customer}': {{'name': '{customer}', 'macros': [], 'customer_report_layout': 'default'}}}})"
+            for customer in customers
+        )
+        site.write_text_file("etc/check_mk/multisite.d/wato/customers.mk", customer_content)
+
+    def get_existing_site(
+        self,
+        name: str,
+        start: bool = True,
+        init_livestatus: bool = True,
+    ) -> Site:
+        site = self._site_obj(name)
+
+        if site.exists() and init_livestatus:
+            site.gather_livestatus_port(from_config=True)
+
+        if not (site.exists() and start):
+            return site
+
+        site.start()
+
+        logger.debug("Reused site %s", site.id)
+        return site
+
+    def restore_site_from_backup(self, backup_path: Path, name: str, reuse: bool = False) -> Site:
+        self._base_ident = ""
+        site = self._site_obj(name)
+
+        if not reuse:
+            assert not site.exists(), (
+                f"Site {name} already existing. Please remove it before restoring it from a backup."
+            )
+
+        site.install_cmk()
+        logger.info("Creating %s site from backup...", name)
+
+        omd_restore_cmd = (
+            ["sudo", "omd", "restore", "--apache-reload"]
+            + (["--reuse", "--kill"] if reuse else [])
+            + [backup_path]
+        )
+
+        completed_process = subprocess.run(
+            omd_restore_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            check=False,
+        )
+
+        assert completed_process.returncode == 0
+
+        site = self.get_existing_site(site.id)
+        site.start()
+        restart_httpd()
+
+        return site
+
+    def copy_site(self, site: Site, copy_name: str) -> Site:
+        self._base_ident = ""
+        site_copy = self._site_obj(copy_name)
+
+        assert not site_copy.exists(), (
+            f"Site '{copy_name}' already existing. Please remove it before performing a copy."
+        )
+
+        site.stop()
+        logger.info("Copying site '%s' to site '%s'...", site.id, site_copy.id)
+        run(["omd", "cp", site.id, copy_name], sudo=True)
+        site_copy = self.get_existing_site(copy_name)
+        site_copy.start()
+
+        return site_copy
+
+    def interactive_update(
+        self,
+        test_site: Site,
+        target_version: CMKVersion,
+        min_version: CMKVersion,
+        conflict_mode: str = "keepold",
+        logfile_path: str = "/tmp/sep.out",
+        timeout: int = 60,
+    ) -> Site:
+        """Update the test-site with the given target-version, if supported.
+
+        Such update process is performed interactively via Pexpect.
+        """
+        base_version = test_site.version
+        self.version = target_version
+
+        # refresh site object to install the correct target version
+        self._base_ident = ""
+        site = self.get_existing_site(test_site.id, init_livestatus=False)
+
+        site.install_cmk()
+        site.stop()
+
+        logger.info(
+            "Updating %s site from %s version to %s version...",
+            site.id,
+            base_version.version,
+            target_version.version_directory(),
+        )
+
+        pexpect_dialogs = []
+        version_supported = base_version >= min_version
+        if version_supported:
+            logger.info("Updating to a supported version.")
+            pexpect_dialogs.extend(
+                [
+                    PExpectDialog(
+                        expect=(
+                            f"You are going to update the site {site.id} "
+                            f"from version {base_version.version_directory()} "
+                            f"to version {target_version.version_directory()}."
+                        ),
+                        send="u\r",
+                    )
+                ]
+            )
+        else:  # update-process not supported. Still, verify the correct message is displayed
+            logger.info(
+                "Updating from version %s to version %s is not supported",
+                base_version.version_directory(),
+                target_version.version_directory(),
+            )
+
+            pexpect_dialogs.extend(
+                [
+                    PExpectDialog(
+                        expect=(
+                            f"ERROR: You are trying to update from "
+                            f"{base_version.version_directory()} to "
+                            f"{target_version.version_directory()} which is not supported."
+                        ),
+                        send="\r",
+                    )
+                ]
+            )
+
+        pexpect_dialogs.extend(
+            [PExpectDialog(expect="Wrong permission", send="d", count=0, optional=True)]
+        )
+
+        rc = spawn_expect_process(
+            [
+                "/usr/bin/sudo",
+                "omd",
+                "-V",
+                target_version.version_directory(),
+                "update",
+                f"--conflict={conflict_mode}",
+                site.id,
+            ],
+            dialogs=pexpect_dialogs,
+            logfile_path=logfile_path,
+            timeout=timeout,
+        )
+        if version_supported:
+            assert rc == 0, (
+                f"Failed to interactively update the test-site!\n"
+                "Logfile content:\n"
+                f"{pprint.pformat(site.read_file('var/log/update.log'), indent=4)}"
+            )
+        else:
+            assert rc == 256, f"Executed command returned {rc} exit status. Expected: 256"
+            pytest.skip(f"{base_version} is not a supported version for {target_version}")
+
+        with open(logfile_path) as logfile:
+            logger.debug("OMD automation logfile: %s", logfile.read())
+
+        # refresh the site object after creating the site
+        site = self.get_existing_site(test_site.id)
+
+        _assert_tmpfs(site, base_version)
+
+        # open the livestatus port
+        site.open_livestatus_tcp(encrypted=False)
+
+        # start the site after manually installing it
+        site.start()
+
+        assert site.is_running(), "Site is not running!"
+        logger.info("Site %s is up", site.id)
+
+        restart_httpd()
+
+        assert site.version.version == target_version.version, "Version mismatch during update!"
+        assert site.version.edition.short == target_version.edition.short, (
+            "Edition mismatch during update!"
+        )
+        return site
+
+    def update_as_site_user(
+        self,
+        test_site: Site,
+        target_version: CMKVersion = version_from_env(
+            fallback_version_spec=CMKVersion.DAILY,
+            fallback_edition=Edition.CEE,
+            fallback_branch=current_base_branch_name(),
+        ),
+        min_version: CMKVersion = get_min_version(Edition.CEE),
+        conflict_mode: str = "keepold",
+    ) -> Site:
+        base_version = test_site.version
+        self.version = target_version
+
+        version_supported = base_version >= min_version
+        if not version_supported:
+            pytest.skip(f"{base_version} is not a supported version for {target_version.version}")
+
+        # refresh site object to install the correct target version
+        self._base_ident = ""
+        site = self.get_existing_site(test_site.id, init_livestatus=False)
+
+        site.install_cmk()
+        site.stop()
+
+        logger.info(
+            "Updating %s site from %s version to %s version...",
+            site.id,
+            base_version.version,
+            target_version.version_directory(),
+        )
+
+        cmd = [
+            "omd",
+            "-f",
+            "-V",
+            target_version.version_directory(),
+            "update",
+            f"--conflict={conflict_mode}",
+        ]
+
+        _ = site.run(cmd)
+
+        # refresh the site object after creating the site
+        site = self.get_existing_site(site.id)
+
+        _assert_tmpfs(site, base_version)
+
+        # open the livestatus port
+        site.open_livestatus_tcp(encrypted=False)
+
+        # start the site after manually installing it
+        site.start()
+
+        assert site.is_running(), "Site is not running!"
+        logger.info("Site %s is up", site.id)
+
+        restart_httpd()
+
+        assert site.version.version == target_version.version, "Version mismatch during update!"
+        assert site.version.edition.short == target_version.edition.short, (
+            "Edition mismatch during update!"
+        )
+
+        site.openapi.changes.activate_and_wait_for_completion()
+
+        return site
+
+    @contextmanager
+    def get_test_site_ctx(
+        self,
+        name: str = "central",
+        description: str = "",
+        auto_cleanup: bool = True,
+        auto_restart_httpd: bool = False,
+        init_livestatus: bool = True,
+        save_results: bool = True,
+        report_crashes: bool = True,
+        tracing_config: TracingConfig = NO_TRACING,
+        global_settings_update: dict[str, object] | None = None,
+    ) -> Iterator[Site]:
+        yield from self.get_test_site(
+            name=name,
+            description=description,
+            auto_cleanup=auto_cleanup,
+            auto_restart_httpd=auto_restart_httpd,
+            init_livestatus=init_livestatus,
+            save_results=save_results,
+            report_crashes=report_crashes,
+            tracing_config=tracing_config,
+            global_settings_update=global_settings_update,
+        )
+
+    def get_test_site(
+        self,
+        name: str = "central",
+        description: str = "",
+        auto_cleanup: bool = True,
+        auto_restart_httpd: bool = False,
+        init_livestatus: bool = True,
+        save_results: bool = True,
+        report_crashes: bool = True,
+        tracing_config: TracingConfig = NO_TRACING,
+        global_settings_update: dict[str, object] | None = None,
+    ) -> Iterator[Site]:
+        """Return a fully set-up test site (for use in site fixtures)."""
+        reuse_site = os.environ.get("REUSE", "0") == "1"
+        # by default, the site will be cleaned up if REUSE=1 is not set
+        # you can also explicitly set CLEANUP=[0|1] though (for debug purposes)
+        cleanup_site = (
+            not reuse_site
+            if os.environ.get("CLEANUP") is None
+            else os.environ.get("CLEANUP") == "1"
+        )
+        site = self.get_existing_site(name, start=reuse_site)
+        if site.exists():
+            if reuse_site:
+                logger.info('Reusing existing site "%s" (REUSE=1)', site.id)
+            else:
+                logger.info('Dropping existing site "%s" (REUSE=0)', site.id)
+                site.rm()
+        if not site.exists():
+            site = self.get_site(name)
+
+        try:
+            self.setup_customers(site, ["customer1", "customer2"])
+            if global_settings_update:
+                site.update_global_settings(global_settings_update)
+            self.initialize_site(
+                site,
+                init_livestatus=init_livestatus,
+                prepare_for_tests=True,
+                tracing_config=tracing_config,
+                auto_restart_httpd=auto_restart_httpd,
+            )
+            logger.info(
+                'Site "%s" is ready!%s',
+                site.id,
+                f" [{description}]" if description else "",
+            )
+            with (
+                cse_openid_oauth_provider(f"http://localhost:{site.apache_port}")
+                if self.version.is_saas_edition()
+                else nullcontext()
+            ):
+                yield site
+        finally:
+            if save_results:
+                site.save_results()
+            if report_crashes:
+                site.report_crashes()
+            if auto_cleanup and cleanup_site:
+                logger.info('Dropping site "%s" (CLEANUP=1)', site.id)
+                site.rm()
 
     def remove_site(self, name: str) -> None:
-        if "%s%s" % (self._base_ident, name) in self._sites:
-            site_id = "%s%s" % (self._base_ident, name)
+        if f"{self._base_ident}{name}" in self._sites:
+            site_id = f"{self._base_ident}{name}"
         elif name in self._sites:
             site_id = name
         else:
@@ -1112,37 +1933,35 @@ class SiteFactory:
         self._index += 1
         return new_ident
 
-    def _site_obj(self, name: str) -> Site:
-        site_id = "%s%s" % (self._base_ident, name)
+    def _site_obj(self, name: str, check_wait_timeout: int = 20) -> Site:
+        if f"{self._base_ident}{name}" in self._sites:
+            return self._sites[f"{self._base_ident}{name}"]
+        # For convenience, allow to retrieve site by name or full ident
+        if name in self._sites:
+            return self._sites[name]
+
+        site_id = f"{self._base_ident}{name}"
+
         return Site(
+            version=self.version,
             site_id=site_id,
             reuse=False,
-            version=self._version,
-            edition=self._edition,
-            branch=self._branch,
-            update_from_git=self._update_from_git,
-            install_test_python_modules=self._install_test_python_modules,
+            update=self._update,
+            enforce_english_gui=self._enforce_english_gui,
+            check_wait_timeout=check_wait_timeout,
         )
-
-    def _new_site(self, name: str) -> Site:
-        site = self._site_obj(name)
-
-        site.create()
-        self._sites[site.id] = site
-
-        site.open_livestatus_tcp(encrypted=False)
-        site.start()
-        site.prepare_for_tests()
-        # There seem to be still some changes that want to be activated
-        site.activate_changes_and_wait_for_core_reload()
-        logger.debug("Created site %s", site.id)
-        return site
 
     def save_results(self) -> None:
         logger.info("Saving results")
         for _site_id, site in sorted(self._sites.items(), key=lambda x: x[0]):
             logger.info("Saving results of site %s", site.id)
             site.save_results()
+
+    def report_crashes(self) -> None:
+        logger.info("Reporting crashes")
+        for _site_id, site in sorted(self._sites.items(), key=lambda x: x[0]):
+            logger.info("Reporting crashes of site %s", site.id)
+            site.report_crashes()
 
     def cleanup(self) -> None:
         logger.info("Removing sites")
@@ -1151,20 +1970,114 @@ class SiteFactory:
 
 
 def get_site_factory(
-    prefix: str, update_from_git: bool, install_test_python_modules: bool
+    *,
+    prefix: str,
+    version: CMKVersion | None = None,
+    fallback_branch: str | Callable[[], str] | None = None,
 ) -> SiteFactory:
-    version = os.environ.get("VERSION", CMKVersion.DAILY)
-    edition = os.environ.get("EDITION", CMKVersion.CEE)
-    branch = os.environ.get("BRANCH")
-    if branch is None:
-        branch = current_base_branch_name()
-
-    logger.info("Version: %s, Edition: %s, Branch: %s", version, edition, branch)
+    version = version or version_from_env(
+        fallback_version_spec=CMKVersion.DAILY,
+        fallback_edition=Edition.CEE,
+        fallback_branch=fallback_branch,
+    )
+    logger.info(
+        "Version: %s, Edition: %s, Branch: %s",
+        version.version,
+        version.edition.long,
+        version.branch,
+    )
     return SiteFactory(
         version=version,
-        edition=edition,
-        branch=branch,
         prefix=prefix,
-        update_from_git=update_from_git,
-        install_test_python_modules=install_test_python_modules,
     )
+
+
+class PythonHelper:
+    """Execute a python helper script executed in the site context
+
+    Several tests need to execute some python code in the context
+    of the Checkmk site under test. This object helps to copy
+    and execute the script."""
+
+    def __init__(self, site: Site, helper_path: Path) -> None:
+        self.site: Final = site
+        self.helper_path: Final = helper_path
+        self.site_path: Final = site.root / self.helper_path.name
+
+    @contextmanager
+    def copy_helper(self) -> Iterator[None]:
+        self.site.write_text_file(
+            str(self.site_path.relative_to(self.site.root)),
+            self.helper_path.read_text(),
+        )
+        try:
+            yield
+        finally:
+            self.site.delete_file(str(self.site_path))
+
+    def check_output(
+        self,
+        input: str | None = None,
+        encoding: str = "utf-8",
+    ) -> str:
+        with self.copy_helper():
+            output = self.site.check_output(
+                ["python3", str(self.site_path)],
+                input=input,
+                encoding=encoding,
+                stderr=subprocess.PIPE,
+            )
+            return output
+
+    @contextmanager
+    def execute(self, *args, **kwargs) -> Iterator[subprocess.Popen]:  # type: ignore[no-untyped-def]
+        with self.copy_helper():
+            yield self.site.execute(["python3", str(self.site_path)], *args, **kwargs)
+
+
+def _assert_tmpfs(site: Site, version: CMKVersion) -> None:
+    # restoring the tmpfs was broken and has been fixed with
+    # 3448a7da56ed6d4fa2c2f425d0b1f4b6e02230aa
+    from_version = Version.from_str(version.version)
+    if (
+        (Version.from_str("2.1.0p36") <= from_version < Version.from_str("2.2.0"))
+        or (Version.from_str("2.2.0p13") <= from_version < Version.from_str("2.3.0"))
+        or Version.from_str("2.3.0b1") <= from_version
+    ):
+        # tmpfs should have been restored:
+        tmp_dirs = site.listdir("tmp/check_mk")
+        assert "counters" in tmp_dirs
+        assert "piggyback" in tmp_dirs
+        assert "piggyback_sources" in tmp_dirs
+
+
+def tracing_config_from_env(env: Mapping[str, str]) -> TracingConfig:
+    return TracingConfig(
+        collect_traces=env.get("OTEL_EXPORTER_OTLP_ENDPOINT", "") != "",
+        otlp_endpoint=env.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+        extra_resource_attributes=_resource_attributes_from_env(env),
+    )
+
+
+def _resource_attributes_from_env(env: Mapping[str, str]) -> Mapping[str, str]:
+    """Extract tracing resource attributes from the process environment
+
+    This is meant to transport information exposed by the CI to tracing context in case the
+    information is available. In case it is not there, be silent and don't expose the missing
+    attribute.
+    """
+    return {
+        name: val
+        for name, val in [
+            ("cmk.version.version", env.get("VERSION")),
+            ("cmk.version.edition_short", env.get("EDITION")),
+            ("cmk.version.branch", env.get("BRANCH")),
+            ("cmk.version.distro", env.get("DISTRO")),
+            ("cmk.ci.node_name", env.get("CI_NODE_NAME")),
+            ("cmk.ci.workspace", env.get("CI_WORKSPACE")),
+            ("cmk.ci.job_name", env.get("CI_JOB_NAME")),
+            ("cmk.ci.build_number", env.get("CI_BUILD_NUMBER")),
+            ("cmk.ci.build_url", env.get("CI_BUILD_URL")),
+        ]
+        if val
+    }

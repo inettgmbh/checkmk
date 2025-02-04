@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,7 +20,7 @@ def ibm_mq_version():
             Tuple(
                 title=_("Check for correct version"),
                 help=_(
-                    "You can make sure that the plugin is running"
+                    "You can make sure that the plug-in is running"
                     " with a specific or a minimal version."
                 ),
                 elements=[
@@ -61,6 +61,6 @@ rulespec_registry.register(
         group=RulespecGroupCheckParametersApplications,
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_ibm_mq_plugin,
-        title=lambda: _("IBM MQ Plugin"),
+        title=lambda: _("IBM MQ plug-in"),
     )
 )

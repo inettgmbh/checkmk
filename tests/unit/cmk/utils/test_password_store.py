@@ -1,49 +1,46 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+
+import binascii
+from pathlib import Path
+
 import pytest
+from cryptography.exceptions import InvalidTag
+
+from cmk.ccc.exceptions import MKGeneralException
 
 import cmk.utils.paths
 from cmk.utils import password_store
-from cmk.utils.config_path import LATEST_CONFIG
-from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.password_store import PasswordId
+from cmk.utils.local_secrets import PasswordStoreSecret
+from cmk.utils.password_store import PasswordId, PasswordStore
 
 PW_STORE = "pw_from_store"
 PW_EXPL = "pw_explicit"
 PW_STORE_KEY = "from_store"
 
 
-def test_save() -> None:
-    assert password_store.load() == {}
-    password_store.save({"ding": "blablu"})
-    assert password_store.load()["ding"] == "blablu"
+@pytest.fixture(name="fixed_secret")
+def fixture_fixed_secret(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Write a fixed value to a tmp file and use that file for the password store secret
+
+    we need the old value since other tests rely on the general path mocking"""
+    secret = b"password-secret"
+    secret_path = tmp_path / "password_store_fixed.secret"
+    secret_path.write_bytes(secret)
+    monkeypatch.setattr(PasswordStoreSecret, "path", secret_path)
 
 
-def test_save_for_helpers_no_store() -> None:
-    assert not password_store.password_store_path().exists()
-
-    assert password_store.load_for_helpers() == {}
-    password_store.save_for_helpers(LATEST_CONFIG)
-
-    assert not password_store.password_store_path().exists()
-    assert not password_store._helper_password_store_path(LATEST_CONFIG).exists()
-    assert password_store.load_for_helpers() == {}
+def test_save(tmp_path: Path) -> None:
+    file = tmp_path / "password_store"
+    assert not password_store.load(file)
+    password_store.save(data := {"ding": "blablu"}, file)
+    assert password_store.load(file) == data
 
 
-def test_save_for_helpers() -> None:
-    assert not password_store.password_store_path().exists()
-    password_store.save({"ding": "blablu"})
-    assert password_store.password_store_path().exists()
-    assert password_store.load_for_helpers() == {}
-
-    password_store.save_for_helpers(LATEST_CONFIG)
-    assert password_store.load_for_helpers() == {"ding": "blablu"}
-
-
-def load_patch() -> dict[str, str]:
+def load_patch(_file_path: Path) -> dict[str, str]:
     return {PW_STORE_KEY: PW_STORE}
 
 
@@ -60,7 +57,7 @@ def test_extract(
     password_id: PasswordId,
     password_actual: str,
 ) -> None:
-    monkeypatch.setattr(password_store, "load", load_patch)
+    monkeypatch.setattr(password_store._pwstore, "load", load_patch)
     assert password_store.extract(password_id) == password_actual
 
 
@@ -73,41 +70,53 @@ def test_extract_from_unknown_valuespec() -> None:
 
 
 def test_obfuscation() -> None:
-    obfuscated = password_store._obfuscate(secret := "$ecret")
+    obfuscated = PasswordStore.encrypt(secret := "$ecret")
     assert (
         int.from_bytes(
-            obfuscated[: password_store.PasswordStore.VERSION_BYTE_LENGTH],
+            obfuscated[: PasswordStore.VERSION_BYTE_LENGTH],
             byteorder="big",
         )
-        == password_store.PasswordStore.VERSION
+        == PasswordStore.VERSION
     )
-    assert password_store._deobfuscate(obfuscated) == secret
-
-
-def test_save_obfuscated() -> None:
-    password_store.save(data := {"ding": "blablu"})
-    assert password_store.load() == data
+    assert PasswordStore.decrypt(obfuscated) == secret
 
 
 def test_obfuscate_with_own_secret() -> None:
-    obfuscated = password_store._obfuscate(secret := "$ecret")
-    assert password_store._deobfuscate(obfuscated) == secret
+    obfuscated = PasswordStore.encrypt(secret := "$ecret")
+    assert PasswordStore.decrypt(obfuscated) == secret
 
     # The user may want to write some arbritary secret to the file.
-    key_path = password_store.PasswordStore._secret_key_path()
-    key_path.write_text(custom_key := "this_will_be_pretty_secure_now.not.")
-
-    # Ensure we work with the right key file along the way
-    assert (cmk.utils.paths.omd_root / "etc" / "password_store.secret").read_text() == custom_key
+    cmk.utils.paths.password_store_secret_file.write_bytes(b"this_will_be_pretty_secure_now.not.")
 
     # Old should not be decryptable anymore
-    with pytest.raises(ValueError, match="MAC check failed"):
-        assert password_store._deobfuscate(obfuscated)
+    with pytest.raises(InvalidTag):
+        assert PasswordStore.decrypt(obfuscated)
 
     # Test encryption and decryption with new key
-    assert password_store._deobfuscate(password_store._obfuscate(secret)) == secret
+    assert PasswordStore.decrypt(PasswordStore.encrypt(secret)) == secret
 
 
 def test_encrypt_decrypt_identity() -> None:
     data = "some random data to be encrypted"
-    assert password_store.PasswordStore.decrypt(password_store.PasswordStore.encrypt(data)) == data
+    assert PasswordStore.decrypt(PasswordStore.encrypt(data)) == data
+
+
+@pytest.mark.usefixtures("fixed_secret")
+def test_pw_store_characterization() -> None:
+    """This is a characterization (aka "golden master") test to ensure that the password store can
+    still decrypt passwords it encrypted before.
+
+    This can only work if the local secret is fixed of course, but a change in the container format,
+    the key generation, or algorithms used would be detected.
+    """
+    # generated by PasswordStore._obfuscate as of commit 79900beda42310dfea9f5bd704041f4e10936ba8
+    encrypted = binascii.unhexlify(
+        b"00003b1cedb92526621483f9ba140fbe"
+        b"55f49916ae77a11a2ac93b4db0758061"
+        b"71a62a8aedd3d1edd67e558385a98efe"
+        b"be3c4c0ca364e54ff6ad2fa7ef48a0e8"
+        b"8ed989283e9604e07da89301658f0370"
+        b"d35bba1a8abf74bc971975"
+    )
+
+    assert PasswordStore.decrypt(encrypted) == "Time is an illusion. Lunchtime doubly so."

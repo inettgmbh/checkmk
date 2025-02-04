@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.base.check_api import get_bytes_human_readable
+from cmk.agent_based.v2 import render
 
 # disks = [
 #     { "state" : "failed",
@@ -18,7 +18,7 @@ FILER_DISKS_CHECK_DEFAULT_PARAMETERS = {
 }
 
 
-def check_filer_disks(disks, params):  # pylint: disable=too-many-branches
+def check_filer_disks(disks, params):
     state: dict = {}
     state["prefailed"] = []
     state["failed"] = []
@@ -29,13 +29,15 @@ def check_filer_disks(disks, params):  # pylint: disable=too-many-branches
 
     for disk in disks:
         total_capacity += disk.get("capacity", 0)
-        for what in state:
+        for what, disks_in_state in state.items():
             if disk["state"] == what:
-                state[what].append(disk)
+                disks_in_state.append(disk)
 
-    yield 0, "Total raw capacity: %s" % get_bytes_human_readable(total_capacity), [
-        ("total_disk_capacity", total_capacity)
-    ]
+    yield (
+        0,
+        "Total raw capacity: %s" % render.disksize(total_capacity),
+        [("total_disk_capacity", total_capacity)],
+    )
     # TODO: Is a prefailed disk unavailable?
     unavail_disks = len(state["prefailed"]) + len(state["failed"]) + len(state["offline"])
     yield 0, "Total disks: %d" % (len(disks) - unavail_disks), [("total_disks", len(disks))]
@@ -51,7 +53,7 @@ def check_filer_disks(disks, params):  # pylint: disable=too-many-branches
             spare_state = 1
 
         if spare_state:
-            spare_infotext += " (warn/crit below %s/%s)" % (warn, crit)
+            spare_infotext += f" (warn/crit below {warn}/{crit})"
     yield spare_state, spare_infotext, [("spare_disks", spare_disks)]
 
     parity_disks = [disk for disk in disks if disk["type"] == "parity"]
@@ -73,14 +75,14 @@ def check_filer_disks(disks, params):  # pylint: disable=too-many-branches
             for disk in prefailed_disks:
                 info_texts.append(disk["identifier"])
             if len(info_texts) > 0:
-                yield 0, "%s Disk Details: %s" % (name, " / ".join(info_texts))
+                yield 0, "{} Disk Details: {}".format(name, " / ".join(info_texts))
 
     for disk_state in ["failed", "offline"]:
         info_texts = []
         for disk in state[disk_state]:
             info_texts.append(disk["identifier"])
         if len(info_texts) > 0:
-            yield 0, "%s Disk Details: %s" % (disk_state, " / ".join(info_texts))
+            yield 0, "{} Disk Details: {}".format(disk_state, " / ".join(info_texts))
             warn, crit = params["%s_spare_ratio" % disk_state]
             ratio = (
                 float(len(state[disk_state])) / (len(state[disk_state]) + len(state["spare"])) * 100
@@ -91,8 +93,7 @@ def check_filer_disks(disks, params):  # pylint: disable=too-many-branches
             elif ratio >= warn:
                 return_state = 1
             if return_state:
-                yield return_state, "Too many %s disks (warn/crit at %.1f%%/%.1f%%)" % (
-                    disk_state,
-                    warn,
-                    crit,
+                yield (
+                    return_state,
+                    f"Too many {disk_state} disks (warn/crit at {warn:.1f}%/{crit:.1f}%)",
                 )

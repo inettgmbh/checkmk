@@ -18,9 +18,12 @@ $(OMD_INSTALL): omdlib-install
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/bin
 	install -m 755 $(PACKAGE_DIR)/$(OMD)/omd.bin $(DESTDIR)$(OMD_ROOT)/bin/omd
 	sed -i 's|###OMD_VERSION###|$(OMD_VERSION)|g' $(DESTDIR)$(OMD_ROOT)/bin/omd
-# SUP-10161: our openssl is incompatible with the system openssl for ssh on sles15sp3
-ifneq ($(filter $(DISTRO_CODE),sles15sp2 sles15sp3),)
-	install -m 755 $(PACKAGE_DIR)/$(OMD)/ssh_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/ssh
+# SUP-10161: our openssl is incompatible with some system executables on various sles15sp*
+ifneq ($(filter sles15%,$(DISTRO_CODE)),)
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/ssh
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/scp
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/pdftoppm
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/curl
 endif
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/share/man/man8
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/omd.8 $(DESTDIR)$(OMD_ROOT)/share/man/man8
@@ -32,7 +35,7 @@ endif
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/README $(PACKAGE_DIR)/$(OMD)/COPYING $(DESTDIR)$(OMD_ROOT)/share/doc/$(NAME)
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/init_profile $(DESTDIR)$(OMD_ROOT)/lib/omd/
-	install -m 755 $(PACKAGE_DIR)/$(OMD)/port_is_used $(DESTDIR)$(OMD_ROOT)/lib/omd/
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/next_free_port $(DESTDIR)$(OMD_ROOT)/lib/omd/
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/bash_completion $(DESTDIR)$(OMD_ROOT)/lib/omd/
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd/scripts/post-create
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd/scripts/post-update

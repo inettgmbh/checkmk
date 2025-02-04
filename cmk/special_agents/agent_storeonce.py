@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -4541,7 +4541,7 @@ stores_xml = """<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http:/
 def query(url, args_dict, opt_cert):
     if not opt_cert:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = requests.get(
+    response = requests.get(  # nosec B113 # BNS:0b0eac
         url, auth=(args_dict["username"], args_dict["password"]), verify=opt_cert
     )
     raw_xml = response.text
@@ -4558,7 +4558,7 @@ def process_cluster_info(args_dict, opt_demo, opt_cert):
     for child in tbody:
         name = child[0].text
         value = child[1].text
-        output_lines.append("%s\t%s" % (name, value))
+        output_lines.append(f"{name}\t{value}")
     return output_lines
 
 
@@ -4585,7 +4585,7 @@ def process_servicesets(args_dict, opt_demo, opt_cert):
         for child in tbody:
             name = child[0].text
             value = child[1].text
-            output_lines.append("%s\t%s" % (name, value))
+            output_lines.append(f"{name}\t{value}")
     return output_lines
 
 
@@ -4605,11 +4605,11 @@ def process_stores_info(args_dict, opt_demo, opt_cert):
         for element in stores:
             tbody = element.find("table").find("tbody")
             store_id = tbody[0][1].text
-            output_lines.append("[%s/%s]" % (serviceset_id, store_id))
+            output_lines.append(f"[{serviceset_id}/{store_id}]")
             for child in tbody:
                 name = child[0].text
                 value = child[1].text
-                output_lines.append("%s\t%s" % (name, value))
+                output_lines.append(f"{name}\t{value}")
     return output_lines
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -7,22 +7,22 @@ import ast
 import base64
 import pprint
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, Tuple, TypedDict, Union
+from typing import Any
+
+from cmk.ccc.exceptions import MKGeneralException
 
 import cmk.utils.paths
 import cmk.utils.rulesets.tuple_rulesets
-from cmk.utils.type_defs import ContactgroupName
-from cmk.utils.version import parse_check_mk_version
+from cmk.utils.rulesets.definition import RuleGroup
 
 from cmk.gui.config import active_config
-from cmk.gui.exceptions import MKGeneralException
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
-from cmk.gui.sites import SiteStatus
-from cmk.gui.utils.escaping import escape_to_html
+from cmk.gui.watolib.mode import mode_registry
 
-# TODO: Clean up all call sites in the GUI and only use them in WATO config file loading code
+# TODO: Clean up all call sites in the GUI and only use them in Setup config file loading code
 ALL_HOSTS = cmk.utils.rulesets.tuple_rulesets.ALL_HOSTS
 ALL_SERVICES = cmk.utils.rulesets.tuple_rulesets.ALL_SERVICES
 NEGATE = cmk.utils.rulesets.tuple_rulesets.NEGATE
@@ -54,42 +54,6 @@ def rename_host_in_list(thelist: list[str], oldname: str, newname: str) -> bool:
     return did_rename
 
 
-class HostContactGroupSpec(TypedDict):
-    groups: List[ContactgroupName]
-    recurse_perms: bool
-    use: bool
-    use_for_services: bool
-    recurse_use: bool
-
-
-LegacyContactGroupSpec = Tuple[bool, List[ContactgroupName]]
-
-
-# TODO: Find a better place later
-def convert_cgroups_from_tuple(
-    value: Union[HostContactGroupSpec, LegacyContactGroupSpec]
-) -> HostContactGroupSpec:
-    """Convert old tuple representation to new dict representation of folder's group settings"""
-    if isinstance(value, dict):
-        if "use_for_services" in value:
-            return value
-        return {
-            "groups": value["groups"],
-            "recurse_perms": value["recurse_perms"],
-            "use": value["use"],
-            "use_for_services": False,
-            "recurse_use": value["recurse_use"],
-        }
-
-    return {
-        "groups": value[1],
-        "recurse_perms": False,
-        "use": value[0],
-        "use_for_services": False,
-        "recurse_use": False,
-    }
-
-
 # TODO: Find a better place later
 def host_attribute_matches(crit: str, value: str) -> bool:
     if crit and crit[0] == "~":
@@ -114,14 +78,14 @@ def mk_repr(x: Any) -> bytes:
     return base64.b64encode(repr(x).encode())
 
 
-def mk_eval(s: Union[bytes, str]) -> Any:
+def mk_eval(s: bytes | str) -> Any:
     try:
         return ast.literal_eval(base64.b64decode(s).decode())
     except Exception:
-        raise MKGeneralException(_("Unable to parse provided data: %s") % escape_to_html(repr(s)))
+        raise MKGeneralException(_("Unable to parse provided data: %s") % repr(s))
 
 
-def site_neutral_path(path: Union[str, Path]) -> str:
+def site_neutral_path(path: str | Path) -> str:
     path = str(path)
     if path.startswith("/omd"):
         parts = path.split("/")
@@ -136,26 +100,45 @@ def may_edit_ruleset(varname: str) -> bool:
     if varname in [
         "custom_checks",
         "datasource_programs",
-        "agent_config:mrpe",
-        "agent_config:agent_paths",
-        "agent_config:runas",
-        "agent_config:only_from",
+        RuleGroup.AgentConfig("mrpe"),
+        RuleGroup.AgentConfig("agent_paths"),
+        RuleGroup.AgentConfig("runas"),
+        RuleGroup.AgentConfig("only_from"),
+        RuleGroup.AgentConfig("python_plugins"),
+        RuleGroup.AgentConfig("lnx_remote_alert_handlers"),
     ]:
         return user.may("wato.rulesets") and user.may("wato.add_or_modify_executables")
-    if varname == "agent_config:custom_files":
+    if varname == RuleGroup.AgentConfig("custom_files"):
         return user.may("wato.rulesets") and user.may("wato.agent_deploy_custom_files")
     return user.may("wato.rulesets")
 
 
-def is_pre_17_remote_site(site_status: SiteStatus) -> bool:
-    """Decide which snapshot format is pushed to the given site
+def format_php(data: object, lvl: int = 1) -> str:
+    """Format a python object for php"""
+    s = ""
+    if isinstance(data, (list, tuple)):
+        s += "array(\n"
+        for item in data:
+            s += "    " * lvl + format_php(item, lvl + 1) + ",\n"
+        s += "    " * (lvl - 1) + ")"
+    elif isinstance(data, dict):
+        s += "array(\n"
+        for key, val in data.items():
+            s += "    " * lvl + format_php(key, lvl + 1) + " => " + format_php(val, lvl + 1) + ",\n"
+        s += "    " * (lvl - 1) + ")"
+    elif isinstance(data, str):
+        s += "'%s'" % re.sub(r"('|\\)", r"\\\1", data)
+    elif isinstance(data, bool):
+        s += data and "true" or "false"
+    elif isinstance(data, (int, float)):
+        s += str(data)
+    elif data is None:
+        s += "null"
+    else:
+        s += format_php(str(data))
 
-    The sync snapshot format was changed between 1.6 and 1.7. To support migrations with a
-    new central site and an old remote site, we detect that case here and create the 1.6
-    snapshots for the old sites.
-    """
-    version = site_status.get("livestatus_version")
-    if not version:
-        return False
+    return s
 
-    return parse_check_mk_version(version) < parse_check_mk_version("1.7.0i1")
+
+def ldap_connections_are_configurable() -> bool:
+    return mode_registry.get("ldap_config") is not None

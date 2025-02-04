@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """This is an unsorted collection of functions which are needed in
@@ -7,9 +7,9 @@ Check_MK modules and/or cmk.base modules code."""
 
 import signal
 from types import FrameType
-from typing import NoReturn, Optional
+from typing import NoReturn
 
-from cmk.utils.exceptions import MKTerminate
+from cmk.ccc.exceptions import MKTerminate
 
 # .
 #   .--Ctrl-C--------------------------------------------------------------.
@@ -25,7 +25,7 @@ from cmk.utils.exceptions import MKTerminate
 
 
 # register SIGINT handler for consistent CTRL+C handling
-def _handle_keepalive_interrupt(signum: int, frame: Optional[FrameType]) -> NoReturn:
+def _handle_keepalive_interrupt(signum: int, frame: FrameType | None) -> NoReturn:
     raise MKTerminate()
 
 

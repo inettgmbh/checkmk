@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+from typing import Literal
 
 import livestatus
 
 from cmk.gui.logged_in import user
 
 
-def determine_downtime_mode(recurring_number, delayed_duration):
+def determine_downtime_mode(recurring_number: int, delayed_duration: int) -> int:
     """Determining the downtime mode
 
     The mode is represented by an integer (bit masking?) which contains information
@@ -25,16 +27,16 @@ def determine_downtime_mode(recurring_number, delayed_duration):
 
 
 class DowntimeSchedule:
-    def __init__(self, start_time, end_time, mode, delayed_duration=None, comment=None) -> None:
+    def __init__(
+        self, start_time: float, end_time: float, mode: int, delayed_duration: int, comment: str
+    ) -> None:
         self.start_time = start_time
         self.end_time = end_time
         self.mode = mode
-        if delayed_duration is None:
-            delayed_duration = 0
         self.delayed_duration = delayed_duration
         self.comment = comment
 
-    def livestatus_command(self, specification: str, cmdtag: str) -> str:
+    def livestatus_command(self, specification: str, cmdtag: Literal["HOST", "SVC"]) -> str:
         return (
             ("SCHEDULE_" + cmdtag + "_DOWNTIME;%s;" % specification)
             + (

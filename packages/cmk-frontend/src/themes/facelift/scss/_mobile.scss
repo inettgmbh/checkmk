@@ -1,0 +1,287 @@
+@charset "UTF-8";
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+// conditions defined in the file COPYING, which is part of this source code package.
+
+/* Styles for Check_MK mobile interface */
+body.mobile {
+  div.really,
+  div.success,
+  div.error,
+  div.message,
+  div.warning {
+    width: 80%;
+    padding: 0.5ex 1em;
+    margin: 1em 0 3em;
+    text-align: center;
+    border-style: solid;
+    border-width: 2px;
+    border-radius: 0.5ex;
+  }
+
+  div.error {
+    color: $font-color;
+    background-color: $color-state-2-background;
+  }
+
+  div.command_group a {
+    color: $font-color-black;
+  }
+
+  table.data {
+    border-collapse: collapse;
+    empty-cells: show;
+
+    td {
+      padding: 2px 3px;
+      overflow: hidden;
+      border: 1px solid $color-table-border;
+    }
+  }
+
+  table.dataset {
+    width: 100%;
+
+    tr.header {
+      color: $font-color-black;
+    }
+
+    > tbody > tr.data > td {
+      padding: 4px 6px;
+      font-size: 13px;
+      border: 1px solid $color-table-border;
+      border-radius: 5px;
+    }
+  }
+
+  td.nonstatus {
+    background-color: $white;
+  }
+
+  /* Forms for filters and commands */
+  table.form {
+    width: 100%;
+
+    > tbody > tr > * {
+      width: 100%;
+    }
+
+    th {
+      border-style: none;
+    }
+  }
+
+  table.filtertime {
+    td {
+      vertical-align: middle;
+    }
+
+    div.ui-select {
+      width: auto;
+    }
+  }
+
+  table.alertstatefilter {
+    td {
+      vertical-align: top;
+    }
+
+    .ui-checkbox {
+      margin: 0;
+    }
+  }
+
+  .ui-header,
+  .ui-footer {
+    .ui-title {
+      margin: 0.6em 46px 0.8em;
+    }
+  }
+
+  .ui-li-aside.state {
+    &.state0 {
+      background-color: $color-state-success-background;
+    }
+
+    &.state1 {
+      background-color: $color-state-1-background;
+    }
+
+    &.state2 {
+      background-color: $color-state-2-background;
+    }
+
+    width: 4.5em;
+    text-align: center;
+    border-radius: $spacing;
+    padding: 2px;
+  }
+
+  td.pnpgraph img {
+    max-width: 97%;
+  }
+
+  table.dataset tr.data td.state {
+    font-size: 25px;
+  }
+
+  #loginhead,
+  #loginfoot {
+    color: $font-color-dimmed;
+    text-align: center;
+  }
+
+  #loginhead {
+    margin: 1em;
+  }
+
+  input#_saml2_login_button {
+    margin-left: 0;
+    background-color: $success;
+  }
+
+  #login_error,
+  #login_error_saml2 {
+    div.error {
+      margin-left: auto;
+      margin-right: auto;
+      color: $white;
+    }
+  }
+
+  #login_error_saml2 div.error {
+    font-weight: $font-weight-bold;
+
+    p {
+      margin: 0;
+      font-weight: $font-weight-default;
+    }
+  }
+
+  h2.login_separator {
+    margin: 26px 0;
+    text-align: center;
+    border-bottom: 1px solid $black;
+    line-height: 0.1em;
+
+    span {
+      background-color: $mobile-background-color;
+      padding: 0 $spacing;
+    }
+  }
+
+  input {
+    height: initial;
+  }
+
+  #loginfoot {
+    margin-top: 1em;
+
+    &.copyright {
+      margin-top: 1em;
+    }
+  }
+
+  img.logomk {
+    width: 25px;
+    height: 25px;
+    margin-bottom: 10px;
+  }
+
+  td.icons {
+    vertical-align: middle;
+
+    img {
+      width: 40px;
+      height: 40px;
+      margin-left: 5px;
+    }
+
+    a {
+      padding-left: 8px;
+    }
+  }
+
+  div.popup_trigger {
+    display: inline-block;
+
+    > div.popup_menu {
+      display: inline-block;
+
+      a {
+        display: inline-block;
+        width: 40px;
+        overflow: hidden;
+        color: $font-color-black;
+
+        img {
+          margin-left: 0;
+        }
+      }
+
+      ul {
+        padding: 0;
+        margin: 0;
+      }
+
+      li {
+        display: inline-block;
+        margin: 0;
+      }
+    }
+  }
+
+  input.button {
+    width: 100%;
+    height: 100%;
+    margin-top: 0;
+    background-color: $white;
+    border-radius: $spacing;
+  }
+
+  input[type="checkbox"] {
+    &,
+    &:checked {
+      + label::before {
+        content: none;
+      }
+    }
+  }
+
+  div.ui-select {
+    display: none;
+  }
+
+  .select2.select2-container {
+    width: 100% !important;
+    padding: 0.7em 1em;
+    font-size: 16px;
+    background-color: $mobile-form-element-bg-color;
+    border: $mobile-form-element-border;
+    border-radius: $theme-border-radius;
+
+    &.select2-container--focus,
+    &.select2-container--open {
+      box-shadow: $mobile-form-element-focus-box-shadow;
+      -webkit-box-shadow: $mobile-form-element-focus-box-shadow;
+      -moz-box-shadow: $mobile-form-element-focus-box-shadow;
+    }
+
+    .select2-selection--single {
+      text-align: center;
+
+      .select2-selection__rendered {
+        background-color: $mobile-form-element-bg-color;
+      }
+
+      .select2-selection__arrow {
+        top: $spacing;
+        right: $spacing;
+      }
+    }
+  }
+
+  legend {
+    margin: 0 0 4px;
+  }
+}

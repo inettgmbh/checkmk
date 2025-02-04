@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -23,14 +23,14 @@ useful or probably only when directly connecting to single nodes - not sure abou
 import logging
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Mapping, MutableMapping, Optional, Sequence, Set
 
-import paho.mqtt.client as mqtt  # type: ignore[import]
+import paho.mqtt.client as mqtt
 
-from cmk.special_agents.utils.agent_common import SectionWriter, special_agent_main
-from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
+from cmk.special_agents.v0_unstable.agent_common import SectionWriter, special_agent_main
+from cmk.special_agents.v0_unstable.argument_parsing import Args, create_default_argument_parser
 
 LOGGER = logging.getLogger("agent_mqtt")
 
@@ -77,11 +77,11 @@ SYS_TOPIC_ALIASES = {
 class ReceivedData:
     connected: bool = False
     subscribed_to_sys: bool = False
-    topics: MutableMapping[str, str] = field(default_factory=dict)
-    remaining_topics: Set[str] = field(default_factory=lambda: set(EXPECTED_SYS_TOPICS))
+    topics: dict[str, str] = field(default_factory=dict)
+    remaining_topics: set[str] = field(default_factory=lambda: set(EXPECTED_SYS_TOPICS))
 
 
-def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
+def parse_arguments(argv: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
     parser.add_argument(
         "address",
@@ -132,18 +132,18 @@ def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
     return parser.parse_args(argv)
 
 
-def agent_mqtt_main(args: Args) -> None:
+def agent_mqtt_main(args: Args) -> int:
     try:
         received = receive_from_mqtt(args)
     except RuntimeError as e:
         if args.debug:
             raise
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        sys.stderr.write(str(e) + "\n")
+        return 1
 
     with SectionWriter("mqtt_statistics") as writer:
         writer.append_json({args.instance_id: received.topics})
-    sys.exit(0)
+    return 0
 
 
 def receive_from_mqtt(args: Args) -> ReceivedData:
@@ -223,5 +223,5 @@ def on_message(mqttc: mqtt.Client, received: ReceivedData, msg: mqtt.MQTTMessage
     received.topics[msg.topic] = msg.payload.decode()
 
 
-def main() -> None:
-    special_agent_main(parse_arguments, agent_mqtt_main)
+def main() -> int:
+    return special_agent_main(parse_arguments, agent_mqtt_main)

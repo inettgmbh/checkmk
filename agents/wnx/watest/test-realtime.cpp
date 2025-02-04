@@ -3,14 +3,14 @@
 //
 #include "pch.h"
 
-#include <string_view>
 #include <thread>
 
-#include "asio.h"
-#include "cfg.h"
 #include "common/cfg_info.h"
-#include "realtime.h"
 #include "tools/_misc.h"
+#include "tools/_raii.h"
+#include "wnx/asio.h"
+#include "wnx/cfg.h"
+#include "wnx/realtime.h"
 
 namespace tst {
 void DisableSectionsNode(std::string_view str) {
@@ -58,13 +58,10 @@ private:
     char data_[max_length];
 };
 
-void StartTestServer(asio::io_context *IoContext, int Port) {
+void StartTestServer(asio::io_context *io_context, uint16_t port) {
     try {
-        ;
-
-        UdpServer s(*IoContext, Port);
-
-        IoContext->run();
+        UdpServer s(*io_context, port);
+        io_context->run();
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
@@ -134,7 +131,7 @@ TEST(RealtimeTest, PackData) {
         auto char_data = reinterpret_cast<char *>(data);
         std::string_view ts(char_data + kHeaderSize, kTimeStampSize);
         std::string timestamp(ts);
-        auto timestamp_mid = std::atoll(timestamp.c_str());
+        auto timestamp_mid = std::stoll(timestamp);
         EXPECT_TRUE(tstamp1 <= timestamp_mid);
         EXPECT_TRUE(tstamp2 >= timestamp_mid);
     }
@@ -153,7 +150,7 @@ TEST(RealtimeTest, PackData) {
         auto char_data = reinterpret_cast<char *>(data);
         std::string_view ts(char_data + kHeaderSize, kTimeStampSize);
         std::string timestamp(ts);
-        auto timestamp_mid = std::atoll(timestamp.c_str());
+        auto timestamp_mid = std::stoll(timestamp);
         EXPECT_TRUE(tstamp1 <= timestamp_mid);
         EXPECT_TRUE(tstamp2 >= timestamp_mid);
 
@@ -183,13 +180,12 @@ void WaitFor(const std::function<bool()> &predicat,
     }
 }
 
-TEST(RealtimeTest, Base_Long) {
+TEST(RealtimeTest, Base_Simulation) {
     // stub
     using namespace std::chrono;
 
-    cma::OnStart(cma::AppType::test);
-    ON_OUT_OF_SCOPE(
-        cma::OnStart(cma::AppType::test));  // restore original config
+    OnStartTest();
+    ON_OUT_OF_SCOPE( OnStartTest());  // restore original config
     {
         // we disable sections to be sure that realtime sections are executed
         // even being disabled
@@ -202,7 +198,7 @@ TEST(RealtimeTest, Base_Long) {
         Device dev;
         asio::io_context context;
         TestTable.clear();
-        std::thread first(StartTestServer, &context, 555);
+        std::thread first(StartTestServer, &context, 555U);
         auto ret = dev.start();
 
         EXPECT_TRUE(dev.started());
@@ -210,7 +206,7 @@ TEST(RealtimeTest, Base_Long) {
                         "");
 
         EXPECT_TRUE(ret);
-        WaitFor([]() { return TestTable.size() >= 6; }, 20s);
+        WaitFor([] { return TestTable.size() >= 6; }, 20s);
 
         EXPECT_TRUE(dev.started());
         dev.stop();
@@ -233,7 +229,7 @@ TEST(RealtimeTest, Base_Long) {
         Device dev;
         asio::io_context context;
         TestTable.clear();
-        std::thread first(StartTestServer, &context, 555);
+        std::thread first(StartTestServer, &context, 555U);
         auto ret = dev.start();
 
         EXPECT_TRUE(dev.started());
@@ -241,7 +237,7 @@ TEST(RealtimeTest, Base_Long) {
                         "encrypt");
 
         EXPECT_TRUE(ret);
-        WaitFor([]() { return TestTable.size() >= 6; }, 20s);
+        WaitFor([] { return TestTable.size() >= 6; }, 20s);
         EXPECT_TRUE(dev.started());
         dev.stop();
         EXPECT_FALSE(dev.started());

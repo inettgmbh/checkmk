@@ -1,37 +1,43 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-
-import os
 
 from tests.testlib.site import Site
 
 
 def test_init_scripts(site: Site) -> None:
-    scripts = [
+    scripts = {
+        "agent-receiver",
         "apache",
+        "automation-helper",
+        "ui-job-scheduler",
         "core",
         "crontab",
         "mkeventd",
         "nagios",
         "npcd",
+        "piggyback-hub",
         "pnp_gearman_worker",
-        "rrdcached",
-        "xinetd",
-        "stunnel",
+        "rabbitmq",
         "redis",
-        "agent-receiver",
-    ]
+        "rrdcached",
+        "stunnel",
+        "xinetd",
+    }
 
-    if site.version.edition() == "enterprise":
-        scripts += [
+    if not site.version.is_raw_edition():
+        scripts |= {
             "cmc",
             "dcd",
             "liveproxyd",
             "mknotifyd",
-        ]
+        }
+    if site.version.is_cloud_edition() or site.version.is_managed_edition():
+        scripts |= {"otel-collector"}
+    if not site.version.is_saas_edition():
+        scripts |= {"jaeger"}
 
-    installed_scripts = os.listdir(os.path.join(site.root, "etc/init.d"))
+    installed_scripts = set(site.listdir("etc/init.d"))
 
-    assert sorted(scripts) == sorted(installed_scripts)
+    assert scripts == installed_scripts

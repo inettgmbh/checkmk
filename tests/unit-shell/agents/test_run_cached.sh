@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -12,14 +12,14 @@ oneTimeSetUp() {
 
     set_up_get_epoch
 
-    export MK_VARDIR="${SHUNIT_TMPDIR}"
-    mkdir -p "$MK_VARDIR/cache/"
+    export CACHEDIR="${SHUNIT_TMPDIR}/cache"
+    mkdir -p "$CACHEDIR"
 
-    PLUG_CACHE="$MK_VARDIR/cache/plugins_my_plugin.cache"
-    LOCA_CACHE="$MK_VARDIR/cache/local_my_local_check.cache"
-    MRPE_CACHE="$MK_VARDIR/cache/mrpe_mrpetest.cache"
+    PLUG_CACHE="$CACHEDIR/plugins_my_plugin.cache"
+    LOCA_CACHE="$CACHEDIR/local_my_local_check.cache"
+    MRPE_CACHE="$CACHEDIR/mrpe_mrpetest.cache"
 
-    # create some caches.
+    # create some caches
     # similar/duplicate lines are on purpose, because sed is for pros.
 
     # local plugin
@@ -54,7 +54,7 @@ oneTimeSetUp() {
 test_run_cached_plugin() {
 
     MTIME="$(stat -c %X "$PLUG_CACHE")"
-    OUTPUT="$(run_cached "plugins_my_plugin" "180" "run_agent_plugin" "180/my_plugin")"
+    OUTPUT="$(_run_cached_internal "plugins_my_plugin" 170 180 540 360 "run_agent_plugin" "170/my_plugin")"
 
     expected() {
         echo "<<<my_plugin_section:cached($MTIME,180)>>>"
@@ -71,7 +71,7 @@ test_run_cached_plugin() {
 test_run_cached_local() {
 
     MTIME="$(stat -c %X "$LOCA_CACHE")"
-    OUTPUT=$(run_cached "local_my_local_check" "180" "run_agent_locals" "_log_section_time 'local_180/my_local_check' './180/my_local_check'")
+    OUTPUT=$(_run_cached_internal "local_my_local_check" 170 180 540 360 "run_agent_locals" "_log_section_time 'local_170/my_local_check' './170/my_local_check'")
 
     expected() {
         echo "cached($MTIME,180) P \"This is local output without custom cache info\""
@@ -91,32 +91,12 @@ test_run_cached_mrpe() {
     descr="mrpetest"
     cmdline="this is the cmdline for the mrpe call"
     MTIME="$(stat -c %X "$MRPE_CACHE")"
-    OUTPUT=$(run_cached "mrpe_$descr" "180" "_log_section_time 'mrpe_$descr' '$cmdline'")
+    OUTPUT=$(_run_cached_internal "mrpe_$descr" 170 180 540 360 "_log_section_time 'mrpe_$descr' '$cmdline'")
 
     assertEquals "<<<mrpe>>>
 cached($MTIME,180) (my_check) Description 0 This is mrpe output" "$OUTPUT"
 
 }
 
-test_run_cached_get_shell() {
-    (# linux
-        ps() {
-            if [ "$1" = "-o" ] && [ "$2" = "args=" ] && [ "$3" = "-p" ]; then
-                echo /bin/bash /usr/bin/check_mk_agent
-            fi
-        }
-        assertEquals "/bin/bash" "$(_this_shell)"
-    )
-
-    (# AIX
-        ps() {
-            if [ "$1" = "-o" ] && [ "$2" = "args=" ] && [ "$3" = "-p" ]; then
-                echo -bash /usr/bin/check_mk_agent
-            fi
-        }
-        assertEquals "bash" "$(_this_shell)"
-    )
-
-}
 # shellcheck disable=SC1090
 . "$UNIT_SH_SHUNIT2"

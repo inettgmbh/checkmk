@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
 
-import cmk.utils.version as cmk_version
+import pytest
+
+import cmk.ccc.version as cmk_version
+
+from cmk.utils import paths
 
 import cmk.gui.pages
 
@@ -19,7 +23,6 @@ def test_registered_pages() -> None:
         "ajax_cascading_render_painer_parameters",
         "ajax_activation_state",
         "ajax_add_visual",
-        "ajax_autocomplete_labels",
         "ajax_backup_job_state",
         "ajax_background_job_details",
         "ajax_dashlet_pos",
@@ -29,6 +32,8 @@ def test_registered_pages() -> None:
         "ajax_inv_render_tree",
         "ajax_nagvis_maps_snapin",
         "ajax_popup_action_menu",
+        "ajax_popup_host_action_menu",
+        "ajax_popup_service_action_menu",
         "ajax_popup_add_visual",
         "ajax_popup_icon_selector",
         "ajax_popup_move_to_folder",
@@ -46,19 +51,16 @@ def test_registered_pages() -> None:
         "ajax_switch_help",
         "ajax_ui_theme",
         "ajax_userdb_sync",
+        "ajax_validate_filter",
         "ajax_visual_filter_list_get_choice",
         "ajax_vs_autocomplete",
         "ajax_vs_unit_resolver",
         "ajax_fetch_aggregation_data",
-        "ajax_save_bi_template_layout",
         "ajax_save_bi_aggregation_layout",
         "ajax_sidebar_get_messages",
-        "ajax_load_bi_template_layout",
         "ajax_load_bi_aggregation_layout",
-        "ajax_delete_bi_template_layout",
         "ajax_delete_bi_aggregation_layout",
         "ajax_fetch_topology",
-        "ajax_get_all_bi_template_layouts",
         "automation_login",
         "bi_map",
         "bi_render_tree",
@@ -83,7 +85,6 @@ def test_registered_pages() -> None:
         "download_agent_output",
         "download_crash_report",
         "download_diagnostics_dump",
-        "download_robotmk_report",
         "edit_bookmark_list",
         "edit_dashboard",
         "edit_dashboards",
@@ -105,12 +106,10 @@ def test_registered_pages() -> None:
         "mobile",
         "mobile_view",
         "noauth:automation",
-        "noauth:run_cron",
         "message",
         "prediction_graph",
         "parent_child_topology",
-        "robotmk",
-        "robotmk_report",
+        "network_topology",
         "search_open",
         "set_all_sites",
         "side",
@@ -133,7 +132,9 @@ def test_registered_pages() -> None:
         "user_profile",
         "user_profile_replicate",
         "user_webauthn_register_begin",
+        "user_totp_register",
         "user_two_factor_overview",
+        "user_two_factor_enforce",
         "user_two_factor_edit_credential",
         "user_webauthn_register_complete",
         "user_login_two_factor",
@@ -145,7 +146,6 @@ def test_registered_pages() -> None:
         "wato_ajax_execute_check",
         "wato_ajax_fetch_site_status",
         "wato_ajax_profile_repl",
-        "webapi",
         "werk",
         "ajax_graph",
         "ajax_graph_hover",
@@ -153,10 +153,11 @@ def test_registered_pages() -> None:
         "ajax_initial_dashboard_filters",
         "ajax_initial_view_filters",
         "ajax_initial_topology_filters",
-        "noauth:ajax_graph_images",
+        "ajax_graph_images",
+        "gui_timings",
     ]
 
-    if not cmk_version.is_raw_edition():
+    if cmk_version.edition(paths.omd_root) is not cmk_version.Edition.CRE:
         expected_pages += [
             "ajax_host_overview_tooltip",
             "ajax_pagetype_add_element",
@@ -219,12 +220,29 @@ def test_registered_pages() -> None:
             "ajax_ntop_engaged_alerts",
             "ajax_ntop_past_alerts",
             "ajax_ntop_flow_alerts",
-            "license_usage_download",
+            "licensing_download_verification_request",
+            "noauth:saml_acs",
+            "noauth:saml_metadata",
+            "noauth:saml_sso",
+            "robotmk_suite_log",
+            "robotmk_suite_report",
+            "download_robotmk_suite_report",
+        ]
+
+    if cmk_version.edition(paths.omd_root) is cmk_version.Edition.CSE:
+        expected_pages += [
+            "ajax_saas_onboarding_button_toggle",
+            "noauth:cognito_sso",
+            "noauth:cognito_callback",
+            "cognito_logout",
+            "noauth:download_license_request",
+            "noauth:upload_license_response",
+            "noauth:download_license_usage",
         ]
 
     # TODO: Depending on how we call the test (single test or whole package) we
     # see this page or we don't...
-    actual_set = set(p for p in cmk.gui.pages.page_registry.keys() if p != "switch_customer")  #
+    actual_set = {p for p in cmk.gui.pages.page_registry.keys() if p != "switch_customer"}  #
 
     expected_set = set(expected_pages)
     differences = actual_set.symmetric_difference(expected_set)
@@ -235,37 +253,8 @@ def test_registered_pages() -> None:
     assert len(differences) == 0
 
 
-def test_pages_register(monkeypatch, capsys) -> None:  # type:ignore[no-untyped-def]
-    monkeypatch.setattr(cmk.gui.pages, "page_registry", cmk.gui.pages.PageRegistry())
-
-    @cmk.gui.pages.register("123handler")
-    def page_handler():  # pylint: disable=unused-variable
-        sys.stdout.write("123")
-
-    handler = cmk.gui.pages.get_page_handler("123handler")
-    assert callable(handler)
-
-    handler()
-    assert capsys.readouterr()[0] == "123"
-
-
-def test_pages_register_handler(monkeypatch, capsys) -> None:  # type:ignore[no-untyped-def]
-    monkeypatch.setattr(cmk.gui.pages, "page_registry", cmk.gui.pages.PageRegistry())
-
-    class PageClass:
-        def handle_page(self) -> None:
-            sys.stdout.write("234")
-
-    cmk.gui.pages.register_page_handler("234handler", lambda: PageClass().handle_page())
-
-    handler = cmk.gui.pages.get_page_handler("234handler")
-    assert callable(handler)
-
-    handler()
-    assert capsys.readouterr()[0] == "234"
-
-
-def test_page_registry_register_page(monkeypatch, capsys) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("monkeypatch")
+def test_page_registry_register_page(capsys: pytest.CaptureFixture[str]) -> None:
     page_registry = cmk.gui.pages.PageRegistry()
 
     @page_registry.register_page("234handler")
@@ -275,6 +264,24 @@ def test_page_registry_register_page(monkeypatch, capsys) -> None:  # type:ignor
 
     handler = page_registry.get("234handler")
     assert handler == PageClass
+
+    handler().handle_page()
+    assert capsys.readouterr()[0] == "234"
+
+
+def test_page_registry_register_page_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    page_registry = cmk.gui.pages.PageRegistry()
+
+    def page() -> None:
+        sys.stdout.write("234")
+
+    page_registry.register_page_handler("234handler", page)
+
+    handler = page_registry["234handler"]
+    assert issubclass(handler, cmk.gui.pages.Page)
 
     handler().handle_page()
     assert capsys.readouterr()[0] == "234"

@@ -1,5 +1,8 @@
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the
+// terms and conditions defined in the file COPYING, which is part of this
+// source code package.
 
-// provides basic api to start and stop service
 #include "stdafx.h"
 
 #include "providers/fileinfo.h"
@@ -7,17 +10,18 @@
 #include <fmt/format.h>
 
 #include <filesystem>
+#include <ranges>
 #include <regex>
 #include <string>
 #include <tuple>
 
-#include "cfg.h"
-#include "cma_core.h"
 #include "common/wtools.h"
-#include "glob_match.h"
-#include "logger.h"
 #include "providers/fileinfo_details.h"
 #include "tools/_raii.h"
+#include "wnx/cfg.h"
+#include "wnx/cma_core.h"
+#include "wnx/glob_match.h"
+#include "wnx/logger.h"
 
 namespace fs = std::filesystem;
 
@@ -26,8 +30,8 @@ namespace cma::provider::details {
 std::optional<std::chrono::system_clock::duration> GetFileTimeSinceEpoch(
     const fs::path &file) noexcept {
     std::error_code ec;
-    auto file_last_touch_full = fs::last_write_time(file, ec);
-    if (ec.value()) {
+    const auto file_last_touch_full = fs::last_write_time(file, ec);
+    if (ec) {
         return {};
     }
     return file_last_touch_full.time_since_epoch();
@@ -36,7 +40,7 @@ std::optional<std::chrono::system_clock::duration> GetFileTimeSinceEpoch(
 /// Get the OS filename preserving the filename case. This is Windows FS.
 // on error returns same name
 fs::path ReadBaseNameWithCase(const fs::path &file_path) {
-    WIN32_FIND_DATAW file_data{0};
+    WIN32_FIND_DATAW file_data = {};
     auto *handle = ::FindFirstFileW(file_path.wstring().c_str(), &file_data);
     if (wtools::IsInvalidHandle(handle)) {
         XLOG::t.w("Unexpected status [{}] when reading file '{}'",
@@ -60,8 +64,9 @@ fs::path GetOsPathWithCase(const fs::path &file_path) {
     auto [head_part, body] = details::SplitFileInfoPathSmart(file_path);
 
     UppercasePath(head_part);
-    if (head_part.empty() && body.empty())
+    if (head_part.empty() && body.empty()) {
         body = file_path;  // unusual case, only name
+    }
 
     // Scan all path and read for every chunk correct representation
     // from OS
@@ -109,7 +114,7 @@ void GatherMatchingFilesRecursive(const fs::path &search_path,
         for (const auto &entry : fs::recursive_directory_iterator(
                  search_path, fs::directory_options::skip_permission_denied)) {
             std::error_code ec;
-            auto status = entry.status(ec);
+            const auto status = entry.status(ec);
             const auto &entry_name = entry.path();
             if (ec) {
                 XLOG::t("Access to '{}' is not possible, status [{}]",
@@ -126,10 +131,8 @@ void GatherMatchingFilesRecursive(const fs::path &search_path,
                 files.push_back(entry);
             }
         }
-    } catch (std::exception &e) {
+    } catch (const std::exception &e) {
         XLOG::l("Exception recursive '{}'", e.what());
-    } catch (...) {
-        XLOG::l("Exception recursive");
     }
 }
 
@@ -142,7 +145,7 @@ void GatherMatchingFilesAndDirs(
     PathVector &dirs_found) {      // output
     for (const auto &p : fs::directory_iterator(search_dir)) {
         std::error_code ec;
-        auto status = p.status(ec);  // CMK-1417
+        const auto status = p.status(ec);  // CMK-1417
         if (ec) {
             XLOG::d("Cant obtain status for dir '{}' path '{}' error [{}]",
                     search_dir, p.path(), ec.value());
@@ -160,9 +163,8 @@ void GatherMatchingFilesAndDirs(
             if (fs::is_directory(status) &&
                 tools::GlobMatch(dir_pattern.wstring(), path.wstring())) {
                 dirs_found.push_back(path);
-                continue;
             }
-        } catch (std::exception &e) {
+        } catch (const std::exception &e) {
             XLOG::l("Exception GatherMatchingFilesAndDirs '{}'", e.what());
         }
     }
@@ -219,7 +221,7 @@ void ProcessDirsAndFilesTables(PathVector &dirs, PathVector &files,
     // check what the hell we have in dirs and update files
     for (auto &entry : dirs) {
         std::error_code ec;
-        auto good_file = fs::is_regular_file(entry, ec);
+        const auto good_file = fs::is_regular_file(entry, ec);
         if (ec) {  // not found, reporting only when error is serious
             if (ec.value() != 2) {  // 2 means NOT FOUND, this is ok
                 // low probability. Something really bad
@@ -235,12 +237,12 @@ void ProcessDirsAndFilesTables(PathVector &dirs, PathVector &files,
     }
 
     // remove non-dirs entry from dirs table
-    auto last_pos =
-        std::remove_if(dirs.begin(), dirs.end(), [](const auto &path) {
+    const auto [first, last] =
+        std::ranges::remove_if(dirs, [](const auto &path) {
             std::error_code ec;
             auto is_dir = fs::is_directory(path, ec);
             if (!ec) {
-                return !is_dir;  // remove all what is not dir
+                return !is_dir;
             }
 
             if (ec.value() != 2) {
@@ -251,7 +253,7 @@ void ProcessDirsAndFilesTables(PathVector &dirs, PathVector &files,
             return true;  // remove trash with error too
         });
 
-    dirs.erase(last_pos, dirs.end());
+    dirs.erase(first, last);
 }
 
 void AddVectorWithMove(PathVector &files, PathVector &found_files) {
@@ -326,14 +328,14 @@ PathVector FindFilesByMask(const std::wstring &mask) {
 }
 
 bool ValidFileInfoPathEntry(std::string_view entry) {
-    fs::path p{wtools::ConvertToUTF16(entry)};
+    fs::path p{wtools::ConvertToUtf16(entry)};
     return !p.root_name().empty() && !p.root_directory().empty();
 }
 
 std::string MakeFileInfoEntryModern(const fs::path &file_name, bool stat_failed,
                                     uint64_t file_size, int64_t seconds) {
     if (stat_failed) {
-        return file_name.u8string() + FileInfo::kSep +
+        return wtools::ToUtf8(file_name.wstring()) + FileInfo::kSep +
                std::string(FileInfo::kStatFailed) + "\n";
     }
 
@@ -385,7 +387,7 @@ std::tuple<uint64_t, int64_t, bool> GetFileStats(const fs::path &file_path) {
 
     auto file_last_touch = GetFileTimeSinceEpoch(file_path);
     if (file_last_touch.has_value()) {
-        auto duration =
+        const auto duration =
             std::chrono::duration_cast<std::chrono::seconds>(*file_last_touch);
         seconds = duration.count();
         CorrectSeconds(seconds);
@@ -426,8 +428,8 @@ std::tuple<uint64_t, int64_t, bool> GetFileStatsCreative(
 
 std::string MakeFileInfoStringMissing(const fs::path &file_name,
                                       FileInfo::Mode mode) {
-    std::string out =
-        file_name.u8string() + FileInfo::kSep + std::string(FileInfo::kMissing);
+    std::string out = wtools::ToUtf8(file_name.wstring()) + FileInfo::kSep +
+                      std::string(FileInfo::kMissing);
 
     // #deprecated
     if (mode == FileInfo::Mode::legacy) {
@@ -466,10 +468,12 @@ bool IsDriveLetterAtTheStart(std::string_view text) noexcept {
     return text.size() > 2 && text[1] == ':' && std::isalpha(text[0]) != 0;
 }
 
-void CorrectDriveLetterByEntry(std::string &ret, std::string_view entry) {
+void CorrectDriveLetterByEntry(std::string &ret,
+                               std::string_view entry) noexcept {
     // drive letter correction:
-    if (IsDriveLetterAtTheStart(entry) && IsDriveLetterAtTheStart(ret))
+    if (IsDriveLetterAtTheStart(entry) && IsDriveLetterAtTheStart(ret)) {
         ret[0] = entry[0];
+    }
 }
 }  // namespace
 // single entry from config: a, b and c
@@ -484,12 +488,11 @@ std::string ProcessFileInfoPathEntry(std::string_view entry,
     }
 
     // entries with glob patterns
-    auto mask = wtools::ConvertToUTF16(entry);
+    auto mask = wtools::ConvertToUtf16(entry);
     const auto file_paths = FindFilesByMask(mask);
 
     if (file_paths.empty()) {
-        // no files? place missing entry(as 1.5 Agent)!
-        return MakeFileInfoStringMissing(entry, mode);
+        return {};  // as requested by ticket CMK-11016
     }
 
     std::string out;
@@ -556,7 +559,7 @@ const std::string g_modern_sub_header{
     "[[[content]]]\n"};
 }  // namespace
 
-std::string FileInfo::generateFileList(const YAML::Node &path_array) {
+std::string FileInfo::generateFileList(const YAML::Node &path_array) const {
     int i_pos = 0;  // logging variable
     std::string out;
     for (const auto &p : path_array) {
@@ -572,7 +575,9 @@ std::string FileInfo::generateFileList(const YAML::Node &path_array) {
 
             // mask is valid:
             auto ret = details::ProcessFileInfoPathEntry(mask, mode_);
-            if (ret.empty()) continue;
+            if (ret.empty()) {
+                continue;
+            }
 
             out += ret;
         } catch (const std::exception &e) {
@@ -592,10 +597,11 @@ std::string FileInfo::generateFileList(const YAML::Node &path_array) {
 }  // namespace provider
 
 std::string FileInfo::makeBody() {
-    auto out = std::to_string(tools::SecondsSinceEpoch()) + "\n";
     auto path_array_val = GetPathArray(cfg::GetLoadedConfig());
-    return path_array_val.has_value() ? out + generateFileList(*path_array_val)
-                                      : out;
+    auto file_list = generateFileList(*path_array_val);
+    auto ref_timestamp = std::to_string(tools::SecondsSinceEpoch()) + "\n";
+    return path_array_val.has_value() ? ref_timestamp + file_list
+                                      : ref_timestamp;
 }
 
 bool FileInfo::ContainsGlobSymbols(std::string_view name) {

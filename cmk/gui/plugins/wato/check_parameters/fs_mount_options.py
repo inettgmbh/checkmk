@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,19 +9,30 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersStorage,
 )
-from cmk.gui.valuespec import ListOfStrings, TextInput
+from cmk.gui.valuespec import Dictionary, ListOfStrings, Migrate, TextInput
 
 
-def _parameter_valuespec_fs_mount_options():
-    return ListOfStrings(
-        title=_("Expected mount options"),
-        help=_(
-            "Specify all expected mount options here. If the list of "
-            "actually found options differs from this list, the check will go "
-            "warning or critical. Just the option <tt>commit</tt> is being "
-            "ignored since it is modified by the power saving algorithms."
+def _parameter_valuespec_fs_mount_options() -> Migrate:
+    return Migrate(
+        valuespec=Dictionary(
+            elements=[
+                (
+                    "expected_mount_options",
+                    ListOfStrings(
+                        title=_("Expected mount options"),
+                        help=_(
+                            "Specify all expected mount options here. If the list of "
+                            "actually found options differs from this list, the check will go "
+                            "warning or critical. Just the option <tt>commit</tt> is being "
+                            "ignored since it is modified by the power saving algorithms."
+                        ),
+                        valuespec=TextInput(),
+                    ),
+                ),
+            ],
+            optional_keys=[],
         ),
-        valuespec=TextInput(),
+        migrate=lambda p: p if isinstance(p, dict) else {"expected_mount_options": p},
     )
 
 

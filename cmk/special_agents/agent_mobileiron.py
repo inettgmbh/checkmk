@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -9,39 +9,30 @@ https://help.ivanti.com/mi/help/en_us/cld/76/api/Content/MobileIronCloudCustomer
 
 api call url parameters: "https://" + $tenantURL + "/api/v1/device?q=&rows=" + $interval + "&start=" + $start + "&dmPartitionId=" + $spaceId + "&fq=" + $filterCriteria + ""
 """
+
 from __future__ import annotations
 
 import enum
 import itertools
 import logging
 import re
+import sys
 from collections import defaultdict, UserDict
-from typing import (
-    Any,
-    Collection,
-    Dict,
-    Final,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
-from urllib.parse import quote, urljoin
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from typing import Any, Final
+from urllib.parse import urljoin
 
 import requests
-import urllib3
 
+from cmk.utils.http_proxy_config import deserialize_http_proxy_config
 from cmk.utils.regex import regex, REGEX_HOST_NAME_CHARS
 
-from cmk.special_agents.utils.agent_common import (
+from cmk.special_agents.v0_unstable.agent_common import (
     ConditionalPiggybackSection,
     SectionWriter,
     special_agent_main,
 )
-from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
+from cmk.special_agents.v0_unstable.argument_parsing import Args, create_default_argument_parser
 
 LOGGER = logging.getLogger("agent_mobileiron")
 
@@ -84,27 +75,25 @@ class HostnameDict(UserDict):
     """
 
     def __init__(self) -> None:
-        self._keys_seen: Dict[str, itertools.count] = defaultdict(itertools.count)
+        self._keys_seen: dict[str, itertools.count] = defaultdict(itertools.count)
         super().__init__()
 
     def __setitem__(self, key: str, value: Mapping) -> None:
         key = _sanitize_hostname(key)
         if (current_count := next(self._keys_seen[key])) >= 1:
-            key = f"{key}_{current_count+1}"
+            key = f"{key}_{current_count + 1}"
         super().__setitem__(key, value)
 
 
-def _get_partition_list(opt_string: str) -> List[str]:
+def _get_partition_list(opt_string: str) -> list[str]:
     return opt_string.split(",")
 
 
-def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
+def parse_arguments(argv: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
     parser.add_argument("--username", "-u", type=str, help="username for connection")
     parser.add_argument("--password", "-p", type=str, help="password for connection")
-    parser.add_argument("--key-fields", action="append", help="field for hostname generation")
-    parser.add_argument("--port", type=int, help="port for connection")
-    parser.add_argument("--no-cert-check", action="store_true")
+    parser.add_argument("--key-fields", action="append", help="field for host name generation")
     parser.add_argument(
         "--partition",
         nargs="+",
@@ -112,34 +101,21 @@ def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
         help="Partition id for connection parameters (dmPartitionId)",
     )
     parser.add_argument("--hostname", help="Name of the Mobileiron instance to query.")
-    parser.add_argument("--android-regex", action="append", help="Regex for Android hosts.")
-    parser.add_argument("--ios-regex", action="append", help="Regex for iOS hosts.")
-    parser.add_argument("--others-regex", action="append", help="Regex for other platform hosts.")
-    parser.add_argument("--proxy-host", help="The address of the proxy server")
-    parser.add_argument("--proxy-port", help="The port of the proxy server")
-    parser.add_argument("--proxy-user", help="The username for authentication of the proxy server")
     parser.add_argument(
-        "--proxy-password", help="The password for authentication of the proxy server"
+        "--android-regex", action="append", default=[], help="Regex for Android hosts."
+    )
+    parser.add_argument("--ios-regex", action="append", default=[], help="Regex for iOS hosts.")
+    parser.add_argument(
+        "--other-regex", action="append", default=[], help="Regex for other platform hosts."
+    )
+    parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        metavar="PROXY",
+        help="HTTP proxy used to connect to the Mobileiron API. If not set, the environment settings will be used.",
     )
     return parser.parse_args(argv)
-
-
-def _proxy_address(
-    server_address: str,
-    port: Optional[str] = None,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-) -> str:
-    """Constructs a full proxy address string."""
-    address = server_address
-    authentication = ""
-    if port:
-        address += f":{port}"
-    if username and password:
-        user_quoted = quote(username)
-        password_quoted = quote(password)
-        authentication = f"{user_quoted}:{password_quoted}@"
-    return f"{authentication}{address}"
 
 
 def _sanitize_hostname(raw_hostname: str) -> str:
@@ -154,34 +130,30 @@ class MobileironAPI:
     def __init__(
         self,
         api_host: str,
-        port: int,
         key_fields: Sequence[str],
-        auth: Tuple[str, str],
-        verify: bool,
+        auth: tuple[str, str],
         regex_patterns: Regexes,
-        proxies: Optional[str] = None,
+        proxy: str | None = None,
     ) -> None:
         self.api_host = api_host
         self._key_fields = key_fields
-        self._api_url = urljoin(f"https://{api_host}:{port}", "/api/v1/device")
+        self._api_url = urljoin(f"https://{api_host}", "/api/v1/device")
         self._session = requests.Session()
         self._session.auth = auth
-        self._session.verify = verify
+        self._session.verify = True
         self._session.headers["Accept"] = "application/json"
-        if self._session.verify is False:
-            urllib3.disable_warnings(category=urllib3.exceptions.InsecureRequestWarning)
         self._all_devices: HostnameDict = HostnameDict()
         self._devices_per_request = 200
         self.regex_patterns = regex_patterns
-        if proxies:
-            self._session.proxies.update({"https": proxies})
+        self._proxy = deserialize_http_proxy_config(proxy)
+        if _requests_proxy := self._proxy.to_requests_proxies():
+            self._session.proxies = _requests_proxy
 
     def __enter__(self) -> MobileironAPI:
         return self
 
-    def __exit__(self, *exc_info: Tuple) -> None:
-        if self._session:
-            self._session.close()
+    def __exit__(self, *exc_info: tuple) -> None:
+        self._session.close()
 
     def _get_devices(self, data_raw: Sequence[Mapping]) -> None:
         """
@@ -197,7 +169,7 @@ class MobileironAPI:
             ):
                 self._all_devices[compound_key] = device_json
 
-    def _get_one_page(self, params: Dict[str, Union[int, str]]) -> Mapping[str, Any]:
+    def _get_one_page(self, params: dict[str, int | str]) -> Mapping[str, Any]:
         """Yield one page from the API with params."""
 
         try:
@@ -248,11 +220,12 @@ class MobileironAPI:
             }
         )
         total_count = first_page_json["result"]["totalCount"]
+        non_compliant = first_page_json["result"]["facetedResults"]["COMPLIANCESTATE"]["false"]
         self._all_devices.update(
             {
                 self.api_host: {
                     "total_count": total_count,
-                    "queryTime": first_page_json["result"]["queryTime"],
+                    "non_compliant": non_compliant,
                 }
             }
         )
@@ -271,7 +244,7 @@ class MobileironAPI:
 
     def get_all_devices(
         self,
-        partitions: List[str],
+        partitions: list[str],
     ) -> Mapping[str, Any]:
         """Returns all devices in all partitions without duplicates."""
 
@@ -282,77 +255,75 @@ class MobileironAPI:
         return self._all_devices
 
 
-def agent_mobileiron_main(args: Args) -> None:
+def agent_mobileiron_main(args: Args) -> int:
     """Fetches and writes selected information formatted as agent output to stdout.
     Standard out with sections and piggyback example:
+    <<<mobileiron_statistics>>>
+    {"...": ...}
     <<<<entityName>>>>
     <<<mobileiron_section>>>
     {"...": ...}
-    <<<<entityName>>>>
-    <<<mobileiron_source_host>>>
-    {"...": ...}
-    <<<<>>>>
     <<<<entityName>>>>
     <<<mobileiron_df>>>
     {"...": ...}
     <<<<>>>>
     """
+    try:
+        LOGGER.info("Fetch general device information...")
 
-    LOGGER.info("Fetch general device information...")
+        if args.debug:
+            LOGGER.debug("Initialize Mobileiron API")
 
-    if args.debug:
-        LOGGER.debug("Initialize Mobileiron API")
+        with MobileironAPI(
+            api_host=args.hostname,
+            key_fields=args.key_fields,
+            regex_patterns=Regexes(args.android_regex, args.ios_regex, args.other_regex),
+            auth=(args.username, args.password),
+            proxy=args.proxy,
+        ) as mobileiron_api:
+            all_devices = mobileiron_api.get_all_devices(
+                partitions=[] if args.partition is None else args.partition
+            )
 
-    with MobileironAPI(
-        args.hostname,
-        args.port,
-        key_fields=args.key_fields,
-        regex_patterns=Regexes(args.android_regex, args.ios_regex, args.others_regex),
-        auth=(args.username, args.password),
-        verify=not args.no_cert_check,
-        proxies=_proxy_address(
-            args.proxy_host,
-            args.proxy_port,
-            args.proxy_user,
-            args.proxy_password,
-        )
-        if args.proxy_host
-        else None,
-    ) as mobileiron_api:
+        if args.debug:
+            LOGGER.debug("Received the following devices: %s", all_devices)
 
-        all_devices = mobileiron_api.get_all_devices(
-            partitions=[] if args.partition is None else args.partition
-        )
-
-    if args.debug:
-        LOGGER.debug("Received the following devices: %s", all_devices)
-
-    LOGGER.info("Write agent output..")
-    for device in all_devices:
-        if "total_count" in all_devices[device]:
-            with ConditionalPiggybackSection(device), SectionWriter(
-                "mobileiron_source_host"
-            ) as writer:
-                writer.append_json(all_devices[device])
-        else:
-            with ConditionalPiggybackSection(device), SectionWriter("mobileiron_section") as writer:
-                writer.append_json(all_devices[device])
-            if uptime := all_devices[device]["uptime"]:
-                with ConditionalPiggybackSection(device), SectionWriter("uptime") as writer:
-                    writer.append_json(uptime)
-            with ConditionalPiggybackSection(device), SectionWriter("mobileiron_df") as writer:
-                writer.append_json(
-                    {
-                        "totalCapacity": all_devices[device].get("totalCapacity"),
-                        "availableCapacity": all_devices[device].get("availableCapacity"),
-                    }
-                )
+        LOGGER.info("Write agent output..")
+        for device in all_devices:
+            if "total_count" in all_devices[device]:
+                with SectionWriter("mobileiron_statistics") as writer:
+                    writer.append_json(all_devices[device])
+            else:
+                with (
+                    ConditionalPiggybackSection(device),
+                    SectionWriter("mobileiron_section") as writer,
+                ):
+                    writer.append_json(all_devices[device])
+                if uptime := all_devices[device]["uptime"]:
+                    with ConditionalPiggybackSection(device), SectionWriter("uptime") as writer:
+                        writer.append_json(uptime)
+                with ConditionalPiggybackSection(device), SectionWriter("mobileiron_df") as writer:
+                    writer.append_json(
+                        {
+                            "totalCapacity": all_devices[device].get("totalCapacity"),
+                            "availableCapacity": all_devices[device].get("availableCapacity"),
+                        }
+                    )
+    except (
+        requests.Timeout,
+        requests.exceptions.SSLError,
+        requests.exceptions.HTTPError,
+        requests.exceptions.JSONDecodeError,
+    ) as exc:
+        sys.stderr.write(f"{type(exc).__name__}: {exc}")
+        return 1
+    return 0
 
 
-def main() -> None:
+def main() -> int:
     """Main entry point to be used"""
-    special_agent_main(parse_arguments, agent_mobileiron_main)
+    return special_agent_main(parse_arguments, agent_mobileiron_main)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Sequence, Tuple
+from collections.abc import Sequence
 
 import pytest
 
-from tests.testlib import Check
+from cmk.agent_based.v1.type_defs import StringTable
+from cmk.agent_based.v2 import IgnoreResultsError
 
-from cmk.base.check_api import MKCounterWrapped
+from .checktestlib import Check
 
 pytestmark = pytest.mark.checks
 
@@ -27,9 +28,9 @@ _broken_info = [
         _broken_info,
     ],
 )
-def test_oracle_jobs_discovery_error(info) -> None:  # type:ignore[no-untyped-def]
+def test_oracle_jobs_discovery_error(info: StringTable) -> None:
     check = Check("oracle_jobs")
-    assert list(check.run_discovery(info)) == []
+    assert not list(check.run_discovery(info))
 
 
 @pytest.mark.parametrize(
@@ -38,9 +39,9 @@ def test_oracle_jobs_discovery_error(info) -> None:  # type:ignore[no-untyped-de
         _broken_info,
     ],
 )
-def test_oracle_jobs_check_error(info) -> None:  # type:ignore[no-untyped-def]
+def test_oracle_jobs_check_error(info: StringTable) -> None:
     check = Check("oracle_jobs")
-    with pytest.raises(MKCounterWrapped):
+    with pytest.raises(IgnoreResultsError):
         check.run_check("DB19.SYS.JOB1", {}, info)
 
 
@@ -115,13 +116,13 @@ def test_discovery_cdb_noncdb() -> None:
 )
 def test_check_cdb_noncdb(
     item: str,
-    result: Tuple[int, str, Sequence[Tuple[str, int]]],
+    result: tuple[int, str, Sequence[tuple[str, int]]],
 ) -> None:
     assert (
         Check("oracle_jobs").run_check(
             item,
             {
-                "disabled": False,
+                "consider_job_status": "consider",
                 "status_missing_jobs": 2,
                 "missinglog": 1,
             },

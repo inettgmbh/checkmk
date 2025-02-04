@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name
+
+from argparse import Namespace as Args
+from collections.abc import Sequence
+from typing import Protocol
 
 import pytest
 
@@ -13,7 +16,11 @@ from cmk.special_agents.agent_aws import (
     EBSLimits,
     EBSSummary,
     EC2Summary,
+    NamingConvention,
+    OverallTags,
     ResultDistributor,
+    TagsImportPatternOption,
+    TagsOption,
 )
 
 from .agent_aws_fake_clients import (
@@ -61,31 +68,48 @@ class FakeEC2Client:
         }
 
 
+EBSectionsOut = tuple[EC2Summary, EBSLimits, EBSSummary, EBS]
+
+
+class EBSSections(Protocol):
+    def __call__(
+        self,
+        names: object | None,
+        tags: OverallTags,
+        tag_import: TagsOption = TagsImportPatternOption.import_all,
+    ) -> EBSectionsOut: ...
+
+
 @pytest.fixture()
-def get_ebs_sections():
-    def _create_ebs_sections(names, tags):
+def get_ebs_sections() -> EBSSections:
+    def _create_ebs_sections(
+        names: object | None,
+        tags: OverallTags,
+        tag_import: TagsOption = TagsImportPatternOption.import_all,
+    ) -> EBSectionsOut:
         region = "region"
-        config = AWSConfig("hostname", [], (None, None))
+        config = AWSConfig(
+            "hostname", Args(), ([], []), NamingConvention.ip_region_instance, tag_import
+        )
         config.add_single_service_config("ebs_names", names)
         config.add_service_tags("ebs_tags", tags)
         config.add_single_service_config("ec2_names", None)
-        config.add_service_tags("ec2_tags", (None, None))
+        config.add_service_tags("ec2_tags", ([], []))
 
         fake_ec2_client = FakeEC2Client()
         fake_cloudwatch_client = FakeCloudwatchClient()
 
-        ec2_summary_distributor = ResultDistributor()
-        ebs_limits_distributor = ResultDistributor()
-        ebs_summary_distributor = ResultDistributor()
+        distributor = ResultDistributor()
 
-        ec2_summary = EC2Summary(fake_ec2_client, region, config, ec2_summary_distributor)
-        ebs_limits = EBSLimits(fake_ec2_client, region, config, ebs_limits_distributor)
-        ebs_summary = EBSSummary(fake_ec2_client, region, config, ebs_summary_distributor)
-        ebs = EBS(fake_cloudwatch_client, region, config)
+        # TODO: FakeEC2Client shoud actually subclass EC2Client, etc.
+        ec2_summary = EC2Summary(fake_ec2_client, region, config, distributor)  # type: ignore[arg-type]
+        ebs_limits = EBSLimits(fake_ec2_client, region, config, distributor)  # type: ignore[arg-type]
+        ebs_summary = EBSSummary(fake_ec2_client, region, config, distributor)  # type: ignore[arg-type]
+        ebs = EBS(fake_cloudwatch_client, region, config)  # type: ignore[arg-type]
 
-        ec2_summary_distributor.add(ebs_summary)
-        ebs_limits_distributor.add(ebs_summary)
-        ebs_summary_distributor.add(ebs)
+        distributor.add(ec2_summary.name, ebs_summary)
+        distributor.add(ebs_limits.name, ebs_summary)
+        distributor.add(ebs_summary.name, ebs)
         return ec2_summary, ebs_limits, ebs_summary, ebs
 
     return _create_ebs_sections
@@ -106,8 +130,11 @@ ebs_params = [
 
 
 @pytest.mark.parametrize("names,tags,found_ebs", ebs_params)
-def test_agent_aws_ebs_limits(  # type:ignore[no-untyped-def]
-    get_ebs_sections, names, tags, found_ebs
+def test_agent_aws_ebs_limits(
+    get_ebs_sections: EBSSections,
+    names: Sequence[str] | None,
+    tags: OverallTags,
+    found_ebs: int,
 ) -> None:
     ec2_summary, ebs_limits, _ebs_summary, _ebs = get_ebs_sections(names, tags)
     _ec2_summary_results = ec2_summary.run().results
@@ -139,8 +166,11 @@ def test_agent_aws_ebs_limits(  # type:ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize("names,tags,found_ebs", ebs_params)
-def test_agent_aws_ebs_summary(  # type:ignore[no-untyped-def]
-    get_ebs_sections, names, tags, found_ebs
+def test_agent_aws_ebs_summary(
+    get_ebs_sections: EBSSections,
+    names: list[str] | None,
+    tags: OverallTags,
+    found_ebs: int,
 ) -> None:
     ec2_summary, ebs_limits, ebs_summary, _ebs = get_ebs_sections(names, tags)
     _ec2_summary_results = ec2_summary.run().results
@@ -155,8 +185,11 @@ def test_agent_aws_ebs_summary(  # type:ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize("names,tags,found_ebs", ebs_params)
-def test_agent_aws_ebs(  # type:ignore[no-untyped-def]
-    get_ebs_sections, names, tags, found_ebs
+def test_agent_aws_ebs(
+    get_ebs_sections: EBSSections,
+    names: list[str] | None,
+    tags: OverallTags,
+    found_ebs: int,
 ) -> None:
     ec2_summary, ebs_limits, ebs_summary, ebs = get_ebs_sections(names, tags)
     _ec2_summary_results = ec2_summary.run().results
@@ -176,8 +209,8 @@ def test_agent_aws_ebs(  # type:ignore[no-untyped-def]
         assert len(result.content) >= 5
 
 
-def test_agent_aws_ebs_summary_without_limits(  # type:ignore[no-untyped-def]
-    get_ebs_sections,
+def test_agent_aws_ebs_summary_without_limits(
+    get_ebs_sections: EBSSections,
 ) -> None:
     ec2_summary, _ebs_limits, ebs_summary, _ebs = get_ebs_sections(None, (None, None))
     _ec2_summary_results = ec2_summary.run().results
@@ -190,7 +223,7 @@ def test_agent_aws_ebs_summary_without_limits(  # type:ignore[no-untyped-def]
     assert len(ebs_summary_results) == 3
 
 
-def test_agent_aws_ebs_without_limits(get_ebs_sections) -> None:  # type:ignore[no-untyped-def]
+def test_agent_aws_ebs_without_limits(get_ebs_sections: EBSSections) -> None:
     ec2_summary, _ebs_limits, ebs_summary, ebs = get_ebs_sections(None, (None, None))
     _ec2_summary_results = ec2_summary.run().results
     _ebs_summary_results = ebs_summary.run().results
@@ -206,3 +239,24 @@ def test_agent_aws_ebs_without_limits(get_ebs_sections) -> None:  # type:ignore[
         # Y (len results) == 6 (metrics) * X (buckets)
         # But: 5 metrics for all volume types
         assert len(result.content) >= 5
+
+
+@pytest.mark.parametrize(
+    "tag_import, expected_tags",
+    [
+        (TagsImportPatternOption.import_all, ["Key-0", "Key-1", "Key-2"]),
+        (r".*-1$", ["Key-1"]),
+        (TagsImportPatternOption.ignore_all, []),
+    ],
+)
+def test_agent_aws_ebs_filters_tags(
+    get_ebs_sections: EBSSections,
+    tag_import: TagsOption,
+    expected_tags: Sequence[str],
+) -> None:
+    _ec2_summary, _ebs_limits, ebs_summary, _ebs = get_ebs_sections(None, (None, None), tag_import)
+    ebs_summary_results = ebs_summary.run().results
+    ebs_summary_result = ebs_summary_results[0]
+
+    for result in ebs_summary_result.content:
+        assert list(result["TagsForCmkLabels"].keys()) == expected_tags

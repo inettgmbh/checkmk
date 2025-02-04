@@ -1,118 +1,159 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import json
 import re
-from html import unescape
-from typing import Any, List, Mapping, Optional, Tuple, TYPE_CHECKING, Union
+from collections.abc import Iterator, Mapping
+from typing import Any, Literal
 
 from livestatus import SiteId
 
-from cmk.utils.type_defs import Labels, LabelSources, TaggroupID, TaggroupIDToTagID, TagID
+from cmk.utils.html import replace_state_markers
+from cmk.utils.labels import LabelGroups, Labels, LabelSource, LabelSources
+from cmk.utils.tags import TagGroupID, TagID
 
-import cmk.gui.utils.escaping as escaping
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.html import html
-from cmk.gui.http import request
+from cmk.gui.http import Request, request
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import LoggedInUser
-from cmk.gui.type_defs import HTTPVariables
+from cmk.gui.theme.current_theme import theme
+from cmk.gui.type_defs import FilterHTTPVariables, HTTPVariables, Row
+from cmk.gui.utils import escaping
 from cmk.gui.utils.html import HTML
-from cmk.gui.utils.theme import theme
+from cmk.gui.utils.labels import filter_http_vars_for_simple_label_group
 from cmk.gui.utils.urls import makeuri, makeuri_contextless
 
-CSSClass = Optional[str]
+
+class PythonExportError(Exception):
+    pass
+
+
+class CSVExportError(Exception):
+    pass
+
+
+class JSONExportError(Exception):
+    pass
+
+
+CSSClass = str | None
 # Dict: The aggr_treestate painters are returning a dictionary data structure (see
 # paint_aggregated_tree_state()) in case the output_format is not HTML. Once we have
 # separated the data from rendering of the data, we can hopefully clean this up
-CellContent = Union[str, HTML, Mapping[str, Any]]
-CellSpec = Tuple[CSSClass, CellContent]
+CellContent = str | HTML | Mapping[str, Any]
+CellSpec = tuple[CSSClass, CellContent]
 
-if TYPE_CHECKING:
-    from cmk.gui.type_defs import Row
+# We support more label CSS classes than just label sources
+LabelRenderType = Literal[LabelSource, "changed", "removed", "added", "unspecified"]
+
+# fmt: off
+_URL_PATTERN = (
+    r"("
+    r"http[s]?://"
+    r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*"  # including *all* sub-delimiters
+    # In theory, URIs are allowed to end in a sub-delimitter ("!$&'()*+,;=")
+    # We exclude the ',' here, because it is used to separate our check results,
+    # and disallowing a trailing ',' hopefully breaks fewer links than allowing it.
+    r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+;=%]"
+    r")"
+)
+# fmt: on
+_STATE_MARKER_PATTERN = r"(.*)(\((?:!|!!|.)\))$"
 
 
-def _prepare_button_url(p: re.Match) -> str:
-    """The regex to find out if a link button should be placed does not deal correctly with escaped trailing quotes
-
-    Because single quotes are valid characters in a URL only remove this is the match was enclosed in single quotes.
-    This can happen with the check_http plugin
-    """
-    m = p.group(1).replace("&quot;", "")
-    if p.start(1) >= 6 and p.string[p.start(1) - 6 : p.start(1)] == "&#x27;":
-        m = m[:-6]
-    return unescape(m)
-
-
-# There is common code with cmk/notification_plugins/utils.py:format_plugin_output(). Please check
-# whether or not that function needs to be changed too
-# TODO(lm): Find a common place to unify this functionality.
 def format_plugin_output(
-    output: str, row: "Optional[Row]" = None, shall_escape: bool = True
+    output: str,
+    *,
+    request: Request,
+    row: Row | None = None,
+    shall_escape: bool = True,
+    newlineishs_to_brs: bool = False,
 ) -> HTML:
-    assert not isinstance(output, dict)
-    ok_marker = '<b class="stmark state0">OK</b>'
-    warn_marker = '<b class="stmark state1">WARN</b>'
-    crit_marker = '<b class="stmark state2">CRIT</b>'
-    unknown_marker = '<b class="stmark state3">UNKN</b>'
+    shall_escape = _consolidate_escaping_options(row, shall_escape)
 
+    if shall_escape and _render_url_icons(row):
+        output = _normalize_check_http_link(output)
+        output = _render_icon_button(output)
+    elif shall_escape:
+        output = escaping.escape_attribute(output)
+
+    output = replace_state_markers(output)
+
+    output = _render_host_links(output, row, request=request)
+
+    if newlineishs_to_brs:
+        output = output.replace("\\n", "<br>").replace("\n", "<br>")
+    return HTML.without_escaping(output)
+
+
+def _consolidate_escaping_options(row: Row | None, shall_escape: bool) -> bool:
     # In case we have a host or service row use the optional custom attribute
     # ESCAPE_PLUGIN_OUTPUT (set by host / service ruleset) to override the global
     # setting.
     if row:
         custom_vars = row.get("service_custom_variables", row.get("host_custom_variables", {}))
         if "ESCAPE_PLUGIN_OUTPUT" in custom_vars:
-            shall_escape = custom_vars["ESCAPE_PLUGIN_OUTPUT"] == "1"
-
-    if shall_escape:
-        output = escaping.escape_attribute(output)
-    else:
-        output = "%s" % output
-
-    output = (
-        output.replace("(!)", warn_marker)
-        .replace("(!!)", crit_marker)
-        .replace("(?)", unknown_marker)
-        .replace("(.)", ok_marker)
-    )
-
-    if row and "[running on" in output:
-        a = output.index("[running on")
-        e = output.index("]", a)
-        hosts = output[a + 12 : e].replace(" ", "").split(",")
-        h = get_host_list_links(row["site"], hosts)
-        output = output[:a] + "running on " + ", ".join(h) + output[e + 1 :]
-
-    prevent_url_icons = (
-        row.get("service_check_command", "") == "check_mk-checkmk_agent"
-        if row is not None
-        else False
-    )
-    if shall_escape and not prevent_url_icons:
-        http_url = r"(http[s]?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
-        # (?:&lt;A HREF=&quot;), (?: target=&quot;_blank&quot;&gt;)? and endswith(" </A>") is a special
-        # handling for the HTML code produced by check_http when "clickable URL" option is active.
-        output = re.sub(
-            "(?:&lt;A HREF=&quot;)?" + http_url + "(?: target=&quot;_blank&quot;&gt;)?",
-            lambda p: str(
-                html.render_icon_button(
-                    _prepare_button_url(p),
-                    _prepare_button_url(p),
-                    "link",
-                )
-            ),
-            output,
-        )
-
-        if output.endswith(" &lt;/A&gt;"):
-            output = output[:-11]
-
-    return HTML(output)
+            return custom_vars["ESCAPE_PLUGIN_OUTPUT"] == "1"
+    return shall_escape
 
 
-def get_host_list_links(site: SiteId, hosts: List[Union[str]]) -> List[str]:
+def _render_url_icons(row: Row | None) -> bool:
+    return row is None or row.get("service_check_command", "") != "check_mk-checkmk_agent"
+
+
+def _render_host_links(output: str, row: Row | None, *, request: Request) -> str:
+    if not row or "[running on" not in output:
+        return output
+
+    a = output.index("[running on")
+    e = output.index("]", a)
+    hosts = output[a + 12 : e].replace(" ", "").split(",")
+    h = get_host_list_links(row["site"], hosts, request=request)
+    return output[:a] + "running on " + ", ".join(map(str, h)) + output[e + 1 :]
+
+
+def _normalize_check_http_link(output: str) -> str:
+    """Handling for the HTML code produced by check_http when "clickable URL" option is active"""
+    if not (match := re.match('<A HREF="' + _URL_PATTERN + '" target="_blank">(.*?) </A>', output)):
+        return output
+    return f"{match.group(1)} {match.group(2)}"
+
+
+def _render_icon_button(output: str) -> str:
+    buffer = []
+    for idx, token in enumerate(re.split(r"([\"']?)" + _URL_PATTERN + r"(\1)", output)):
+        match idx % 4:
+            case 0:
+                buffer.append(escaping.escape_attribute(token))
+            case 2:
+                buffer.extend(_render_url(token, buffer[-1][-1] if buffer and buffer[-1] else ""))
+    return "".join(buffer)
+
+
+def _render_url(token: str, last_char: str) -> Iterator[str]:
+    url = token
+    rest: str | None = None
+
+    # if a url is directly followed by a state marker, separate them
+    if match := re.match(_STATE_MARKER_PATTERN, token):
+        url, rest = match.group(1), match.group(2)
+
+    # A URL may be surrounded by parantheses without spaces.
+    # Since ")" and ":" are allowed in URLS, we have to detect this situation explicitly.
+    elif last_char == "(":
+        if token.endswith(")"):
+            url, rest = token[:-1], ")"
+        elif token.endswith("):"):
+            url, rest = token[:-2], "):"
+
+    yield str(html.render_icon_button(url, url, "link", target="_blank"))
+    if rest is not None:
+        yield escaping.escape_attribute(rest)
+
+
+def get_host_list_links(site: SiteId, hosts: list[str], *, request: Request) -> list[HTML]:
     entries = []
     for host in hosts:
         args: HTTPVariables = [
@@ -125,18 +166,18 @@ def get_host_list_links(site: SiteId, hosts: List[Union[str]]) -> List[str]:
             args.append(("display_options", request.var("display_options")))
 
         url = makeuri_contextless(request, args, filename="view.py")
-        link = str(HTMLWriter.render_a(host, href=url))
+        link = HTMLWriter.render_a(host, href=url)
         entries.append(link)
     return entries
 
 
-def row_limit_exceeded(row_count: int, limit: Optional[int]) -> bool:
+def row_limit_exceeded(row_count: int, limit: int | None) -> bool:
     return limit is not None and row_count >= limit + 1
 
 
-def query_limit_exceeded_warn(limit: Optional[int], user_config: LoggedInUser) -> None:
+def query_limit_exceeded_warn(limit: int | None, user_config: LoggedInUser) -> None:
     """Compare query reply against limits, warn in the GUI about incompleteness"""
-    text = HTML(_("Your query produced more than %d results. ") % limit)
+    text = HTML.with_escaping(_("Your query produced more than %d results. ") % limit)
 
     if request.get_ascii_input("limit", "soft") == "soft" and user_config.may(
         "general.ignore_soft_limit"
@@ -170,25 +211,98 @@ def get_labels(row: "Row", what: str) -> Labels:
 
 
 def render_labels(
-    labels: Labels, object_type: str, with_links: bool, label_sources: LabelSources
+    labels: Labels,
+    object_type: str,
+    with_links: bool,
+    label_sources: LabelSources,
+    override_label_render_type: LabelRenderType | None = None,
+    *,
+    request: Request,
 ) -> HTML:
     return _render_tag_groups_or_labels(
-        labels, object_type, with_links, label_type="label", label_sources=label_sources
+        labels,
+        object_type,
+        with_links,
+        label_type="label",
+        label_sources=label_sources,
+        override_label_render_type=override_label_render_type,
+        request=request,
     )
 
 
-def render_tag_groups(tag_groups: TaggroupIDToTagID, object_type: str, with_links: bool) -> HTML:
+def render_label_groups(label_groups: LabelGroups, object_type: str) -> HTML:
+    overall_html = HTML.empty()
+
+    is_first_group: bool = True
+    for group_op, label_group in label_groups:
+        group_html = HTML.empty()
+
+        # Render group operator
+        if not is_first_group:
+            group_op_str = "and not" if group_op == "not" else group_op  # prepend "not" with "and "
+            overall_html += (
+                " " + HTMLWriter.render_i(group_op_str, class_="andornot_operator") + " "
+            )
+
+        group_html += "["  # open group
+
+        is_first_label: bool = True
+        for label_op, label in label_group:
+            if not label:
+                continue
+
+            # Render label operator
+            if not is_first_label or label_op == "not":
+                # Prepend "not" with "and " if the current is not the first label
+                label_op_str = "and not" if (not is_first_label and label_op == "not") else label_op
+                group_html += HTMLWriter.render_i(label_op_str, class_="andornot_operator")
+
+            # Render single label
+            key, val = label.split(":")
+            group_html += HTMLWriter.render_tags(
+                _render_tag_group(
+                    key,
+                    val,
+                    object_type,
+                    with_link=False,
+                    label_type="label",
+                    label_render_type="unspecified",
+                    request=request,
+                ),
+                class_=["tagify", "label", "display"],
+                readonly="true",
+            )
+            is_first_label = False
+
+        group_html += "]"  # close group
+        overall_html += HTMLWriter.render_div(group_html, class_="label_group")
+        is_first_group = False
+
+    return overall_html
+
+
+def render_tag_groups(
+    tag_groups: Mapping[TagGroupID, TagID], object_type: str, with_links: bool, *, request: Request
+) -> HTML:
     return _render_tag_groups_or_labels(
-        tag_groups, object_type, with_links, label_type="tag_group", label_sources={}
+        tag_groups,
+        object_type,
+        with_links,
+        label_type="tag_group",
+        label_sources={},
+        request=request,
     )
 
 
 def _render_tag_groups_or_labels(
-    entries: Union[TaggroupIDToTagID, Labels],
+    entries: Mapping[TagGroupID, TagID] | Labels,
     object_type: str,
     with_links: bool,
     label_type: str,
     label_sources: LabelSources,
+    override_label_render_type: LabelRenderType | None = None,
+    *,
+    request: Request,
 ) -> HTML:
     elements = [
         _render_tag_group(
@@ -197,22 +311,31 @@ def _render_tag_groups_or_labels(
             object_type,
             with_links,
             label_type,
-            label_sources.get(tag_group_id_or_label_key, "unspecified"),
+            (
+                override_label_render_type
+                if override_label_render_type
+                else label_sources.get(tag_group_id_or_label_key, "unspecified")
+            ),
+            request=request,
         )
         for tag_group_id_or_label_key, tag_id_or_label_value in sorted(entries.items())
     ]
     return HTMLWriter.render_tags(
-        HTML(" ").join(elements), class_=["tagify", label_type, "display"], readonly="true"
+        HTML.without_escaping(" ").join(elements),
+        class_=["tagify", label_type, "display"],
+        readonly="true",
     )
 
 
 def _render_tag_group(
-    tag_group_id_or_label_key: Union[TaggroupID, str],
-    tag_id_or_label_value: Union[TagID, str],
+    tag_group_id_or_label_key: TagGroupID | str,
+    tag_id_or_label_value: TagID | str,
     object_type: str,
     with_link: bool,
     label_type: str,
-    label_source: str,
+    label_render_type: LabelRenderType,
+    *,
+    request: Request,
 ) -> HTML:
     span = HTMLWriter.render_tag(
         HTMLWriter.render_div(
@@ -225,7 +348,7 @@ def _render_tag_group(
                 class_=["tagify__tag-text"],
             )
         ),
-        class_=["tagify--noAnim", label_source],
+        class_=["tagify--noAnim", label_render_type],
     )
     if not with_link:
         return span
@@ -237,14 +360,11 @@ def _render_tag_group(
             ("%s_tag_0_val" % object_type, tag_id_or_label_value),
         ]
     elif label_type == "label":
-        type_filter_vars = [
-            (
-                "%s_label" % object_type,
-                json.dumps(
-                    [{"value": "%s:%s" % (tag_group_id_or_label_key, tag_id_or_label_value)}]
-                ),
-            ),
-        ]
+        filter_vars_dict: FilterHTTPVariables = filter_http_vars_for_simple_label_group(
+            [f"{tag_group_id_or_label_key}:{tag_id_or_label_value}"],
+            object_type,  # type: ignore[arg-type]
+        )
+        type_filter_vars = list(filter_vars_dict.items())
 
     else:
         raise NotImplementedError()
@@ -265,3 +385,13 @@ def get_themed_perfometer_bg_color() -> str:
         return "#bdbdbd"
     # else (classic and modern theme)
     return "#ffffff"
+
+
+def render_cre_upgrade_button() -> None:
+    html.icon_button(
+        url="https://checkmk.com/pricing?services=3000?utm_source=checkmk_product&utm_medium=referral&utm_campaign=commercial_editions_link",
+        title=_("Upgrade to Cloud or Enterprise edition to use this feature"),
+        icon="upgrade",
+        target="_blank",
+        cssclass="upgrade",
+    )

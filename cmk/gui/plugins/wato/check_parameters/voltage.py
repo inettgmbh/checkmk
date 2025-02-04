@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,7 +20,7 @@ def _parameter_valuespec_voltage():
             (
                 "levels",
                 Tuple(
-                    title=_("Upper Levels for Voltage"),
+                    title=_("Upper levels for Voltage"),
                     elements=[
                         Float(title=_("Warning at"), default_value=15.00, unit="V"),
                         Float(title=_("Critical at"), default_value=16.00, unit="V"),
@@ -30,7 +30,7 @@ def _parameter_valuespec_voltage():
             (
                 "levels_lower",
                 Tuple(
-                    title=_("Lower Levels for Voltage"),
+                    title=_("Lower levels for voltage"),
                     elements=[
                         Float(title=_("Warning below"), default_value=10.00, unit="V"),
                         Float(title=_("Critical below"), default_value=9.00, unit="V"),
@@ -46,10 +46,10 @@ rulespec_registry.register(
         check_group_name="voltage",
         group=RulespecGroupCheckParametersEnvironment,
         item_spec=lambda: TextInput(
-            title=_("Sensor Description and Index"),
+            title=_("Sensor description and index"),
         ),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_voltage,
-        title=lambda: _("Voltage Sensor"),
+        title=lambda: _("Voltage sensor"),
     )
 )

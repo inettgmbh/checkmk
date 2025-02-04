@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import argparse
 import sys
-from typing import Any, Callable, NamedTuple
+from collections.abc import Callable, Sequence
+from typing import Any, NamedTuple
 
 import requests
 import urllib3
@@ -15,6 +16,10 @@ import cmk.utils.password_store
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 cmk.utils.password_store.replace_passwords()
 
+__version__ = "2.5.0b1"
+
+USER_AGENT = f"checkmk-special-splunk-{__version__}"
+
 
 class Section(NamedTuple):
     name: str
@@ -22,7 +27,7 @@ class Section(NamedTuple):
     handler: Callable[[Any], None]
 
 
-def main(argv=None):
+def main(argv: None | Sequence[str] = None) -> None | int:
     if argv is None:
         argv = sys.argv[1:]
     # Sections to query
@@ -71,7 +76,7 @@ def main(argv=None):
     return None
 
 
-def handle_request(args, sections):
+def handle_request(args: argparse.Namespace, sections: Sequence[Section]) -> None | int:
     url_base = "%s://%s:%d" % (args.proto, args.hostname, args.port)
 
     for section in sections:
@@ -79,10 +84,11 @@ def handle_request(args, sections):
             try:
                 url = url_base + section.uri
 
-                response = requests.get(
+                response = requests.get(  # nosec B113 # BNS:0b0eac
                     url,
                     auth=(args.user, args.password),
                     data={"output_mode": "json"},
+                    headers={"User-Agent": USER_AGENT},
                 )
 
                 response.raise_for_status()
@@ -103,7 +109,6 @@ def handle_request(args, sections):
 
 
 def parse_arguments(argv):
-
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
@@ -205,8 +210,8 @@ def handle_health(value):
     sys.stdout.write("Overall_state %s\n" % value[0].get("content", {}).get("health"))
 
     for func, state in value[0]["content"]["features"].items():
-        func_name = "%s%s" % (func[0].upper(), func[1:].lower())
-        sys.stdout.write("%s %s\n" % (func_name.replace(" ", "_"), state.get("health", {})))
+        func_name = f"{func[0].upper()}{func[1:].lower()}"
+        sys.stdout.write("{} {}\n".format(func_name.replace(" ", "_"), state.get("health", {})))
 
         if state.get("disabled", False):
             # Some functions may have set '"disabled": True' and it seems
@@ -214,10 +219,11 @@ def handle_health(value):
             continue
 
         for feature, status in state["features"].items():
-            feature_name = "%s%s" % (feature[0].upper(), feature[1:].lower())
+            feature_name = f"{feature[0].upper()}{feature[1:].lower()}"
             sys.stdout.write(
-                "%s %s %s\n"
-                % (func_name.replace(" ", "_"), feature_name.replace(" ", "_"), status["health"])
+                "{} {} {}\n".format(
+                    func_name.replace(" ", "_"), feature_name.replace(" ", "_"), status["health"]
+                )
             )
 
 

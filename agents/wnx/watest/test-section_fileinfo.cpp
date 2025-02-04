@@ -2,21 +2,21 @@
 
 //
 #include "pch.h"
-#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING
+#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING  // NOLINT
 #include <experimental/filesystem>
 #include <filesystem>
 #include <ranges>
 
-#include "cfg.h"
 #include "common/wtools.h"
-#include "glob_match.h"
 #include "providers/fileinfo.h"
 #include "providers/fileinfo_details.h"
-#include "service_processor.h"
-#include "test-utf-names.h"
-#include "test_tools.h"
 #include "tools/_misc.h"
 #include "tools/_process.h"
+#include "watest/test-utf-names.h"
+#include "watest/test_tools.h"
+#include "wnx/cfg.h"
+#include "wnx/glob_match.h"
+#include "wnx/service_processor.h"
 
 namespace fs = std::filesystem;
 namespace rs = std::ranges;
@@ -37,18 +37,18 @@ static void CheckString(std::string &x) {
     x.pop_back();
 }
 
-static void CheckTableMissing(std::vector<std::string> &table,
+static void CheckTableMissing(const std::vector<std::string> &table,
                               std::string_view name, FileInfo::Mode mode) {
     ASSERT_TRUE(table.size() >= 2);
     EXPECT_EQ(table[0], name.data());
     EXPECT_EQ(table[1], FileInfo::kMissing.data());
     if (mode == FileInfo::Mode::legacy) {
         ASSERT_TRUE(table.size() == 3);
-        EXPECT_TRUE(std::atoll(table[2].c_str()) > 0LL);
+        EXPECT_TRUE(std::stoll(table[2]) > 0LL);
     }
 }
 
-static void CheckTablePresent(std::vector<std::string> &table,
+static void CheckTablePresent(const std::vector<std::string> &table,
                               std::string_view name, FileInfo::Mode mode) {
     auto shift = mode == FileInfo::Mode::modern ? 1 : 0;
 
@@ -139,16 +139,16 @@ TEST(FileInfoTest, ValidateConfig) {
 
 class FileInfoFixture : public ::testing::Test {
 public:
-    void loadFilesInConfig() {
+    void loadFilesInConfig() const {
         auto cfg = cfg::GetLoadedConfig();
 
         cfg[cfg::groups::kFileInfo][cfg::vars::kFileInfoPath] = YAML::Load(
             "['c:\\windows\\notepad.exe','c:\\windows\\explorer.exe']");
     }
 
-    std::vector<std::string> generate() {
+    [[nodiscard]] std::vector<std::string> generate() const {
         FileInfo fi;
-        auto result = fi.generateContent();
+        const auto result = fi.generateContent();
 
         EXPECT_EQ(result.back(), '\n');
         return tools::SplitString(result, "\n");
@@ -247,8 +247,8 @@ TEST(FileInfoTest, CheckDriveLetter) {
     auto fileinfo_node = cfg[cfg::groups::kFileInfo];
     ASSERT_TRUE(fileinfo_node.IsDefined());
     ASSERT_TRUE(fileinfo_node.IsMap());
-    auto value = a.u8string();
-    value[0] = std::tolower(value[0]);
+    auto value = wtools::ToStr(a);
+    value[0] = static_cast<char>(std::tolower(value[0]));
     auto str = fmt::format("['{}\\*.txt', 'c:\\weirdfile' ]", value);
     fileinfo_node[cfg::vars::kFileInfoPath] = YAML::Load(str);
     ASSERT_TRUE(fileinfo_node[cfg::vars::kFileInfoPath].IsSequence());
@@ -256,12 +256,12 @@ TEST(FileInfoTest, CheckDriveLetter) {
         FileInfo fi{FileInfo::Mode::legacy};
         auto table = MakeBody(fi);
         ASSERT_EQ(table.size(), 4);
-        EXPECT_TRUE(std::atoll(table[0].c_str()) > 0LL);
+        EXPECT_TRUE(std::stoll(table[0]) > 0LL);
         EXPECT_EQ(table[1][0], value[0]);
         EXPECT_EQ(table[2][0], value[0]);
         EXPECT_EQ(table[3][0], value[0]);
     }
-    value[0] = std::toupper(value[0]);
+    value[0] = static_cast<char>(std::toupper(value[0]));
     str = fmt::format("['{}\\*.txt', 'C:\\weirdfile']", value);
     fileinfo_node[cfg::vars::kFileInfoPath] = YAML::Load(str);
     ASSERT_TRUE(fileinfo_node[cfg::vars::kFileInfoPath].IsSequence());
@@ -269,7 +269,7 @@ TEST(FileInfoTest, CheckDriveLetter) {
         FileInfo fi{FileInfo::Mode::legacy};
         auto table = MakeBody(fi);
         ASSERT_EQ(table.size(), 4);
-        EXPECT_TRUE(std::atoll(table[0].c_str()) > 0LL);
+        EXPECT_TRUE(std::stoll(table[0]) > 0LL);
         EXPECT_EQ(table[1][0], value[0]);
         EXPECT_EQ(table[2][0], value[0]);
         EXPECT_EQ(table[3][0], value[0]);
@@ -303,34 +303,27 @@ TEST(FileInfoTest, CheckOutput) {
     {
         FileInfo fi{FileInfo::Mode::legacy};
         auto table = MakeBody(fi);
-        ASSERT_EQ(table.size(), 6);
-        EXPECT_TRUE(std::atoll(table[0].c_str()) > 0LL);
+        ASSERT_EQ(table.size(), 5);
+        EXPECT_TRUE(std::stoll(table[0]) > 0LL);
         table.erase(table.begin());
 
         auto missing = table.back();
         auto values = tools::SplitString(missing, "|");
-        CheckTableMissing(values, name_with_glob, FileInfo::Mode::legacy);
+        CheckTableMissing(values, name_without_glob, FileInfo::Mode::legacy);
         std::error_code ec;
         EXPECT_FALSE(fs::exists(values[0], ec));
         table.pop_back();
 
-        missing = table.back();
-        values = tools::SplitString(missing, "|");
-        CheckTableMissing(values, name_without_glob, FileInfo::Mode::legacy);
-        EXPECT_FALSE(fs::exists(values[0], ec));
-        table.pop_back();
-
-        for (auto line : table) {
+        for (const auto &line : table) {
             auto values = tools::SplitString(line, "|");
             ASSERT_TRUE(values.size() == 3);
             EXPECT_TRUE(fs::exists(values[0], ec));
-            EXPECT_TRUE(std::atoll(values[1].c_str()) == 2);
-            EXPECT_TRUE(std::atoll(values[2].c_str()) > 0LL);
-            auto f = std::any_of(
-                std::begin(data), std::end(data),
-                [values](std::tuple<fs::path, std::string_view> entry) {
+            EXPECT_TRUE(std::stoll(values[1]) == 2);
+            EXPECT_TRUE(std::stoll(values[2]) > 0LL);
+            auto f = rs::any_of(
+                data, [values](std::tuple<fs::path, std::string_view> &entry) {
                     auto const &[path, _] = entry;
-                    return tools::IsEqual(path.u8string(), values[0]);
+                    return tools::IsEqual(wtools::ToStr(path), values[0]);
                 });
             EXPECT_TRUE(f);
         }
@@ -339,8 +332,8 @@ TEST(FileInfoTest, CheckOutput) {
     {
         FileInfo fi{FileInfo::Mode::modern};
         auto table = MakeBody(fi);
-        ASSERT_EQ(table.size(), 9);
-        EXPECT_TRUE(std::atoll(table[0].c_str()) > 0);
+        ASSERT_EQ(table.size(), 8);
+        EXPECT_TRUE(std::stoll(table[0]) > 0);
         table.erase(table.begin());
         EXPECT_EQ(table[0], "[[[header]]]");
         table.erase(table.begin());
@@ -351,29 +344,22 @@ TEST(FileInfoTest, CheckOutput) {
 
         auto missing = table.back();
         auto values = tools::SplitString(missing, "|");
-        CheckTableMissing(values, name_with_glob, FileInfo::Mode::modern);
+        CheckTableMissing(values, name_without_glob, FileInfo::Mode::modern);
         std::error_code ec;
         EXPECT_FALSE(fs::exists(values[0], ec));
         table.pop_back();
 
-        missing = table.back();
-        values = tools::SplitString(missing, "|");
-        CheckTableMissing(values, name_without_glob, FileInfo::Mode::modern);
-        EXPECT_FALSE(fs::exists(values[0], ec));
-        table.pop_back();
-
-        for (auto line : table) {
+        for (const auto &line : table) {
             auto values = tools::SplitString(line, "|");
             ASSERT_TRUE(values.size() == 4);
             EXPECT_TRUE(fs::exists(values[0], ec));
             EXPECT_EQ(values[1], FileInfo::kOk);
-            EXPECT_TRUE(std::atoll(values[2].c_str()) == 2);
-            EXPECT_TRUE(std::atoll(values[2].c_str()) > 0LL);
-            auto f = std::any_of(
-                std::begin(data), std::end(data),
-                [values](std::tuple<fs::path, std::string_view> entry) {
+            EXPECT_TRUE(std::stoll(values[2]) == 2);
+            EXPECT_TRUE(std::stoll(values[2]) > 0LL);
+            auto f = rs::any_of(
+                data, [values](std::tuple<fs::path, std::string_view> &entry) {
                     auto const &[path, _] = entry;
-                    return tools::IsEqual(path.u8string(), values[0]);
+                    return tools::IsEqual(wtools::ToStr(path), values[0]);
                 });
             EXPECT_TRUE(f);
         }
@@ -454,7 +440,7 @@ TEST_F(FileInfoTestFixture, Glob) {
 }
 
 TEST(FileInfoTest, WindowsResources) {
-    fs::path win_res_path = "c:\\windows\\Resources\\";
+    fs::path win_res_path = R"(c:\windows\Resources\)";
     auto files = details::FindFilesByMask(
         (win_res_path / "**" / "aero" / "aero*.*").wstring());
     EXPECT_TRUE(files.size() == 2)
@@ -469,14 +455,12 @@ TEST(FileInfoTest, Unicode) {
         try {
             auto files = details::FindFilesByMask(p.wstring() + L"\\*.*");
             EXPECT_TRUE(files.size() >= 2);  // syswow64 and system32
-            EXPECT_TRUE(std::find(files.begin(), files.end(), p / "test.txt") !=
-                        std::end(files));
+            EXPECT_TRUE(rs::find(files, p / "test.txt") != std::end(files));
             auto russian_file = p / test_russian_file;
             auto w_name = russian_file.wstring();
             auto ut8_name = russian_file.u8string();
             auto utf8_name_2 = wtools::ToUtf8(w_name);
-            EXPECT_TRUE(std::find(files.begin(), files.end(), w_name) !=
-                        std::end(files));
+            EXPECT_TRUE(rs::find(files, fs::path{w_name}) != std::end(files));
         } catch (const std::exception &e) {
             XLOG::l("Error {} ", e.what());
         }
@@ -507,7 +491,7 @@ TEST(FileInfoTest, MakeFileInfoMissing) {
 }
 
 namespace {
-/// \brief - returns Unix time of the file
+/// - returns Unix time of the file
 ///
 /// function which was valid in 1.6 and still valid
 /// because experimental is deprecated we can't it use anymore, but we can test
@@ -538,7 +522,7 @@ TEST(FileInfoTest, MakeFileInfoExisting) {
 
         auto table = cma::tools::SplitString(x, "|");
         CheckTablePresent(table, name, mode);
-        auto ftime = std::atoll(table[table.size() - 1].c_str());
+        auto ftime = std::stoll(table[table.size() - 1]);
         auto cur_time = std::chrono::system_clock::to_time_t(
             std::chrono::system_clock::now());
         EXPECT_GT(cur_time, ftime);
@@ -552,11 +536,11 @@ TEST(FileInfoTest, MakeFileInfoPagefile) {
         auto x = details::MakeFileInfoString(name, mode);
         x.pop_back();
         auto table = tools::SplitString(x, "|");
-        auto ftime = std::atoll(table[table.size() - 1].c_str());
+        auto ftime = std::stoll(table[table.size() - 1]);
         auto cur_time = std::chrono::system_clock::to_time_t(
             std::chrono::system_clock::now());
         EXPECT_GT(cur_time, ftime);
-        auto sz = std::atoll(table[table.size() - 2].c_str());
+        auto sz = std::stoll(table[table.size() - 2]);
         EXPECT_GT(sz, 0);
     }
 }

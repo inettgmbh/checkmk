@@ -1,6 +1,6 @@
 #include "stdafx.h"
 
-#include "windows_service_api.h"  // windows api abstracted
+#include "wnx/windows_service_api.h"  // windows api abstracted
 
 #include <shlobj_core.h>
 
@@ -9,23 +9,22 @@
 #include <iostream>  // test commands
 #include <numeric>
 
-#include "cap.h"
-#include "cfg.h"
-#include "commander.h"
 #include "common/version.h"
 #include "common/wtools.h"
 #include "common/wtools_service.h"
-#include "cvt.h"
-#include "external_port.h"  // windows api abstracted
-#include "firewall.h"
-#include "fmt/color.h"
-#include "install_api.h"  // install
-#include "modules.h"
-#include "realtime.h"
-#include "service_processor.h"  // cmk service implementation class
 #include "tools/_kbd.h"
 #include "tools/_process.h"
-#include "upgrade.h"
+#include "wnx/cap.h"
+#include "wnx/cfg.h"
+#include "wnx/commander.h"
+#include "wnx/cvt.h"
+#include "wnx/external_port.h"  // windows api abstracted
+#include "wnx/firewall.h"
+#include "wnx/install_api.h"  // install
+#include "wnx/modules.h"
+#include "wnx/realtime.h"
+#include "wnx/service_processor.h"  // cmk service implementation class
+#include "wnx/upgrade.h"
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -74,9 +73,9 @@ int RemoveMainService() {
 }
 
 // #POC: to be deleted
-static bool execMsi() {
+static bool ExecMsi() {
     wchar_t *str = nullptr;
-    if (SHGetKnownFolderPath(FOLDERID_System, KF_FLAG_DEFAULT, NULL, &str) !=
+    if (SHGetKnownFolderPath(FOLDERID_System, KF_FLAG_DEFAULT, nullptr, &str) !=
         S_OK) {
         return false;
     }
@@ -92,20 +91,20 @@ static bool execMsi() {
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
 
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
+    ZeroMemory(&si, sizeof si);
+    si.cb = sizeof si;
+    ZeroMemory(&pi, sizeof pi);
 
-    if (!CreateProcess(nullptr,                          // application name
-                       (LPWSTR)(exe + options).c_str(),  // Command line options
-                       NULL,   // Process handle not inheritable
-                       NULL,   // Thread handle not inheritable
-                       FALSE,  // Set handle inheritance to FALSE
-                       0,      // No creation flags
-                       NULL,   // Use parent's environment block
-                       NULL,   // Use parent's starting directory
-                       &si,    // Pointer to STARTUPINFO structure
-                       &pi))   // Pointer to PROCESS_INFORMATION structure
+    if (!CreateProcess(nullptr,                 // application name
+                       (exe + options).data(),  // Command line options
+                       nullptr,  // Process handle not inheritable
+                       nullptr,  // Thread handle not inheritable
+                       FALSE,    // Set handle inheritance to FALSE
+                       0,        // No creation flags
+                       nullptr,  // Use parent's environment block
+                       nullptr,  // Use parent's starting directory
+                       &si,      // Pointer to STARTUPINFO structure
+                       &pi))     // Pointer to PROCESS_INFORMATION structure
     {
         return false;
     }
@@ -115,13 +114,13 @@ static bool execMsi() {
 
 // #POC This is part of poc, testing command which finds an update file and
 // execute it
-static void CheckForCommand(std::string &Command) {
-    Command = "";
+static void CheckForCommand(std::string &command) {
+    command.clear();
     std::error_code ec;
     auto dir = fs::current_path(ec);
-    std::cout << dir.u8string() << ": tick\n";
+    std::cout << wtools::ToStr(dir) << ": tick\n";
     try {
-        constexpr const char *kUpdateFileCommandDone = "update.command.done";
+        constexpr auto kUpdateFileCommandDone = "update.command.done";
         std::string done_file_name = kUpdateFileCommandDone;
         std::ifstream done_file(done_file_name.c_str(), std::ios::binary);
 
@@ -135,7 +134,7 @@ static void CheckForCommand(std::string &Command) {
                 return;
             }
         }
-        constexpr const char *kUpdateFileCommand = "update.command";
+        constexpr auto kUpdateFileCommand = "update.command";
         std::string command_file_name = kUpdateFileCommand;
         std::ifstream command_file(command_file_name.c_str(), std::ios::binary);
 
@@ -162,9 +161,9 @@ static void CheckForCommand(std::string &Command) {
         buffer[length] = 0;
         command_file.close();
         if (::MoveFileA(command_file_name.c_str(), done_file_name.c_str())) {
-            Command = buffer;
-            xlog::l("To exec %s", Command.c_str());
-            execMsi();
+            command = buffer;
+            xlog::l("To exec %s", command.c_str());
+            ExecMsi();
             return;
         }
 
@@ -172,7 +171,6 @@ static void CheckForCommand(std::string &Command) {
                 done_file_name.c_str(), GetLastError());
     } catch (...) {
     }
-    return;
 }
 
 // on -test self
@@ -185,8 +183,8 @@ int TestMainServiceSelf(int interval) {
         interval = 0;
     }
     // not a best method to call thread, but this is only for VISUAL testing
-    std::thread kick_and_print([&stop, interval]() {
-        auto port = cfg::groups::global.port();
+    std::thread kick_and_print([&stop, interval] {
+        auto port = static_cast<uint16_t>(cfg::groups::g_global.port());
 
         using namespace asio;
 
@@ -203,8 +201,8 @@ int TestMainServiceSelf(int interval) {
         tools::sleep(1000);
 
         while (!stop) {
-            auto enc = cfg::groups::global.globalEncrypt();
-            auto password = enc ? cfg::groups::global.password() : "";
+            auto enc = cfg::groups::g_global.globalEncrypt();
+            auto password = enc ? cfg::groups::g_global.password() : "";
             socket.connect(endpoint, ec);
             if (ec) {
                 XLOG::l("Can't connect to {}:{}, waiting for 5 seconds",
@@ -306,8 +304,8 @@ int TestMt() {
     // to find file, read and start update POC.
     try {
         XLOG::setup::ColoredOutputOnStdio(true);
-        std::string command = "";
-        srv::ServiceProcessor sp(2000ms, [&command]() {
+        std::string command;
+        ServiceProcessor sp(2000ms, [&command] {
             CheckForCommand(command);
             if (command[0]) {
                 tools::RunDetachedCommand(command);
@@ -331,7 +329,7 @@ int TestLegacy() {
     try {
         // test for main thread. will be disabled in production
         // to find file, read and start update POC.
-        ServiceProcessor sp(2000ms, []() { return true; });
+        ServiceProcessor sp(2000ms, [] { return true; });
         sp.startServiceAsLegacyTest();
         sp.stopService(wtools::StopMode::cancel);
     } catch (const std::exception &e) {
@@ -340,7 +338,7 @@ int TestLegacy() {
     return 0;
 }
 
-int RestoreWATOConfig() {
+int RestoreWatoConfig() {
     try {
         XLOG::setup::ColoredOutputOnStdio(true);
         XLOG::setup::DuplicateOnStdio(true);
@@ -450,21 +448,20 @@ int ExecExtractCap(std::wstring_view cap_file, std::wstring_view to) {
 // on -cvt
 // may be used as internal API function to convert ini to yaml
 // GTESTED internally
-int ExecCvtIniYaml(fs::path ini_file_name, fs::path yaml_file_name,
-                   StdioLog stdio_log) {
+int ExecCvtIniYaml(const fs::path &ini_file_name,
+                   const fs::path &yaml_file_name, StdioLog stdio_log) {
     auto flag = stdio_log == StdioLog::no ? 0 : XLOG::kStdio;
     if (stdio_log != StdioLog::no) {
         XLOG::setup::ColoredOutputOnStdio(true);
     }
-    fs::path file = ini_file_name;
     std::error_code ec;
-    if (!fs::exists(file, ec)) {
+    if (!fs::exists(ini_file_name, ec)) {
         XLOG::l(flag)("File not found '{}'", ini_file_name);
         return 3;
     }
     cma::cfg::cvt::Parser parser_converter;
     parser_converter.prepare();
-    if (!parser_converter.readIni(file, false)) {
+    if (!parser_converter.readIni(ini_file_name, false)) {
         XLOG::l(flag)("Failed Load '{}'", fs::absolute(ini_file_name));
         return 2;
     }
@@ -529,7 +526,7 @@ int ExecMainService(StdioLog stdio_log) {
         "press any key to stop execution\n",
         XLOG::Colors::cyan);
     auto delay = 1000ms;
-    auto processor = std::make_unique<ServiceProcessor>(delay, []() {
+    auto processor = std::make_unique<ServiceProcessor>(delay, [] {
     // default embedded callback for exec
     // At the moment does nothing
     // optional commands should be placed here
@@ -585,10 +582,10 @@ constexpr bool g_duplicate_updater_output_on_stdio = false;
 // Unit(easy, but public)/Integration(difficult but private) Tests.
 //
 void ModifyStdio(bool yes) {
-    if (g_use_colored_output_for_agent_updater) {
+    if constexpr (g_use_colored_output_for_agent_updater) {
         XLOG::setup::ColoredOutputOnStdio(yes);
     }
-    if (g_duplicate_updater_output_on_stdio) {
+    if constexpr (g_duplicate_updater_output_on_stdio) {
         XLOG::setup::DuplicateOnStdio(yes);
     }
 }
@@ -641,13 +638,13 @@ void ReportNoPythonModule(const std::vector<std::wstring> &params) {
 int ExecCmkUpdateAgent(const std::vector<std::wstring> &params) {
     ModifyStdio(true);
 
-    fs::path plugins_dir{cma::cfg::GetUserPluginsDir()};
+    fs::path plugins_dir{cfg::GetUserPluginsDir()};
     if (!fs::exists(plugins_dir)) {
         ReportNoPluginDir(plugins_dir);
         return 1;
     }
 
-    auto updater_file = plugins_dir / cma::cfg::files::kAgentUpdaterPython;
+    auto updater_file = plugins_dir / cfg::files::kAgentUpdaterPython;
     if (!fs::exists(updater_file)) {
         ReportNoUpdaterFile(updater_file, params);
         return 1;
@@ -655,9 +652,9 @@ int ExecCmkUpdateAgent(const std::vector<std::wstring> &params) {
 
     XLOG::d.i("'{}' will be used for updater", updater_file);
 
-    cma::cfg::modules::ModuleCommander mc;
+    cfg::modules::ModuleCommander mc;
     mc.LoadDefault();
-    auto command_to_run = mc.buildCommandLine(updater_file.u8string());
+    auto command_to_run = mc.buildCommandLine(wtools::ToStr(updater_file));
     if (command_to_run.empty()) {
         ReportNoPythonModule(params);
         return 1;
@@ -665,13 +662,13 @@ int ExecCmkUpdateAgent(const std::vector<std::wstring> &params) {
 
     for (auto &p : params) command_to_run += L" " + p;
 
-    cma::cfg::SetupPluginEnvironment();
+    cfg::SetupPluginEnvironment();
 
     ModifyStdio(false);
-    auto proc_id = cma::tools::RunStdCommand(command_to_run, true);
+    auto proc_id = tools::RunStdCommand(command_to_run, tools::WaitForEnd::yes);
     ModifyStdio(true);
 
-    if (proc_id > 0) {
+    if (proc_id.has_value() && *proc_id > 0) {
         XLOG::l.i("Agent Updater process [{}] started\n", proc_id);
         return 0;
     }
@@ -729,27 +726,6 @@ int ExecUninstallAlert() {
     carrier::InformByMailSlot(mailbox_service.GetName(),
                               commander::kUninstallAlert);
     return 0;
-}
-
-// only as testing
-static bool CreateTheFile(const fs::path &dir, std::string_view content) {
-    try {
-        auto protocol_file = dir / "check_mk_agent.log.tmp";
-        std::ofstream ofs(protocol_file, std::ios::binary);
-
-        if (ofs) {
-            ofs << "Info Log from check mk agent:\n";
-            ofs << "  time: '" << cfg::ConstructTimeString() << "'\n";
-            if (!content.empty()) {
-                ofs << content;
-                ofs << "\n";
-            }
-        }
-    } catch (const std::exception &e) {
-        XLOG::l.crit("Exception during creatin protocol file {}", e.what());
-        return false;
-    }
-    return true;
 }
 
 // returns codes for main
@@ -876,8 +852,8 @@ int ExecSkypeTest() {
     XLOG::setup::ColoredOutputOnStdio(true);
     ON_OUT_OF_SCOPE(XLOG::setup::DuplicateOnStdio(false););
     XLOG::l.i("<<<Skype testing>>>");
-    cma::provider::SkypeProvider skype;
-    auto result = skype.generateContent(cma::section::kUseEmbeddedName, true);
+    provider::SkypeProvider skype;
+    auto result = skype.generateContent(section::kUseEmbeddedName, true);
     XLOG::l.i("*******************************************************");
     if (!result.empty())
         XLOG::l.i("{}", result);
@@ -927,8 +903,7 @@ int ExecResetOhm() {
     XLOG::setup::DuplicateOnStdio(true);
     XLOG::setup::ColoredOutputOnStdio(true);
     XLOG::SendStringToStdio("Resetting OHM internally\n", XLOG::Colors::yellow);
-    ServiceProcessor sp;
-    sp.resetOhm();
+    ServiceProcessor::resetOhm();
     return 0;
 }
 
@@ -962,14 +937,13 @@ private:
         }
 
         // decoding
-        auto [success, len] = crypt_.decode(
-            data_ + cma::rt::kDataOffset, length - cma::rt::kDataOffset, true);
+        auto [success, len] = crypt_.decode(data_ + rt::kDataOffset,
+                                            length - rt::kDataOffset, true);
 
         // printing
         if (success) {
-            data_[cma::rt::kDataOffset + len] = 0;
-            XLOG::l.t("{}",
-                      std::string_view(data_ + cma::rt::kDataOffset, length));
+            data_[rt::kDataOffset + len] = 0;
+            XLOG::l.t("{}", std::string_view(data_ + rt::kDataOffset, length));
         } else {
             XLOG::l("Failed to decrypt data");
         }
@@ -980,7 +954,7 @@ private:
     }
 
     const std::string password_{kRtTestPassword};
-    cma::encrypt::Commander crypt_{password_};
+    encrypt::Commander crypt_{password_};
 
     asio::ip::udp::socket socket_;
     asio::ip::udp::endpoint sender_endpoint_;
@@ -992,7 +966,7 @@ private:
 void RunTestingUdpServer(asio::io_context *io_context, int port_num,
                          bool print) {
     try {
-        UdpServer s(*io_context, port_num, print);
+        UdpServer s(*io_context, static_cast<short>(port_num), print);
 
         io_context->run();  // blocking call till the context stopped
     } catch (std::exception &e) {
@@ -1016,10 +990,10 @@ int ExecRealtimeTest(bool print) {
     xlog::sendStringToStdio(
         "Press any key to START testing Realtime Sections\n",
         xlog::internal::Colors::green);
-    cma::tools::GetKeyPress();  // blocking  wait for key press
+    tools::GetKeyPress();  // blocking  wait for key press
     dev.connectFrom("127.0.0.1", kRtTestPort,
                     {"mem", "df", "winperf_processor"}, kRtTestPassword, 30);
-    cma::tools::GetKeyPress();  // blocking  wait for key press
+    tools::GetKeyPress();  // blocking  wait for key press
     dev.stop();
 
     context.stop();
@@ -1106,7 +1080,6 @@ void ProcessFirewallConfiguration(std::wstring_view app_name, int port,
             XLOG::d.i("Firewall rule '{}' is absent, nothing to remove",
                       wtools::ToUtf8(rule_name));
         }
-        return;
     }
 }
 
@@ -1147,7 +1120,7 @@ wtools::WinService::ErrorMode GetServiceErrorModeFromCfg(
 // called once on start of the service
 // also on reload of the config
 bool ProcessServiceConfiguration(std::wstring_view service_name) {
-    using namespace cma::cfg;
+    using namespace cfg;
 
     wtools::WinService ws(service_name);
 
@@ -1182,11 +1155,11 @@ bool IsServiceProcess() {
         return false;  // may happen when not enough user rights
     }
 
-    USEROBJECTFLAGS uof = {0};
+    USEROBJECTFLAGS uof = {};
     auto success = ::GetUserObjectInformation(win_station, UOI_FLAGS, &uof,
                                               sizeof(USEROBJECTFLAGS), nullptr);
     // service should be NON-VISIBLE
-    return success && ((uof.dwFlags & WSF_VISIBLE) == 0);
+    return success && (uof.dwFlags & WSF_VISIBLE) == 0;
 }
 }  // namespace
 
@@ -1195,16 +1168,16 @@ bool IsServiceProcess() {
 // called by Windows Service Manager
 // exception free
 // returns -1 on failure
-int ServiceAsService(std::wstring_view app_name,
+int ServiceAsService(std::wstring_view /*app_name*/,
                      std::chrono::milliseconds delay,
                      const std::function<bool()> &internal_callback) {
     if (!IsServiceProcess()) {
         return 0;
     }
 
-    cma::OnStartApp();
+    OnStartApp();
     XLOG::l.i("service to run");
-    ON_OUT_OF_SCOPE(cma::OnExit());
+    ON_OUT_OF_SCOPE(OnExit());
 
     SelfConfigure();
 
@@ -1306,7 +1279,7 @@ SERVICE_FAILURE_ACTIONS *GetServiceFailureActions(SC_HANDLE handle) {
 
         // allocation
         new_buf_size = bytes_needed;
-        actions = reinterpret_cast<SERVICE_FAILURE_ACTIONS *>(
+        actions = static_cast<SERVICE_FAILURE_ACTIONS *>(
             ::LocalAlloc(LMEM_FIXED, new_buf_size));
     }
 
@@ -1354,11 +1327,11 @@ SC_HANDLE SelfOpen() {
     }
     ON_OUT_OF_SCOPE(::CloseServiceHandle(manager_handle));
 
-    auto *handle = ::OpenService(manager_handle, cma::srv::kServiceName,
-                                 SERVICE_ALL_ACCESS);
+    auto *handle =
+        ::OpenService(manager_handle, srv::kServiceName, SERVICE_ALL_ACCESS);
     if (handle == nullptr) {
         XLOG::l.crit("Cannot open Service {}, error =  {}",
-                     wtools::ToUtf8(cma::srv::kServiceName), ::GetLastError());
+                     wtools::ToUtf8(srv::kServiceName), ::GetLastError());
     }
 
     return handle;
@@ -1368,7 +1341,7 @@ void SelfConfigure() {
     auto *handle = SelfOpen();
     ON_OUT_OF_SCOPE(::CloseServiceHandle(handle));
     if (!IsServiceConfigured(handle)) {
-        XLOG::l.i("Configure check mk service");
+        XLOG::l.i("Configure Checkmk service");
         ConfigureServiceAsRestartable(handle);
     }
 }

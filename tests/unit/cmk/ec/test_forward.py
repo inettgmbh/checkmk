@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from cmk.ec.forward import (
+import cmk.ec.export as ec
+from cmk.ec.syslog import (
     StructuredData,
     StructuredDataID,
     StructuredDataName,
     StructuredDataParameters,
     StructuredDataValue,
-    SyslogMessage,
 )
 
 
 class TestStructuredDataName:
     def test_validation_on_init(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="is not an RFC 5425-conform SD-NAME."):
             StructuredDataName("cool Name")
 
     def test_repr(self) -> None:
@@ -26,53 +26,56 @@ class TestStructuredDataName:
 
 class TestStructuredDataID:
     def test_validation_on_init(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="is not an RFC 5425-conform SD-ID."):
             StructuredDataID("a@b")
 
     def test_repr(self) -> None:
         assert repr(StructuredDataID("enterprise@123")) == "enterprise@123"
 
     @pytest.mark.parametrize(
-        "id_, expected_result",
+        "id_",
         [
             pytest.param(
                 "syncAccuracy",
-                True,
                 id="normal id without enterprise number",
             ),
             pytest.param(
                 "Checkmk@123",
-                True,
                 id="normal id with enterprise number",
             ),
+        ],
+    )
+    def test_validate_passes(
+        self,
+        id_: str,
+    ) -> None:
+        StructuredDataID(id_)
+
+    @pytest.mark.parametrize(
+        "id_",
+        (
             pytest.param(
                 "Checkmk@",
-                False,
                 id="id with missing enterprise number",
             ),
             pytest.param(
                 "Checkmk@1hugo",
-                False,
                 id="id with invalid enterprise number",
             ),
             pytest.param(
                 "Checkmk@1@2",
-                False,
                 id="id with multiple @",
             ),
-        ],
+        ),
     )
-    def test_validate(
-        self,
-        id_: str,
-        expected_result: bool,
-    ) -> None:
-        assert StructuredDataID._validate(id_) is expected_result
+    def test_validate_raises(self, id_: str) -> None:
+        with pytest.raises(ValueError, match="is not an RFC 5425-conform SD-ID."):
+            StructuredDataID(id_)
 
 
 class TestStructuredDataValue:
     def test_validation_on_init(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Structured data values must not contain linebreaks."):
             StructuredDataValue("x\ny")
 
     @pytest.mark.parametrize(
@@ -205,7 +208,7 @@ class TestSyslogMessage:
         "facility, severity, stuctured_data",
         [
             pytest.param(
-                30,
+                29,
                 2,
                 StructuredData({}),
                 id="invalid facility",
@@ -234,8 +237,8 @@ class TestSyslogMessage:
         severity: int,
         stuctured_data: StructuredData,
     ) -> None:
-        with pytest.raises(ValueError):
-            SyslogMessage(
+        with pytest.raises(ValueError, match="must"):
+            ec.SyslogMessage(
                 facility=facility,
                 severity=severity,
                 structured_data=stuctured_data,
@@ -245,7 +248,23 @@ class TestSyslogMessage:
         "syslog_message, expected_result",
         [
             pytest.param(
-                SyslogMessage(
+                ec.SyslogMessage(
+                    facility=30,
+                    severity=2,
+                ),
+                "<242>1 - - - - - [Checkmk@18662]",
+                id="facility 30-logfile case",
+            ),
+            pytest.param(
+                ec.SyslogMessage(
+                    facility=31,
+                    severity=2,
+                ),
+                "<250>1 - - - - - [Checkmk@18662]",
+                id="facility 31-snmptrap case",
+            ),
+            pytest.param(
+                ec.SyslogMessage(
                     facility=1,
                     severity=2,
                 ),
@@ -253,7 +272,7 @@ class TestSyslogMessage:
                 id="minimal case",
             ),
             pytest.param(
-                SyslogMessage(
+                ec.SyslogMessage(
                     facility=1,
                     severity=2,
                     timestamp=1617864437,
@@ -279,7 +298,7 @@ class TestSyslogMessage:
                 id="standard case, ascii",
             ),
             pytest.param(
-                SyslogMessage(
+                ec.SyslogMessage(
                     facility=1,
                     severity=2,
                     timestamp=1617864437,
@@ -307,7 +326,7 @@ class TestSyslogMessage:
                 id="with ip address and service level, ascii",
             ),
             pytest.param(
-                SyslogMessage(
+                ec.SyslogMessage(
                     facility=1,
                     severity=2,
                     timestamp=1617864437,
@@ -335,7 +354,7 @@ class TestSyslogMessage:
                 id="with ip address and service level, utf-8",
             ),
             pytest.param(
-                SyslogMessage(
+                ec.SyslogMessage(
                     facility=1,
                     severity=2,
                     timestamp=1617864437.23,
@@ -372,7 +391,7 @@ class TestSyslogMessage:
     )
     def test_repr(
         self,
-        syslog_message: SyslogMessage,
+        syslog_message: ec.SyslogMessage,
         expected_result: str,
     ) -> None:
         assert str(syslog_message) == expected_result

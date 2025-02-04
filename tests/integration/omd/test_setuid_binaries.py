@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from cmk.utils import version as cmk_version
+from tests.testlib.site import Site
 
 
 @pytest.mark.parametrize(
@@ -18,19 +18,14 @@ from cmk.utils import version as cmk_version
         ("bin/mkeventd_open514", "cap_net_bind_service=ep"),
         ("lib/nagios/plugins/check_icmp", "cap_net_raw=ep"),
         ("lib/nagios/plugins/check_dhcp", "cap_net_bind_service,cap_net_raw=ep"),
-        pytest.param(
-            "lib/cmc/icmpsender",
-            "cap_net_raw=ep",
-            marks=pytest.mark.skipif(cmk_version.is_raw_edition(), reason="No cmc in raw edition"),
-        ),
-        pytest.param(
-            "lib/cmc/icmpreceiver",
-            "cap_net_raw=ep",
-            marks=pytest.mark.skipif(cmk_version.is_raw_edition(), reason="No cmc in raw edition"),
-        ),
+        ("lib/cmc/icmpsender", "cap_net_raw=ep"),
+        ("lib/cmc/icmpreceiver", "cap_net_raw=ep"),
     ],
 )
-def test_binary_capability(site, rel_path, expected_capability) -> None:
+def test_binary_capability(site: Site, rel_path: str, expected_capability: str) -> None:
+    if rel_path in ("lib/cmc/icmpreceiver", "lib/cmc/icmpsender") and site.version.is_raw_edition():
+        pytest.skip("No cmc in raw edition")
+
     path = site.path(rel_path)
     assert os.path.exists(path)
 
@@ -56,7 +51,7 @@ def test_binary_capability(site, rel_path, expected_capability) -> None:
         # pre 2.41 format:
         # > getcap test
         # test = cap_net_raw+ep
-        assert completed_process.stdout == "%s = %s\n" % (
+        assert completed_process.stdout == "{} = {}\n".format(
             path,
             expected_capability.replace("=", "+"),
         )
@@ -64,4 +59,4 @@ def test_binary_capability(site, rel_path, expected_capability) -> None:
         # 2.41 format:
         # > getcap test
         # test cap_net_raw=ep
-        assert completed_process.stdout == "%s %s\n" % (path, expected_capability)
+        assert completed_process.stdout == f"{path} {expected_capability}\n"

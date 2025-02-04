@@ -1,5 +1,8 @@
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the
+// terms and conditions defined in the file COPYING, which is part of this
+// source code package.
 
-// provides basic api to start and stop service
 #include "stdafx.h"
 
 #include "providers/logwatch_event.h"
@@ -8,27 +11,24 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <limits>
+#include <fstream>
 #include <ranges>
 #include <regex>
 #include <string>
-#include <tuple>
 
-#include "cfg.h"
-#include "cfg_engine.h"
 #include "common/wtools.h"
 #include "eventlog/eventlogbase.h"
 #include "eventlog/eventlogvista.h"
-#include "logger.h"
 #include "providers/logwatch_event_details.h"
-#include "tools/_raii.h"
+#include "wnx/cfg.h"
+#include "wnx/cfg_engine.h"
+#include "wnx/logger.h"
 namespace fs = std::filesystem;
 namespace rs = std::ranges;
 
 namespace cma::provider {
 
-// trivial converter. kOff if LevelValue is not valid
-// safe for nullptr and mixed case
+// kOff if LevelValue is not valid safe for nullptr and mixed case
 cfg::EventLevels LabelToEventLevel(std::string_view required_level) {
     using cfg::EventLevels;
     if (required_level.data() == nullptr) {
@@ -39,11 +39,11 @@ cfg::EventLevels LabelToEventLevel(std::string_view required_level) {
     std::string val(required_level);
     tools::StringLower(val);
 
-    constexpr std::array<EventLevels, 5> levels = {
-        EventLevels::kIgnore, EventLevels::kOff, EventLevels::kAll,
-        EventLevels::kWarn, EventLevels::kCrit};
+    constexpr std::array levels = {EventLevels::kIgnore, EventLevels::kOff,
+                                   EventLevels::kAll, EventLevels::kWarn,
+                                   EventLevels::kCrit};
 
-    for (auto level : levels) {
+    for (const auto level : levels) {
         if (val == ConvertLogWatchLevelToString(level)) {
             return level;
         }
@@ -54,7 +54,7 @@ cfg::EventLevels LabelToEventLevel(std::string_view required_level) {
 }
 
 void LogWatchEntry::init(std::string_view name, std::string_view level_value,
-                         bool context) {
+                         cfg::EventContext context) {
     name_ = name;
     context_ = context;
     level_ = LabelToEventLevel(level_value);
@@ -113,6 +113,7 @@ bool LogWatchEntry::loadFromMapNode(const YAML::Node &node) {
         return false;
     }
 }
+
 // For one-line encoding, example:
 // - 'Application' : crit context
 bool LogWatchEntry::loadFrom(std::string_view line) {
@@ -123,7 +124,7 @@ bool LogWatchEntry::loadFrom(std::string_view line) {
     }
 
     try {
-        bool context = false;
+        auto context = cfg::EventContext::hide;
         auto [name, body] = ParseLine(line);
         if (name.empty()) {
             return false;
@@ -137,7 +138,9 @@ bool LogWatchEntry::loadFrom(std::string_view line) {
             if (table.size() > 1) {
                 auto context_value = table[1];
                 tools::AllTrim(context_value);
-                context = tools::IsEqual(context_value, "context");
+                context = tools::IsEqual(context_value, "context")
+                              ? cfg::EventContext::with
+                              : cfg::EventContext::hide;
             }
         } else {
             XLOG::d("logwatch entry '{}' has no data, this is not normal",
@@ -155,8 +158,27 @@ bool LogWatchEntry::loadFrom(std::string_view line) {
     }
 }
 
-// returns count of loaded
 void LogWatchEvent::loadConfig() {
+    loadSectionParameters();
+    size_t count = 0;
+    try {
+        auto log_array = readLogEntryArray();
+        if (!log_array.has_value()) {
+            return;
+        }
+        count = processLogEntryArray(*log_array);
+        setupDefaultEntry();
+        XLOG::d.t("Loaded [{}] entries in LogWatch", count);
+
+    } catch (const std::exception &e) {
+        XLOG::l(
+            "CONFIG for '{}.{}' is seriously not valid, skipping. Exception {}. Loaded {} entries",
+            cfg::groups::kLogWatchEvent, cfg::vars::kLogWatchEventLogFile,
+            e.what(), count);
+    }
+}
+
+void LogWatchEvent::loadSectionParameters() {
     using cfg::GetVal;
     send_all_ = GetVal(cfg::groups::kLogWatchEvent,
                        cfg::vars::kLogWatchEventSendall, true);
@@ -183,75 +205,79 @@ void LogWatchEvent::loadConfig() {
         GetVal(cfg::groups::kLogWatchEvent, cfg::vars::kLogWatchEventTimeout,
                cfg::logwatch::kTimeout);
 
-    if (evl::g_evt.theModule() == nullptr || evl::g_evt.openLog == nullptr) {
+    if (!evl::IsEvtApiAvailable()) {
         XLOG::d(
             "Vista API requested in config, but support in OS is absent. Disabling...");
         evl_type_ = EvlType::classic;
     }
+}
+
+std::optional<YAML::Node> LogWatchEvent::readLogEntryArray() {
     const auto cfg = cfg::GetLoadedConfig();
-    int count = 0;
-    try {
-        const auto section = cfg[cfg::groups::kLogWatchEvent];
+    const auto section = cfg[cfg::groups::kLogWatchEvent];
 
-        // sanity checks:
-        if (!section) {
-            XLOG::t("'{}' section absent", cfg::groups::kLogWatchEvent);
-            return;
-        }
-
-        if (!section.IsMap()) {
-            XLOG::l("'{}' is not correct", cfg::groups::kLogWatchEvent);
-            return;
-        }
-
-        // get array, on success, return it
-        const auto log_array = section[cfg::vars::kLogWatchEventLogFile];
-        if (!log_array) {
-            XLOG::t("'{}' section has no '{}' member",
-                    cfg::groups::kLogWatchEvent,
-                    cfg::vars::kLogWatchEventLogFile);
-            return;
-        }
-
-        if (!log_array.IsSequence()) {
-            XLOG::t("'{}' section has no '{}' member",
-                    cfg::groups::kLogWatchEvent,
-                    cfg::vars::kLogWatchEventLogFile);
-            return;
-        }
-
-        entries_.clear();
-        bool default_found = false;
-        for (const auto &l : log_array) {
-            entries_.emplace_back(LogWatchEntry());
-            entries_.back().loadFromMapNode(l);
-            if (entries_.back().loaded()) {
-                ++count;
-                if (entries_.back().name() == "*") {
-                    default_found = true;
-                    default_entry_ = entries_.size() - 1;
-                }
-
-            } else {
-                if (!entries_.empty()) {
-                    entries_.pop_back();
-                }
-            }
-        }
-        if (!default_found) {
-            // making default entry
-            entries_.emplace_back(LogWatchEntry());
-            entries_.back().init("*", "off", false);
-            default_entry_ = entries_.size() - 1;
-        }
-        XLOG::d.t("Loaded [{}] entries in LogWatch", count);
-
-    } catch (const std::exception &e) {
-        XLOG::l(
-            "CONFIG for '{}.{}' is seriously not valid, skipping. Exception {}. Loaded {} entries",
-            cfg::groups::kLogWatchEvent, cfg::vars::kLogWatchEventLogFile,
-            e.what(), count);
+    // sanity checks:
+    if (!section) {
+        XLOG::t("'{}' section absent", cfg::groups::kLogWatchEvent);
+        return {};
     }
+
+    if (!section.IsMap()) {
+        XLOG::l("'{}' is not correct", cfg::groups::kLogWatchEvent);
+        return {};
+    }
+
+    // get array, on success, return it
+    const auto log_array = section[cfg::vars::kLogWatchEventLogFile];
+    if (!log_array) {
+        XLOG::t("'{}' section has no '{}' member", cfg::groups::kLogWatchEvent,
+                cfg::vars::kLogWatchEventLogFile);
+        return {};
+    }
+
+    if (!log_array.IsSequence()) {
+        XLOG::t("'{}' section has no '{}' member", cfg::groups::kLogWatchEvent,
+                cfg::vars::kLogWatchEventLogFile);
+        return {};
+    }
+    return log_array;
+}
+
+size_t LogWatchEvent::processLogEntryArray(const YAML::Node &log_array) {
+    size_t count{0U};
+    entries_.clear();
+    for (const auto &l : log_array) {
+        LogWatchEntry lwe;
+        lwe.loadFromMapNode(l);
+        if (lwe.loaded()) {
+            ++count;
+            entries_.emplace_back(lwe);
+        }
+    }
+
+    return count;
+}
+
+namespace {
+std::optional<size_t> FindLastEntryWithName(const LogWatchEntryVector &entries,
+                                            std::string_view name) {
+    auto found = rs::find_if(entries.rbegin(), entries.rend(),
+                             [name](auto e) { return e.name() == name; });
+    return found == entries.rend()
+               ? std::optional<size_t>{}
+               : entries.size() - 1 - std::distance(entries.rbegin(), found);
+}
+}  // namespace
+
+void LogWatchEvent::setupDefaultEntry() {
+    auto offset = FindLastEntryWithName(entries_, "*");
+    default_entry_ = offset.has_value() ? *offset : addDefaultEntry();
+}
+
+size_t LogWatchEvent::addDefaultEntry() {
+    entries_.emplace_back(LogWatchEntry());
+    entries_.back().init("*", "off", cfg::EventContext::hide);
+    return entries_.size() - 1;
 }
 
 namespace details {
@@ -317,6 +343,12 @@ StateVector LoadEventlogOffsets(const PathVector &state_files,
     return {};
 }
 
+auto x() {
+    std::string_view s1 = "a";
+    std::string_view s2 = "a";
+    return s1 < s2;
+}
+
 void SaveEventlogOffsets(const std::string &file_name,
                          const StateVector &states) {
     {
@@ -365,17 +397,17 @@ void AddLogState(StateVector &states, bool from_config,
 // main API to add config entries to the engine
 void AddConfigEntry(StateVector &states, const LogWatchEntry &log_entry,
                     bool reset_to_null) {
-    for (auto &state : states) {
-        if (tools::IsEqual(state.name_, log_entry.name())) {
-            XLOG::t("Old event log '{}' found", log_entry.name());
-
-            state.setDefaults();
-            state.hide_context_ = !log_entry.context();
-            state.level_ = log_entry.level();
-            state.in_config_ = true;
-            state.presented_ = true;
-            return;
-        }
+    auto found = rs::find_if(states, [&](auto s) {
+        return tools::IsEqual(s.name_, log_entry.name());
+    });
+    if (found != states.end()) {
+        XLOG::t("Old event log '{}' found", log_entry.name());
+        found->setDefaults();
+        found->context_ = log_entry.context();
+        found->level_ = log_entry.level();
+        found->in_config_ = true;
+        found->presented_ = true;
+        return;
     }
 
     // new added
@@ -383,7 +415,7 @@ void AddConfigEntry(StateVector &states, const LogWatchEntry &log_entry,
     states.emplace_back(log_entry.name(), pos, true);
     states.back().in_config_ = true;
     states.back().level_ = log_entry.level();
-    states.back().hide_context_ = !log_entry.context();
+    states.back().context_ = log_entry.context();
     XLOG::t("New event log '{}' added with pos {}", log_entry.name(), pos);
 }
 
@@ -414,7 +446,7 @@ std::optional<uint64_t> GetLastPos(EvlType type, std::string_view name) {
     if (type == EvlType::classic && !IsEventLogInRegistry(name)) return {};
 
     auto log =
-        evl::OpenEvl(wtools::ConvertToUTF16(name), type == EvlType::vista);
+        evl::OpenEvl(wtools::ConvertToUtf16(name), type == EvlType::vista);
 
     if (log && log->isLogValid()) {
         return log->getLastRecordId();
@@ -430,7 +462,7 @@ std::pair<uint64_t, std::string> DumpEventLog(evl::EventLogBase &log,
     int64_t count = 0;
     auto start = std::chrono::steady_clock::now();
     auto pos = evl::PrintEventLog(
-        log, state.pos_, state.level_, state.hide_context_, lwl.skip,
+        log, state.pos_, state.level_, state.context_, lwl.skip,
         [&out, lwl, &count, start](const std::string &str) {
             if (lwl.max_line_length > 0 &&
                 static_cast<int64_t>(str.length()) >= lwl.max_line_length) {
@@ -451,7 +483,9 @@ std::pair<uint64_t, std::string> DumpEventLog(evl::EventLogBase &log,
                 auto p = std::chrono::steady_clock::now();
                 auto span =
                     std::chrono::duration_cast<std::chrono::seconds>(p - start);
-                if (span.count() > lwl.timeout) return false;
+                if (span.count() > lwl.timeout) {
+                    return false;
+                }
             }
             return true;
         }
@@ -470,7 +504,7 @@ std::optional<std::string> ReadDataFromLog(EvlType type, State &state,
         return {};
     }
 
-    auto log = evl::OpenEvl(wtools::ConvertToUTF16(state.name_),
+    auto log = evl::OpenEvl(wtools::ConvertToUtf16(state.name_),
                             type == EvlType::vista);
 
     if (!log || !log->isLogValid()) {
@@ -507,35 +541,32 @@ std::optional<std::string> ReadDataFromLog(EvlType type, State &state,
 
 LogWatchEntry GenerateDefaultValue() { return LogWatchEntry().withDefault(); }
 
-bool LoadFromConfig(State &state, const LogWatchEntryVector &entries) noexcept {
+bool UpdateState(State &state, const LogWatchEntryVector &entries) noexcept {
     for (const auto &config_entry : entries) {
         if (tools::IsEqual(state.name_, config_entry.name())) {
-            // found, check that param is not off
-            state.hide_context_ = !config_entry.context();
+            state.context_ = config_entry.context();
             state.level_ = config_entry.level();
             state.in_config_ = true;
             return true;
         }
     }
 
-    // check default entry
     return false;
 }
 
-void UpdateStatesByConfig(StateVector &states,
-                          const LogWatchEntryVector &entries,
-                          const LogWatchEntry *dflt) {
+void UpdateStates(StateVector &states, const LogWatchEntryVector &entries,
+                  const LogWatchEntry *dflt) {
     LogWatchEntry default_entry =
         dflt != nullptr ? *dflt : GenerateDefaultValue();
 
     // filtering states
     for (auto &s : states) {
-        if (LoadFromConfig(s, entries)) {
+        if (UpdateState(s, entries)) {
             continue;
         }
 
         // not found - attempting to load default value
-        s.hide_context_ = !default_entry.context();
+        s.context_ = default_entry.context();
         s.level_ = default_entry.level();
 
         // if default level isn't off, then we set entry as configured
@@ -586,7 +617,9 @@ std::string GenerateOutputFromStates(EvlType type, StateVector &states,
                 // this is NOT log, just stupid entries in registry
                 continue;
 
-            default:
+            case cfg::EventLevels::kAll:
+            case cfg::EventLevels::kWarn:
+            case cfg::EventLevels::kCrit:
                 if (state.in_config_) {
                     auto log_data = ReadDataFromLog(type, state, lwl);
                     if (log_data.has_value()) {
@@ -634,7 +667,7 @@ std::string LogWatchEvent::makeBody() {
     }
 
     // now we have states list and want to mark all registered sources
-    UpdateStatesByConfig(states, entries_, defaultEntry());
+    UpdateStates(states, entries_, defaultEntry());
 
     // make string
     auto out = GenerateOutputFromStates(evl_type_, states, getLogWatchLimits());

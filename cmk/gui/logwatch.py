@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import datetime
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from collections.abc import Iterator
+from typing import Any
 
 import livestatus
 from livestatus import SiteId
 
-from cmk.utils.type_defs import HostName
+from cmk.ccc.exceptions import MKGeneralException
 
-import cmk.gui.pages
-import cmk.gui.sites as sites
+from cmk.utils.hostaddress import HostName
+
+from cmk.gui import sites
 from cmk.gui.breadcrumb import (
     Breadcrumb,
     BreadcrumbItem,
@@ -21,7 +23,7 @@ from cmk.gui.breadcrumb import (
     make_simple_page_breadcrumb,
 )
 from cmk.gui.config import active_config
-from cmk.gui.exceptions import MKAuthException, MKGeneralException, MKUserError
+from cmk.gui.exceptions import MKAuthException, MKUserError
 from cmk.gui.htmllib.generator import HTMLWriter
 from cmk.gui.htmllib.header import make_header
 from cmk.gui.htmllib.html import html
@@ -37,12 +39,12 @@ from cmk.gui.page_menu import (
     PageMenuEntry,
     PageMenuTopic,
 )
-from cmk.gui.plugins.views.utils import make_host_breadcrumb
+from cmk.gui.pages import PageRegistry
 from cmk.gui.table import table_element
 from cmk.gui.type_defs import HTTPVariables
-from cmk.gui.utils.escaping import escape_to_html
 from cmk.gui.utils.transaction_manager import transactions
-from cmk.gui.utils.urls import make_confirm_link, makeactionuri, makeuri, makeuri_contextless
+from cmk.gui.utils.urls import make_confirm_delete_link, makeactionuri, makeuri, makeuri_contextless
+from cmk.gui.view_breadcrumbs import make_host_breadcrumb
 
 #   .--HTML Output---------------------------------------------------------.
 #   |     _   _ _____ __  __ _        ___        _               _         |
@@ -56,7 +58,10 @@ from cmk.gui.utils.urls import make_confirm_link, makeactionuri, makeuri, makeur
 #   '----------------------------------------------------------------------'
 
 
-@cmk.gui.pages.register("logwatch")
+def register(page_registry: PageRegistry) -> None:
+    page_registry.register_page_handler("logwatch", page_show)
+
+
 def page_show():
     site = request.var("site")  # optional site hint
     host_name = request.var("host", "")
@@ -262,7 +267,6 @@ def _host_log_list_page_menu(
 # Displays a table of logfiles
 def list_logs(site, host_name, logfile_names):
     with table_element(empty_text=_("No logs found for this host.")) as table:
-
         for file_name in logfile_names:
             table.row()
             file_display = form_file_to_ext(file_name)
@@ -345,7 +349,7 @@ def show_file(site, host_name, file_name):
                 _("Analyze this line"),
                 "analyze",
             )
-            html.write_text(line["line"].replace(" ", "&nbsp;").replace("\1", "<br>"))
+            html.write_text_permissive(line["line"].replace(" ", "&nbsp;").replace("\1", "<br>"))
             html.close_td()
             html.close_tr()
 
@@ -370,7 +374,6 @@ def _show_file_breadcrumb(host_name: HostName, title: str) -> Breadcrumb:
 def _show_file_page_menu(
     breadcrumb: Breadcrumb, site_id: SiteId, host_name: HostName, int_filename: str
 ) -> PageMenu:
-
     menu = PageMenu(
         dropdowns=[
             PageMenuDropdown(
@@ -445,15 +448,17 @@ def _extend_display_dropdown(menu: PageMenu) -> None:
             entries=[
                 PageMenuEntry(
                     title=_("Show context"),
-                    icon_name="checkbox" if context_hidden else "checked_checkbox",
+                    icon_name="toggle_off" if context_hidden else "toggle_on",
                     item=make_simple_link(
                         makeactionuri(
                             request,
                             transactions,
                             [
-                                ("_show_backlog", "no")
-                                if context_hidden
-                                else ("_hidecontext", "yes"),
+                                (
+                                    ("_show_backlog", "no")
+                                    if context_hidden
+                                    else ("_hidecontext", "yes")
+                                ),
                             ],
                         )
                     ),
@@ -477,9 +482,9 @@ def _extend_display_dropdown(menu: PageMenu) -> None:
 
 
 def _page_menu_entry_acknowledge(
-    site: Optional[SiteId] = None,
-    host_name: Optional[HostName] = None,
-    int_filename: Optional[str] = None,
+    site: SiteId | None = None,
+    host_name: HostName | None = None,
+    int_filename: str | None = None,
 ) -> Iterator[PageMenuEntry]:
     if not user.may("general.act") or (host_name and not may_see(site, host_name)):
         return
@@ -499,13 +504,11 @@ def _page_menu_entry_acknowledge(
         title=label,
         icon_name="delete",
         item=make_simple_link(
-            make_confirm_link(
+            make_confirm_delete_link(
                 url=makeactionuri(request, transactions, urivars),
-                message=_(
-                    "Do you really want to acknowledge %s "
-                    "by <b>deleting</b> all stored messages?"
-                )
-                % ack_msg,
+                title=_("Clear logs by deleting all stored messages"),
+                message=_("This affects %s") % ack_msg,
+                confirm_button=_("Clear & Delete"),
             )
         ),
         is_shortcut=True,
@@ -513,7 +516,7 @@ def _page_menu_entry_acknowledge(
     )
 
 
-def do_log_ack(site, host_name, file_name):  # pylint: disable=too-many-branches
+def do_log_ack(site, host_name, file_name):
     sites.live().set_auth_domain("action")
 
     logs_to_ack = []
@@ -563,13 +566,14 @@ def do_log_ack(site, host_name, file_name):  # pylint: disable=too-many-branches
             return
 
     html.show_message(
-        "<b>%s</b><p>%s</p>"
-        % (_("Acknowledged %s") % ack_msg, _("Acknowledged all messages in %s.") % ack_msg)
+        "<b>{}</b><p>{}</p>".format(
+            _("Acknowledged %s") % ack_msg, _("Acknowledged all messages in %s.") % ack_msg
+        )
     )
     html.footer()
 
 
-def _get_ack_msg(host_name, file_name) -> str:
+def _get_ack_msg(host_name: HostName | None, file_name: str | None) -> str:
     if not host_name and not file_name:  # all logs on all hosts
         return _("all logfiles on all hosts")
 
@@ -586,7 +590,7 @@ def acknowledge_logfile(site, host_name, int_filename, display_name):
     if not may_see(site, host_name):
         raise MKAuthException(_("Permission denied."))
 
-    command = "MK_LOGWATCH_ACKNOWLEDGE;%s;%s" % (host_name, int_filename)
+    command = f"MK_LOGWATCH_ACKNOWLEDGE;{host_name};{int_filename}"
     sites.live().command("[%d] %s" % (int(time.time()), command), site)
 
 
@@ -603,10 +607,10 @@ def acknowledge_logfile(site, host_name, int_filename, display_name):
 #   '----------------------------------------------------------------------'
 
 
-def parse_file(site, host_name, file_name, hidecontext=False):  # pylint: disable=too-many-branches
-    log_chunks: List[Dict[str, Any]] = []
+def parse_file(site, host_name, file_name, hidecontext=False):
+    log_chunks: list[dict[str, Any]] = []
     try:
-        chunk: Optional[Dict[str, Any]] = None
+        chunk: dict[str, Any] | None = None
         lines = get_logfile_lines(site, host_name, file_name)
         if lines is None:
             return None
@@ -620,7 +624,7 @@ def parse_file(site, host_name, file_name, hidecontext=False):  # pylint: disabl
                 continue
 
             if line[:3] == "<<<":  # new chunk begins
-                log_lines: List[Dict[str, Any]] = []
+                log_lines: list[dict[str, Any]] = []
                 chunk = {"lines": log_lines}
                 log_chunks.append(chunk)
 
@@ -677,7 +681,7 @@ def parse_file(site, host_name, file_name, hidecontext=False):  # pylint: disabl
     except Exception as e:
         if active_config.debug:
             raise
-        raise MKGeneralException(escape_to_html(_("Cannot parse log file %s: %s") % (file_name, e)))
+        raise MKGeneralException(_("Cannot parse log file %s: %s") % (file_name, e))
 
     return log_chunks
 
@@ -716,10 +720,19 @@ def get_last_chunk(log_chunks):
 #   |             \____\___/|_| |_|___/\__\__,_|_| |_|\__|___/             |
 #   |                                                                      |
 #   +----------------------------------------------------------------------+
-#   | Definition of various constants - also used by WATO                  |
+#   | Definition of various constants - also used by Setup                  |
 #   '----------------------------------------------------------------------'
 
 nagios_illegal_chars = "`;~!$%^&*|'\"<>?,()="
+
+
+def logwatch_level_name(level):
+    return {
+        "O": "OK",
+        "W": "WARN",
+        "C": "CRIT",
+        "I": "IGNORE",
+    }[level]
 
 
 def level_name(level):
@@ -811,15 +824,10 @@ def logfiles_of_host(site, host_name):
 def get_logfile_lines(site, host_name, file_name):
     if site:  # Honor site hint if available
         sites.live().set_only_sites([site])
-    query = (
-        "GET hosts\n"
-        "Columns: mk_logwatch_file:file:%s/%s\n"
-        "Filter: name = %s\n"
-        % (
-            livestatus.lqencode(host_name),
-            livestatus.lqencode(file_name.replace("\\", "\\\\").replace(" ", "\\s")),
-            livestatus.lqencode(host_name),
-        )
+    query = "GET hosts\nColumns: mk_logwatch_file:file:{}/{}\nFilter: name = {}\n".format(
+        livestatus.lqencode(host_name),
+        livestatus.lqencode(file_name.replace("\\", "\\\\").replace(" ", "\\s")),
+        livestatus.lqencode(host_name),
     )
     file_content = sites.live().query_value(query)
     if site:  # Honor site hint if available

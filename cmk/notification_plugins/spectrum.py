@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import subprocess
 import sys
-from typing import NoReturn, Union
+from typing import NoReturn
 
 from cmk.notification_plugins import utils
 
@@ -13,7 +13,7 @@ from cmk.notification_plugins import utils
 # You will probably have to modify the sent information
 
 
-def send_trap(oids: dict[str, Union[str, int, None]], target: str, community: str) -> int:
+def send_trap(oids: dict[str, str | int | None], target: str, community: str) -> int:
     cmd = [
         "/usr/bin/snmptrap",
         "-v",
@@ -44,12 +44,6 @@ def main() -> NoReturn:
     # gather all options from env
     context = utils.collect_context()
 
-    # check if configured via flexible notifications
-    if "PARAMETER_1" in context:
-        context["PARAMETER_COMMUNITY"] = context["PARAMETER_1"]
-        context["PARAMETER_DESTINATION"] = context["PARAMETER_2"]
-        context["PARAMETER_BASEOID"] = context["PARAMETER_3"]
-
     base_oid = context.get("PARAMETER_BASEOID", "1.3.6.1.4.1.1234")
 
     # adjust these oids to your needs
@@ -71,10 +65,16 @@ def main() -> NoReturn:
         base_oid + ".10": 3,  # SPECIFIC TRAP (type) NUMBER
         base_oid + ".11": "Call number 123456",  # CALLOUT STRING
         base_oid + ".12": complete_url,
-        base_oid
-        + ".13": "%s alarm on host %s"
-        % (context.get("SERVICEDESC", "Connectivity"), context["HOSTNAME"]),
+        base_oid + ".13": "{} alarm on host {}".format(
+            context.get("SERVICEDESC", "Connectivity"), context["HOSTNAME"]
+        ),
         base_oid + ".14": context.get("SERVICEGROUPNAMES", ""),
     }
 
-    sys.exit(send_trap(oids, context["PARAMETER_DESTINATION"], context["PARAMETER_COMMUNITY"]))
+    sys.exit(
+        send_trap(
+            oids,
+            context["PARAMETER_DESTINATION"],
+            utils.get_password_from_env_or_context(key="PARAMETER_COMMUNITY", context=context),
+        )
+    )

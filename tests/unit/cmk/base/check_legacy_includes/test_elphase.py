@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import pytest
 
-from cmk.base.check_legacy_includes.elphase import check_elphase  # type: ignore[attr-defined]
+from cmk.base.check_legacy_includes.elphase import check_elphase
 
 
 @pytest.mark.parametrize(
@@ -106,7 +107,7 @@ def test_check_elphase(
     item: str,
     params: Mapping[str, Any],
     parsed: Mapping[str, Mapping[str, float]],
-    expected_result: Sequence[Tuple],
+    expected_result: Sequence[tuple],
 ) -> None:
     assert (
         list(

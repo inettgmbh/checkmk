@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 
 def license_check_levels(total, in_use, params):
     if params is False:
-        warn = None
-        crit = None
+        warn: float | None = None
+        crit: float | None = None
     elif not params:
         warn = total
         crit = total
@@ -24,14 +24,13 @@ def license_check_levels(total, in_use, params):
     else:
         infotext = "used %d licenses, but you have only %d" % (in_use, total)
 
-    if crit is not None and in_use >= crit:
-        status = 2
-    elif warn is not None and in_use >= warn:
-        status = 1
-    else:
-        status = 0
-
-    if status:
-        infotext += " (warn/crit at %d/%d)" % (warn, crit)  # type: ignore[str-format]
+    status = 0
+    if warn is not None and crit is not None:
+        if in_use >= crit:
+            status = 2
+        elif in_use >= warn:
+            status = 1
+        if status:
+            infotext += f" (warn/crit at {int(warn)}/{int(crit)})"
 
     return status, infotext, perfdata

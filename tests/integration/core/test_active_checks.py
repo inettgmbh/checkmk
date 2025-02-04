@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import logging
-from typing import Iterator
+from collections.abc import Iterator
 
 import pytest
 
+from tests.testlib.pytest_helpers.marks import skip_if_saas_edition
 from tests.testlib.site import Site
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 @pytest.fixture(name="test_cfg", scope="module", autouse=True)
 def test_cfg_fixture(site: Site) -> Iterator[None]:
     print("Applying default config")
-    site.openapi.create_host(
+    site.openapi.hosts.create(
         "test-host",
         attributes={
             "ipaddress": "127.0.0.1",
@@ -25,18 +26,18 @@ def test_cfg_fixture(site: Site) -> Iterator[None]:
     )
 
     site.activate_changes_and_wait_for_core_reload()
-    yield
-
-    #
-    # Cleanup code
-    #
-    print("Cleaning up test config")
-
-    site.openapi.delete_host("test-host")
+    try:
+        yield
+    finally:
+        print("Cleaning up test config")
+        site.openapi.hosts.delete("test-host")
+        site.activate_changes_and_wait_for_core_reload()
 
 
-def test_active_check_execution(site: Site, web) -> None:  # type:ignore[no-untyped-def]
-    rule_id = site.openapi.create_rule(
+@skip_if_saas_edition  # active checks not supported in SaaS
+@pytest.mark.usefixtures("web")
+def test_active_check_execution(site: Site) -> None:
+    rule_id = site.openapi.rules.create(
         ruleset_name="custom_checks",
         value={
             "service_description": "\xc4ctive-Check",
@@ -58,11 +59,14 @@ def test_active_check_execution(site: Site, web) -> None:  # type:ignore[no-unty
         assert result[2] == 0
         assert result[3] == "123"
     finally:
-        site.openapi.delete_rule(rule_id)
+        site.openapi.rules.delete(rule_id)
         site.activate_changes_and_wait_for_core_reload()
 
 
-def test_active_check_macros(test_cfg, site, web) -> None:  # type:ignore[no-untyped-def]
+@skip_if_saas_edition  # active checks not supported in SaaS
+@pytest.mark.usefixtures("web")
+@pytest.mark.usefixtures("test_cfg")
+def test_active_check_macros(site: Site) -> None:
     macros = {
         "$HOSTADDRESS$": "127.0.0.1",
         "$HOSTNAME$": "test-host",
@@ -88,7 +92,7 @@ def test_active_check_macros(test_cfg, site, web) -> None:  # type:ignore[no-unt
         "$USER1$": "/omd/sites/%s/lib/nagios/plugins" % site.id,
         "$USER2$": "/omd/sites/%s/local/lib/nagios/plugins" % site.id,
         "$USER3$": site.id,
-        "$USER4$": site.root,
+        "$USER4$": site.root.as_posix(),
     }
 
     def descr(var):
@@ -98,7 +102,7 @@ def test_active_check_macros(test_cfg, site, web) -> None:  # type:ignore[no-unt
     try:
         for var, value in macros.items():
             rule_ids.append(
-                site.openapi.create_rule(
+                site.openapi.rules.create(
                     ruleset_name="custom_checks",
                     value={
                         "service_description": descr(var),
@@ -136,11 +140,11 @@ def test_active_check_macros(test_cfg, site, web) -> None:  # type:ignore[no-unt
                     splitted_output = plugin_output.split(" ")
                     plugin_output = splitted_output[0] + " " + " ".join(sorted(splitted_output[1:]))
 
-            assert (
-                expected_output == plugin_output
-            ), "Macro %s has wrong value (%r instead of %r)" % (var, plugin_output, expected_output)
+            assert expected_output == plugin_output, (
+                f"Macro {var} has wrong value ({plugin_output!r} instead of {expected_output!r})"
+            )
 
     finally:
         for rule_id in rule_ids:
-            site.openapi.delete_rule(rule_id)
+            site.openapi.rules.delete(rule_id)
         site.activate_changes_and_wait_for_core_reload()

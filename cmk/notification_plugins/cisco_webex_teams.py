@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 r"""
@@ -8,12 +8,17 @@ Send notification messages to Cisco Webex Teams
 
 Use a Cisco Webex Teams webhook to send notification messages
 """
-from typing import Dict
 
-import cmk.notification_plugins.utils as utils
+from cmk.notification_plugins.utils import (
+    format_link,
+    host_url_from_context,
+    post_request,
+    process_by_status_code,
+    service_url_from_context,
+)
 
 
-def cisco_webex_teams_msg(context: Dict) -> Dict:
+def _cisco_webex_teams_msg(context: dict) -> dict:
     """Build the message for Cisco Webex Teams. We use the Markdown markup language, see
     https://developer.webex.com/docs/api/basics. For example, we need two spaces before a newline
     character."""
@@ -23,12 +28,10 @@ def cisco_webex_teams_msg(context: Dict) -> Dict:
     # notification about a service
     if context.get("WHAT", None) == "SERVICE":
         monitored_type = "Service"
-        host_service_info = "Host: %s (IP: %s)  \nService: %s" % (
-            utils.format_link("<%s|%s>", utils.host_url_from_context(context), context["HOSTNAME"]),
+        host_service_info = "Host: {} (IP: {})  \nService: {}".format(
+            format_link("[%s](%s)", context["HOSTNAME"], host_url_from_context(context)),
             context["HOSTADDRESS"],
-            utils.format_link(
-                "<%s|%s>", utils.service_url_from_context(context), context["SERVICEDESC"]
-            ),
+            format_link("[%s](%s)", context["SERVICEDESC"], service_url_from_context(context)),
         )
         state = "State: %s" % context["SERVICESTATE"]
         output = context["SERVICEOUTPUT"]
@@ -36,8 +39,8 @@ def cisco_webex_teams_msg(context: Dict) -> Dict:
     # notification about a host
     else:
         monitored_type = "Host"
-        host_service_info = "Host: %s (IP: %s)" % (
-            utils.format_link("<%s|%s>", utils.host_url_from_context(context), context["HOSTNAME"]),
+        host_service_info = "Host: {} (IP: {})".format(
+            format_link("[%s](%s)", context["HOSTNAME"], host_url_from_context(context)),
             context["HOSTADDRESS"],
         )
         state = "State: %s" % context["HOSTSTATE"]
@@ -61,3 +64,10 @@ def cisco_webex_teams_msg(context: Dict) -> Dict:
     )
 
     return {"markdown": markdown}
+
+
+def main() -> int:
+    return process_by_status_code(
+        response=post_request(_cisco_webex_teams_msg),
+        success_code=204,
+    )

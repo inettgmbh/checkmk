@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from tests.testlib import Check
+from cmk.agent_based.v1.type_defs import StringTable
+
+from .checktestlib import Check
 
 pytestmark = pytest.mark.checks
 
@@ -181,6 +183,6 @@ info_3 = [
         info_3,
     ],
 )
-def test_mkbackup_parse(info) -> None:  # type:ignore[no-untyped-def]
+def test_mkbackup_parse(info: StringTable) -> None:
     check = Check("mkbackup")
     check.run_parse(info)

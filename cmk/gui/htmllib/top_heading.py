@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from __future__ import annotations
 
-from typing import Optional
+from cmk.utils.licensing.registry import get_licensing_user_effect
 
-import cmk.gui.utils.escaping as escaping
 from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbRenderer
 from cmk.gui.config import active_config
 from cmk.gui.htmllib.foldable_container import foldable_container
 from cmk.gui.http import Request
+from cmk.gui.http import request as _request
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
 from cmk.gui.page_menu import PageMenu, PageMenuPopupsRenderer, PageMenuRenderer
 from cmk.gui.page_state import PageState, PageStateRenderer
 from cmk.gui.utils.html import HTML
+from cmk.gui.utils.urls import makeuri_contextless
 
 from .debug_vars import debug_vars
 from .generator import HTMLWriter
@@ -27,18 +28,19 @@ def top_heading(
     request: Request,
     title: str,
     breadcrumb: Breadcrumb,
-    page_menu: Optional[PageMenu] = None,
-    page_state: Optional[PageState] = None,
+    page_menu: PageMenu | None = None,
+    page_state: PageState | None = None,
     *,
     browser_reload: float,
 ) -> None:
+    _may_show_license_expiry(writer)
+
     writer.open_div(id_="top_heading")
     writer.open_div(class_="titlebar")
+    writer.open_div()
 
-    # HTML() is needed here to prevent a double escape when we do  self._escape_attribute
-    # here and self.a() escapes the content (with permissive escaping) again. We don't want
-    # to handle "title" permissive.
-    html_title = HTML(escaping.escape_attribute(title))
+    # We don't want to handle "title" permissive.
+    html_title = HTML.with_escaping(title)
     writer.a(
         html_title,
         class_="title",
@@ -50,12 +52,16 @@ def top_heading(
     if breadcrumb:
         BreadcrumbRenderer().show(breadcrumb)
 
+    writer.close_div()
+
     if page_state is None:
         page_state = _make_default_page_state(
             writer,
             request,
             browser_reload=browser_reload,
         )
+
+    _may_show_license_banner(writer)
 
     if page_state:
         PageStateRenderer().show(page_state)
@@ -80,9 +86,31 @@ def top_heading(
         )
 
 
+def _may_show_license_expiry(writer: HTMLWriter) -> None:
+    if (
+        header_effect := get_licensing_user_effect(
+            licensing_settings_link=makeuri_contextless(
+                _request, [("mode", "licensing")], filename="wato.py"
+            )
+        ).header
+    ) and (set(header_effect.roles).intersection(user.role_ids)):
+        writer.show_warning(HTML.without_escaping(header_effect.message_html))
+
+
+def _may_show_license_banner(writer: HTMLWriter) -> None:
+    if (
+        header_effect := get_licensing_user_effect(
+            licensing_settings_link=makeuri_contextless(
+                _request, [("mode", "licensing")], filename="wato.py"
+            )
+        ).banner
+    ) and (set(header_effect.roles).intersection(user.role_ids)):
+        writer.write_html(HTML.without_escaping(header_effect.message_html))
+
+
 def _make_default_page_state(
     writer: HTMLWriter, request: Request, *, browser_reload: float
-) -> Optional[PageState]:
+) -> PageState | None:
     """Create a general page state for all pages without specific one"""
     if not browser_reload:
         return None

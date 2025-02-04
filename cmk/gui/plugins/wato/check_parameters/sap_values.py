@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,85 +9,11 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersDiscovery,
 )
-from cmk.gui.valuespec import (
-    Alternative,
-    Dictionary,
-    FixedValue,
-    Integer,
-    ListOf,
-    RegExp,
-    TextInput,
-    Transform,
-    Tuple,
-)
-
-
-def _valuespec_inventory_sap_values():
-    return Dictionary(
-        title=_("SAP R/3 single value discovery"),
-        elements=[
-            (
-                "match",
-                Alternative(
-                    title=_("Node Path Matching"),
-                    elements=[
-                        TextInput(
-                            title=_("Exact path of the node"),
-                            size=100,
-                        ),
-                        Transform(
-                            valuespec=RegExp(
-                                size=100,
-                                mode=RegExp.prefix,
-                            ),
-                            title=_("Regular expression matching the path"),
-                            help=_(
-                                "This regex must match the <i>beginning</i> of the complete "
-                                "path of the node as reported by the agent"
-                            ),
-                            forth=lambda x: x[1:],  # remove ~
-                            back=lambda x: "~" + x,  # prefix ~
-                        ),
-                        FixedValue(
-                            value=None,
-                            totext="",
-                            title=_("Match all nodes"),
-                        ),
-                    ],
-                    match=lambda x: (not x and 2) or (x[0] == "~" and 1 or 0),
-                    default_value="SAP CCMS Monitor Templates/Dialog Overview/Dialog Response Time/ResponseTime",
-                ),
-            ),
-            (
-                "limit_item_levels",
-                Integer(
-                    title=_("Limit Path Levels for Service Names"),
-                    unit=_("path levels"),
-                    minvalue=1,
-                    help=_(
-                        "The service descriptions of the inventorized services are named like the paths "
-                        "in SAP. You can use this option to let the inventory function only use the last "
-                        "x path levels for naming."
-                    ),
-                ),
-            ),
-        ],
-        optional_keys=["limit_item_levels"],
-    )
-
-
-rulespec_registry.register(
-    HostRulespec(
-        group=RulespecGroupCheckParametersDiscovery,
-        match_type="all",
-        name="inventory_sap_values",
-        valuespec=_valuespec_inventory_sap_values,
-    )
-)
+from cmk.gui.valuespec import Dictionary, ListOf, Migrate, RegExp, TextInput, Tuple
 
 
 def _valuespec_sap_value_groups():
-    return Transform(
+    return Migrate(
         valuespec=Dictionary(
             title=_("SAP R/3 grouped values discovery"),
             elements=[
@@ -129,7 +55,7 @@ def _valuespec_sap_value_groups():
                 "That check monitors a list of SAP values at once."
             ),
         ),
-        forth=lambda p: p if isinstance(p, dict) else {"grouping_patterns": p},
+        migrate=lambda p: p if isinstance(p, dict) else {"grouping_patterns": p},
     )
 
 

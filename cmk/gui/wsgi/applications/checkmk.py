@@ -1,59 +1,56 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from __future__ import annotations
 
 import functools
 import http.client as http_client
-import json
 import traceback
-from typing import Callable, Dict, TYPE_CHECKING
+from collections.abc import Callable
+from wsgiref.types import StartResponse, WSGIEnvironment
+
+import flask
+from werkzeug.exceptions import RequestEntityTooLarge
 
 import livestatus
 
-import cmk.utils.paths
-import cmk.utils.profile
-import cmk.utils.store
+import cmk.ccc.store
+from cmk.ccc.exceptions import MKException
 
-from cmk.gui import config as config_module
-from cmk.gui import http, pages, sites
+import cmk.utils.paths
+
+from cmk.gui import pages, sites
 from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem
 from cmk.gui.config import active_config
-from cmk.gui.context import AppContext, RequestContext
-from cmk.gui.ctx_stack import app_stack, request_stack
-from cmk.gui.display_options import DisplayOptions
 from cmk.gui.exceptions import (
     FinalizeRequest,
     HTTPRedirect,
     MKAuthException,
     MKConfigError,
-    MKGeneralException,
+    MKNotFound,
     MKUnauthenticatedException,
     MKUserError,
 )
 from cmk.gui.htmllib.header import make_header
-from cmk.gui.htmllib.html import html, HTMLGenerator
-from cmk.gui.http import request, response, Response
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request, Response, response
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
-from cmk.gui.logged_in import LoggedInNobody
-from cmk.gui.utils.json import patch_json
-from cmk.gui.utils.logging import PrependURLFilter
-from cmk.gui.utils.mobile import is_mobile
-from cmk.gui.utils.output_funnel import OutputFunnel
-from cmk.gui.utils.theme import Theme
-from cmk.gui.utils.timeout_manager import TimeoutManager
 from cmk.gui.utils.urls import requested_file_name
 from cmk.gui.wsgi.applications.utils import (
+    AbstractWSGIApp,
     ensure_authentication,
     fail_silently,
     handle_unhandled_exception,
     plain_error,
 )
+from cmk.gui.wsgi.type_defs import WSGIResponse
 
-if TYPE_CHECKING:
-    from cmk.gui.wsgi.type_defs import StartResponse, WSGIEnvironment, WSGIResponse
+from cmk import trace
+from cmk.crypto import MKCryptoException
+
+tracer = trace.get_tracer()
 
 # TODO
 #  * derive all exceptions from werkzeug's http exceptions.
@@ -65,52 +62,30 @@ def _noauth(func: pages.PageHandlerFunc) -> Callable[[], Response]:
     # however have to make sure all errors get written out in plaintext, without HTML.
     #
     # Currently these are:
-    #  * noauth:run_cron
     #  * noauth:deploy_agent
-    #  * noauth:ajax_graph_images
     #  * noauth:automation
     #
     @functools.wraps(func)
     def _call_noauth():
         try:
             func()
+        except HTTPRedirect:
+            raise
         except Exception as e:
-            html.write_text(str(e))
+            html.write_text_permissive(str(e))
             if active_config.debug:
-                html.write_text(traceback.format_exc())
+                html.write_text_permissive(traceback.format_exc())
 
         return response
 
     return _call_noauth
 
 
-def get_and_wrap_page(script_name: str) -> Callable[[], Response]:
-    """Get the page handler and wrap authentication logic when needed.
-
-    For all "noauth" page handlers the wrapping part is skipped. In the `ensure_authentication`
-    wrapper everything needed to make a logged-in request is listed.
-    """
-    _handler = pages.get_page_handler(script_name)
-    if _handler is None:
-        # Some pages do skip authentication. This is done by adding
-        # noauth: to the page handler, e.g. "noauth:run_cron" : ...
-        # TODO: Eliminate those "noauth:" pages. Eventually replace it by call using
-        #       the now existing default automation user.
-        _handler = pages.get_page_handler("noauth:" + script_name)
-        if _handler is not None:
-            return _noauth(_handler)
-
-    if _handler is None:
-        return _page_not_found
-
-    return ensure_authentication(_handler)
-
-
 def _page_not_found() -> Response:
     # TODO: This is a page handler. It should not be located in generic application
     # object. Move it to another place
     if request.has_var("_plain_error"):
-        html.write_text(_("Page not found"))
+        html.write_text_permissive(_("Page not found"))
     else:
         title = _("Page not found")
         make_header(
@@ -132,6 +107,7 @@ def _page_not_found() -> Response:
         html.show_error(_("This page was not found. Sorry."))
     html.footer()
 
+    response.status_code = http_client.NOT_FOUND
     return response
 
 
@@ -139,32 +115,23 @@ def _render_exception(e: Exception, title: str) -> Response:
     if plain_error():
         return Response(
             response=[
-                "%s%s\n" % (("%s: " % title) if title else "", e),
+                "{}{}\n".format(("%s: " % title) if title else "", e),
             ],
             mimetype="text/plain",
         )
 
     if not fail_silently():
         make_header(html, title, Breadcrumb())
+        html.open_ts_container(
+            container="div",
+            function_name="insert_before",
+            arguments={"targetElementId": "main_page_content"},
+        )
         html.show_error(str(e))
+        html.close_div()
         html.footer()
 
     return response
-
-
-def default_response_headers(req: http.Request) -> Dict[str, str]:
-    headers = {
-        # Disable caching for all our pages as they are mostly dynamically generated,
-        # user related and are required to be up-to-date on every refresh
-        "Cache-Control": "no-cache",
-    }
-
-    # Would be better to put this to page individual code, but we currently have
-    # no mechanism for a page to set do this before the authentication is made.
-    if requested_file_name(req) == "webapi":
-        headers["Access-Control-Allow-Origin"] = "*"
-
-    return headers
 
 
 _OUTPUT_FORMAT_MIME_TYPES = {
@@ -192,83 +159,63 @@ def get_mime_type_from_output_format(output_format: str) -> str:
     return _OUTPUT_FORMAT_MIME_TYPES[output_format]
 
 
-class CheckmkApp:
-    """The Check_MK GUI WSGI entry point"""
+class CheckmkApp(AbstractWSGIApp):
+    """The Checkmk GUI WSGI entry point"""
 
-    def __init__(self, debug=False) -> None:  # type:ignore[no-untyped-def]
-        self.debug = debug
+    def __init__(self, debug: bool = False, testing: bool = False) -> None:
+        super().__init__(debug)
+        self.testing = testing
 
-    def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
-        req = http.Request(environ)
-
-        output_format = get_output_format(
-            req.get_ascii_input_mandatory("output_format", "html").lower()
-        )
-        mime_type = get_mime_type_from_output_format(output_format)
-
-        resp = Response(headers=default_response_headers(req), mimetype=mime_type)
-        funnel = OutputFunnel(resp)
-
-        timeout_manager = TimeoutManager()
-        timeout_manager.enable_timeout(req.request_timeout)
-
-        theme = Theme()
-        config_obj = config_module.make_config_object(config_module.get_default_config())
-
-        with AppContext(self, stack=app_stack()), RequestContext(
-            req=req,
-            resp=resp,
-            funnel=funnel,
-            config_obj=config_obj,
-            user=LoggedInNobody(),
-            html_obj=HTMLGenerator(req, funnel, output_format, is_mobile(req, resp)),
-            timeout_manager=timeout_manager,
-            display_options=DisplayOptions(),
-            theme=theme,
-            stack=request_stack(),
-            url_filter=PrependURLFilter(),
-        ), patch_json(json):
-            config_module.initialize()
-            theme.from_config(active_config.ui_theme)
-            return self.wsgi_app(environ, start_response)
-
+    @tracer.instrument("CheckmkApp.wsgi_app")
     def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
         """Is called by the WSGI server to serve the current page"""
-        with cmk.utils.store.cleanup_locks(), sites.cleanup_connections():
-            return _process_request(environ, start_response, debug=self.debug)
+        with cmk.ccc.store.cleanup_locks(), sites.cleanup_connections():
+            return _process_request(environ, start_response, debug=self.debug, testing=self.testing)
 
 
 def _process_request(
     environ: WSGIEnvironment,
     start_response: StartResponse,
     debug: bool = False,
-) -> WSGIResponse:  # pylint: disable=too-many-branches
+    testing: bool = False,
+) -> WSGIResponse:
     resp: Response
     try:
-        page_handler = get_and_wrap_page(requested_file_name(request))
-        resp = page_handler()
-    except HTTPRedirect as e:
-        # This can't be a new Response as it can have already cookies set/deleted by the pages.
-        # We can't return the response because the Exception has been raised instead.
-        # TODO: Remove all HTTPRedirect exceptions from all pages. Making the Exception a subclass
-        #       of Response may also work as it can then be directly returned from here.
-        resp = response
-        resp.status_code = e.status
-        resp.headers["Location"] = e.url
+        file_name = requested_file_name(request, on_error="raise")
 
-    except FinalizeRequest as e:
+        if file_name is None:
+            page_handler = _page_not_found
+        elif _handler := pages.get_page_handler(file_name):
+            page_handler = ensure_authentication(_handler)
+        elif _handler := pages.get_page_handler(f"noauth:{file_name}"):
+            page_handler = _noauth(_handler)
+        else:
+            page_handler = _page_not_found
+
+        resp = page_handler()
+
+    except MKNotFound:
+        resp = _page_not_found()
+
+    except HTTPRedirect as exc:
+        return flask.redirect(exc.url)(environ, start_response)
+
+    except FinalizeRequest as exc:
         # TODO: Remove all FinalizeRequest exceptions from all pages and replace it with a `return`.
         #       It may be necessary to rewire the control-flow a bit as this exception could have
         #       been used to short-circuit some code and jump directly to the response. This
         #       needs to be changed as well.
         resp = response
-        resp.status_code = e.status
+        resp.status_code = exc.status
 
     except livestatus.MKLivestatusNotFoundError as e:
         resp = _render_exception(e, title=_("Data not found"))
 
     except MKUserError as e:
         resp = _render_exception(e, title=_("Invalid user input"))
+
+    except MKUnauthenticatedException as e:
+        resp = _render_exception(e, title=_("Not authenticated"))
 
     except MKAuthException as e:
         resp = _render_exception(e, title=_("Permission denied"))
@@ -277,21 +224,21 @@ def _process_request(
         resp = _render_exception(e, title=_("Livestatus problem"))
         resp.status_code = http_client.BAD_GATEWAY
 
-    except MKUnauthenticatedException as e:
-        resp = _render_exception(e, title=_("Not authenticated"))
-        resp.status_code = http_client.UNAUTHORIZED
-
     except MKConfigError as e:
         resp = _render_exception(e, title=_("Configuration error"))
         logger.error("MKConfigError: %s", e)
 
-    except (MKGeneralException, cmk.utils.store.MKConfigLockTimeout) as e:
+    except (MKException, MKCryptoException) as e:
         resp = _render_exception(e, title=_("General error"))
         logger.error("%s: %s", e.__class__.__name__, e)
 
-    except Exception:
-        resp = handle_unhandled_exception()
-        if debug:
-            raise
+    except RequestEntityTooLarge as e:
+        resp = _render_exception(e, title=_("Request too large"))
 
+    except Exception:
+        if debug or testing:
+            raise
+        resp = handle_unhandled_exception()
+
+    resp.set_caching_headers()
     return resp(environ, start_response)

@@ -13,7 +13,6 @@ OS_PACKAGES    += dnsutils
 OS_PACKAGES    += graphviz
 OS_PACKAGES    += apache2
 OS_PACKAGES    += apache2-utils # contains htpasswd2
-OS_PACKAGES    += libdbi1
 OS_PACKAGES    += libevent-2.1-7
 OS_PACKAGES    += libltdl7
 OS_PACKAGES    += libnl-3-200
@@ -22,6 +21,7 @@ OS_PACKAGES    += libperl5.34
 OS_PACKAGES    += libreadline8
 OS_PACKAGES    += libuuid1
 OS_PACKAGES    += libxml2
+OS_PACKAGES    += logrotate
 OS_PACKAGES    += php-cli
 OS_PACKAGES    += php-cgi
 OS_PACKAGES    += php-gd
@@ -34,6 +34,8 @@ OS_PACKAGES    += rpcbind # otherwise missing path in util.pm
 OS_PACKAGES    += unzip
 OS_PACKAGES    += xinetd
 OS_PACKAGES    += freeradius-utils
+OS_PACKAGES    += bc # Needed by some third-party check plugins
+OS_PACKAGES    += file # Needed by some third-party check plugins
 #
 # Checkmk build specific packages below
 #

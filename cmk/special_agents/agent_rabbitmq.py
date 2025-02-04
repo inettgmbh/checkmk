@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -10,12 +10,10 @@ import sys
 from typing import NamedTuple
 
 import requests
-import urllib3
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
 import cmk.utils.password_store
 
-urllib3.disable_warnings(urllib3.exceptions.SubjectAltNameWarning)
 cmk.utils.password_store.replace_passwords()
 
 
@@ -128,18 +126,14 @@ def main(argv=None):
 
 
 def _handle_rabbitmq_connection(args, sections):
-    url_base = "%s://%s:%s/api" % (
-        args.proto,
-        args.hostname,
-        args.port,
-    )
+    url_base = f"{args.proto}://{args.hostname}:{args.port}/api"
 
     for section in sections:
         if section.name not in args.sections:
             logging.warning('Ignoring unknown section "%s"', section.name)
             continue
 
-        section_data = _handle_request("%s/%s" % (url_base, section.uri), args)
+        section_data = _handle_request(f"{url_base}/{section.uri}", args)
         _handle_output(section.name, section_data)
 
 
@@ -156,7 +150,7 @@ def _handle_output(section, section_data):
 
 
 def _handle_request(url, args):
-    response = requests.get(
+    response = requests.get(  # nosec B113 # BNS:0b0eac
         url,
         auth=(args.user, args.password),
     )

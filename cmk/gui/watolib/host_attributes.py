@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
 """A host attribute is something that is inherited from folders to
 hosts. Examples are the IP address and the host tags."""
 
@@ -10,27 +11,171 @@ from __future__ import annotations
 import abc
 import functools
 import re
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Type, Union
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Literal, NotRequired, TypedDict
 
 from marshmallow import fields
 
-import cmk.utils.plugin_registry
-from cmk.utils.tags import TagGroup
-from cmk.utils.type_defs import HostName, TaggroupIDToTagID, TagID
+from livestatus import SiteId
 
-from cmk.gui.config import active_config
-from cmk.gui.exceptions import MKGeneralException, MKUserError
+import cmk.ccc.plugin_registry
+from cmk.ccc.exceptions import MKGeneralException
+
+from cmk.utils.hostaddress import HostAddress, HostName
+from cmk.utils.labels import Labels
+from cmk.utils.tags import TagGroup, TagGroupID, TagID
+from cmk.utils.translations import TranslationOptionsSpec
+from cmk.utils.user import UserId
+
+from cmk.snmplib import SNMPCredentials  # pylint: disable=cmk-module-layer-violation
+
+from cmk.gui.config import active_config, Config
+from cmk.gui.exceptions import MKUserError
+from cmk.gui.form_specs.converter import TransformDataForLegacyFormatOrRecomposeFunction
+from cmk.gui.form_specs.private import SingleChoiceElementExtended, SingleChoiceExtended
 from cmk.gui.htmllib.html import html
 from cmk.gui.http import request
 from cmk.gui.i18n import _, _u
-from cmk.gui.site_config import allsites
-from cmk.gui.type_defs import Choices
-from cmk.gui.utils import escaping
+from cmk.gui.type_defs import Choices, CustomHostAttrSpec
 from cmk.gui.utils.html import HTML
 from cmk.gui.valuespec import Checkbox, DropdownChoice, TextInput, Transform, ValueSpec
 from cmk.gui.watolib.utils import host_attribute_matches
 
-HostAttributeSpec = Dict[str, Any]
+from cmk.fields import String
+from cmk.rulesets.v1 import Label, Title
+from cmk.rulesets.v1.form_specs import BooleanChoice, DefaultValue, FormSpec
+
+_ContactgroupName = str
+
+
+def register(host_attribute_topic_registry_: HostAttributeTopicRegistry) -> None:
+    host_attribute_topic_registry_.register(HostAttributeTopicBasicSettings)
+    host_attribute_topic_registry_.register(HostAttributeTopicAddress)
+    host_attribute_topic_registry_.register(HostAttributeTopicDataSources)
+    host_attribute_topic_registry_.register(HostAttributeTopicHostTags)
+    host_attribute_topic_registry_.register(HostAttributeTopicNetworkScan)
+    host_attribute_topic_registry_.register(HostAttributeTopicManagementBoard)
+    host_attribute_topic_registry_.register(HostAttributeTopicCustomAttributes)
+    host_attribute_topic_registry_.register(HostAttributeTopicMetaData)
+
+
+# Keep in sync with cmk.fetchers._ipmi.IPMICredentials
+# C&P to avoid the dependency which pulls in pyghmi
+class IPMICredentials(TypedDict, total=False):
+    username: str
+    password: str
+
+
+class HostContactGroupSpec(TypedDict):
+    groups: list[_ContactgroupName]
+    recurse_perms: bool
+    use: bool
+    use_for_services: bool
+    recurse_use: bool
+
+
+IPRange = (
+    tuple[Literal["ip_range"], tuple[str, str]]
+    | tuple[Literal["ip_network"], tuple[str, int]]
+    | tuple[Literal["ip_list"], Sequence[HostAddress]]
+)
+
+ExcludeIPRange = IPRange | tuple[Literal["ip_regex_list"], Sequence[str]]
+
+
+class NetworkScanSpec(TypedDict):
+    ip_ranges: list[IPRange]
+    exclude_ranges: list[ExcludeIPRange]
+    scan_interval: int
+    time_allowed: Sequence[tuple[tuple[int, int], tuple[int, int]]]
+    set_ipaddress: bool
+    tag_criticality: NotRequired[str]
+    max_parallel_pings: NotRequired[int]
+    run_as: UserId
+    translate_names: NotRequired[TranslationOptionsSpec]
+
+
+class NetworkScanResult(TypedDict):
+    start: float | None
+    end: float | Literal[True] | None
+    state: bool | None
+    output: str
+
+
+class MetaData(TypedDict):
+    # All the NotRequired should be investigated and cleaned up via cmk-update-config
+    created_at: NotRequired[float]
+    created_by: NotRequired[UserId | None]
+    updated_at: NotRequired[float]
+
+
+# Possible improvements for the future:
+# - Might help to differentiate between effective attributes and non effective attributes, since
+#   in effective attributes many more attributes are mandatory
+# - Some attributes are actually folder specific (see ABCHostAttribute.show_in_folder)
+# - How to represent the tag group attributes?
+#   -> Built-in tags can be defined here while custom(izable) tag groups can not
+# - How to represent custom host attributes?
+#   -> The values are always of type str, but can have arbritary keys
+class HostAttributes(TypedDict, total=False):
+    """All built-in host attributes to
+
+    Host attributes are set on folders (mostly for inheritance to folders) and on hosts
+    directly.
+    """
+
+    alias: str
+    ipaddress: HostAddress
+    ipv6address: HostAddress
+    additional_ipv4addresses: Sequence[HostAddress]
+    additional_ipv6addresses: Sequence[HostAddress]
+    snmp_community: SNMPCredentials
+    parents: Sequence[HostName]
+    network_scan: NetworkScanSpec
+    network_scan_result: NetworkScanResult
+    management_address: HostAddress
+    management_protocol: Literal["snmp", "ipmi"] | None
+    management_snmp_community: SNMPCredentials
+    management_ipmi_credentials: IPMICredentials
+    site: SiteId
+    # This is a list of 3 elements. tuple[SiteId, str, str] would be better.
+    locked_by: Sequence[str]
+    locked_attributes: Sequence[str]
+    meta_data: MetaData
+    inventory_failed: bool
+    waiting_for_discovery: bool
+    labels: Labels
+    contactgroups: HostContactGroupSpec
+    # Enterprise editions only
+    bake_agent_package: bool
+    # Enterprise editions only
+    cmk_agent_connection: Literal["push-agent", "pull-agent"]
+    # Built-in tag groups
+    tag_agent: Literal["cmk-agent", "all-agents", "special-agents", "no-agent"]
+    tag_piggyback: Literal["auto-piggyback", "piggyback", "no-piggyback"]
+    tag_snmp_ds: Literal["no-snmp", "snmp-v2", "snmp-v1"]
+    tag_address_family: Literal["ip-v4-only", "ip-v6-only", "ip-v4v6", "no-ip"]
+    # Shipped tag attributes, but could be changed or even removed by users.
+    # So we don't define the shipped literals here
+    tag_criticality: str
+
+
+def mask_attributes(attributes: Mapping[str, object]) -> dict[str, object]:
+    """Create a copy of the given attributes and mask credential data"""
+
+    MASK_STRING = "******"
+
+    masked = dict(attributes)
+    if "snmp_community" in masked:
+        masked["snmp_community"] = MASK_STRING
+    if "management_snmp_community" in masked:
+        masked["management_snmp_community"] = MASK_STRING
+    if ipmi := masked.get("management_ipmi_credentials"):
+        username = ipmi.get("username", None) if isinstance(ipmi, dict) else None
+        masked["management_ipmi_credentials"] = IPMICredentials(
+            username=username or "(Unknown)", password=MASK_STRING
+        )
+    return masked
 
 
 class HostAttributeTopic(abc.ABC):
@@ -53,11 +198,11 @@ class HostAttributeTopic(abc.ABC):
         raise NotImplementedError()
 
 
-class HostAttributeTopicRegistry(cmk.utils.plugin_registry.Registry[Type[HostAttributeTopic]]):
-    def plugin_name(self, instance: Type[HostAttributeTopic]):  # type:ignore[no-untyped-def]
+class HostAttributeTopicRegistry(cmk.ccc.plugin_registry.Registry[type[HostAttributeTopic]]):
+    def plugin_name(self, instance: type[HostAttributeTopic]) -> str:
         return instance().ident
 
-    def get_choices(self):
+    def get_choices(self) -> Choices:
         return [
             (t.ident, t.title)
             for t in sorted([t_class() for t_class in self.values()], key=lambda e: e.sort_index)
@@ -68,7 +213,6 @@ host_attribute_topic_registry = HostAttributeTopicRegistry()
 
 
 # TODO: Move these plugins?
-@host_attribute_topic_registry.register
 class HostAttributeTopicBasicSettings(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -83,7 +227,6 @@ class HostAttributeTopicBasicSettings(HostAttributeTopic):
         return 0
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicAddress(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -98,7 +241,6 @@ class HostAttributeTopicAddress(HostAttributeTopic):
         return 10
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicDataSources(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -113,7 +255,6 @@ class HostAttributeTopicDataSources(HostAttributeTopic):
         return 20
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicHostTags(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -128,7 +269,6 @@ class HostAttributeTopicHostTags(HostAttributeTopic):
         return 30
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicNetworkScan(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -136,14 +276,13 @@ class HostAttributeTopicNetworkScan(HostAttributeTopic):
 
     @property
     def title(self) -> str:
-        return _("Network Scan")
+        return _("Network scan")
 
     @property
     def sort_index(self) -> int:
         return 40
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicManagementBoard(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -158,7 +297,6 @@ class HostAttributeTopicManagementBoard(HostAttributeTopic):
         return 50
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicCustomAttributes(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -173,7 +311,6 @@ class HostAttributeTopicCustomAttributes(HostAttributeTopic):
         return 35
 
 
-@host_attribute_topic_registry.register
 class HostAttributeTopicMetaData(HostAttributeTopic):
     @property
     def ident(self) -> str:
@@ -206,7 +343,7 @@ class ABCHostAttribute(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def topic(self) -> Type[HostAttributeTopic]:
+    def topic(self) -> type[HostAttributeTopic]:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -222,7 +359,7 @@ class ABCHostAttribute(abc.ABC):
         """Create value from HTML variables."""
         raise NotImplementedError()
 
-    def nagios_name(self) -> Optional[str]:
+    def nagios_name(self) -> str | None:
         """Return the name of the Nagios configuration variable
         if this is a Nagios-bound attribute (e.g. "alias" or "_SERIAL")"""
         return None
@@ -233,11 +370,11 @@ class ABCHostAttribute(abc.ABC):
         Instead, an exclicit_host_config entry will be generated, e.g.
         explicit_host_config["alias"][hostname] = value
 
-        Used in: hosts_and_folders:CREFolder:_save_hosts_file
+        Used in: hosts_and_folders:Folder:_save_hosts_file
         """
         return False
 
-    def help(self) -> Union[str, HTML, None]:
+    def help(self) -> str | HTML | None:
         """Return an optional help text"""
         return None
 
@@ -245,7 +382,7 @@ class ABCHostAttribute(abc.ABC):
         """Return the default value for new hosts"""
         return None
 
-    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
+    def paint(self, value: Any, hostname: HostName) -> tuple[str, str | HTML]:
         """Render HTML code displaying a value"""
         return "", str(value)
 
@@ -307,13 +444,13 @@ class ABCHostAttribute(abc.ABC):
         _depends_on_roles is set by declare_host_attribute()."""
         return True
 
-    def depends_on_roles(self) -> List[str]:
+    def depends_on_roles(self) -> list[str]:
         """Return information about the user roles we depend on.
         The method is usually not overridden, but the variable
         _depends_on_roles is set by declare_host_attribute()."""
         return []
 
-    def depends_on_tags(self) -> List[str]:
+    def depends_on_tags(self) -> list[str]:
         """Return information about the host tags we depend on.
         The method is usually not overridden, but the variable
         _depends_on_tags is set by declare_host_attribute()."""
@@ -330,11 +467,10 @@ class ABCHostAttribute(abc.ABC):
         """Check whether this attribute needs to be validated at all
         Attributes might be permanently hidden (show_in_form = False)
         or dynamically hidden by the depends_on_tags, editable features"""
-        if not self.is_visible(for_what, new):
-            return False
-        if not html:
-            return True
-        return request.var("attr_display_%s" % self.name(), "1") == "1"
+        return (
+            self.is_visible(for_what, new)
+            and request.var("attr_display_%s" % self.name(), "1") == "1"
+        )
 
     def is_visible(self, for_what: str, new: bool) -> bool:
         """Gets the type of current view as argument and returns whether or not
@@ -360,7 +496,7 @@ class ABCHostAttribute(abc.ABC):
         """Check if the value entered by the user is valid.
         This method may raise MKUserError in case of invalid user input."""
 
-    def to_nagios(self, value: Any) -> Optional[str]:
+    def to_nagios(self, value: Any) -> str | None:
         """If this attribute should be present in Nagios as a host custom
         macro, then the value of that macro should be returned here - otherwise None"""
         return None
@@ -370,7 +506,7 @@ class ABCHostAttribute(abc.ABC):
         that are represented by the current HTML variables."""
         return crit == value
 
-    def get_tag_groups(self, value: Any) -> TaggroupIDToTagID:
+    def get_tag_groups(self, value: Any) -> Mapping[TagGroupID, TagID]:
         """Each attribute may set multiple tag groups for a host
         This is used for calculating the effective host tags when writing the hosts{.mk|.cfg}"""
         return {}
@@ -393,13 +529,13 @@ class ABCHostAttribute(abc.ABC):
         raise NotImplementedError()
 
 
-class HostAttributeRegistry(cmk.utils.plugin_registry.Registry[Type[ABCHostAttribute]]):
+class HostAttributeRegistry(cmk.ccc.plugin_registry.Registry[type[ABCHostAttribute]]):
     _index = 0
 
-    def plugin_name(self, instance: Type[ABCHostAttribute]) -> str:
+    def plugin_name(self, instance: type[ABCHostAttribute]) -> str:
         return instance().name()
 
-    def registration_hook(self, instance: Type[ABCHostAttribute]) -> None:
+    def registration_hook(self, instance: type[ABCHostAttribute]) -> None:
         """Add missing sort indizes
 
         Internally defined attributes have a defined sort index. Attributes defined by the users
@@ -415,26 +551,27 @@ class HostAttributeRegistry(cmk.utils.plugin_registry.Registry[Type[ABCHostAttri
         else:
             self.__class__._index = max(instance.sort_index(), self.__class__._index)
 
-    def attributes(self) -> List[ABCHostAttribute]:
-        return [cls() for cls in self.values()]
-
-    def get_sorted_host_attributes(self) -> List[ABCHostAttribute]:
-        """Return host attribute objects in the order they should be displayed (in edit dialogs)"""
-        return sorted(self.attributes(), key=lambda a: (a.sort_index(), a.topic()().title))
-
-    def get_choices(self) -> Choices:
-        return [(a.name(), a.title()) for a in self.get_sorted_host_attributes()]
-
 
 host_attribute_registry = HostAttributeRegistry()
 
 
-def get_sorted_host_attribute_topics(for_what: str, new: bool) -> List[Tuple[str, str]]:
+def sorted_host_attributes() -> list[ABCHostAttribute]:
+    """Return host attribute objects in the order they should be displayed (in edit dialogs)"""
+    return sorted(
+        all_host_attributes(active_config).values(),
+        key=lambda a: (a.sort_index(), a.topic()().title),
+    )
+
+
+def host_attribute_choices() -> Choices:
+    return [(a.name(), a.title()) for a in sorted_host_attributes()]
+
+
+def get_sorted_host_attribute_topics(for_what: str, new: bool) -> list[tuple[str, str]]:
     """Return a list of needed topics for the given "what".
     Only returns the topics that are used by a visible attribute"""
-    needed_topics: Set[Type[HostAttributeTopic]] = set()
-    for attr_class in host_attribute_registry.values():
-        attr = attr_class()
+    needed_topics: set[type[HostAttributeTopic]] = set()
+    for attr in all_host_attributes(active_config).values():
         if attr.topic() not in needed_topics and attr.is_visible(for_what, new):
             needed_topics.add(attr.topic())
 
@@ -446,9 +583,9 @@ def get_sorted_host_attribute_topics(for_what: str, new: bool) -> List[Tuple[str
     ]
 
 
-def get_sorted_host_attributes_by_topic(  # type:ignore[no-untyped-def]
-    topic_id,
-) -> List[ABCHostAttribute]:
+def get_sorted_host_attributes_by_topic(
+    topic_id: str,
+) -> list[ABCHostAttribute]:
     # Hack to sort the address family host tag attribute above the IPv4/v6 addresses
     # TODO: Clean this up by implementing some sort of explicit sorting
     def sort_host_attributes(a, b):
@@ -458,7 +595,7 @@ def get_sorted_host_attributes_by_topic(  # type:ignore[no-untyped-def]
 
     sorted_attributes = []
     for attr in sorted(
-        host_attribute_registry.get_sorted_host_attributes(),
+        sorted_host_attributes(),
         key=functools.cmp_to_key(sort_host_attributes),
     ):
         if attr.topic() == host_attribute_topic_registry[topic_id]:
@@ -466,30 +603,28 @@ def get_sorted_host_attributes_by_topic(  # type:ignore[no-untyped-def]
     return sorted_attributes
 
 
-# Is used for dynamic host attribute declaration (based on host tags)
-# + Kept for comatibility with pre 1.6 plugins
-def declare_host_attribute(  # type:ignore[no-untyped-def]
-    a: Type[ABCHostAttribute],
+# Kept for comatibility with pre 1.6 plugins
+def declare_host_attribute(
+    a: type[ABCHostAttribute],
     show_in_table: bool = True,
     show_in_folder: bool = True,
     show_in_host_search: bool = True,
-    topic: Optional[Union[str, Type[HostAttributeTopic]]] = None,
-    sort_index: Optional[int] = None,
+    topic: str | type[HostAttributeTopic] | None = None,
+    sort_index: int | None = None,
     show_in_form: bool = True,
-    depends_on_tags: Optional[List[str]] = None,
-    depends_on_roles: Optional[List[str]] = None,
+    depends_on_tags: list[str] | None = None,
+    depends_on_roles: list[str] | None = None,
     editable: bool = True,
     show_inherited_value: bool = True,
-    may_edit: Optional[Callable[[], bool]] = None,
+    may_edit: Callable[[], bool] | None = None,
     from_config: bool = False,
-):
-
+) -> None:
     if not issubclass(a, ABCHostAttribute):
         raise MKGeneralException(
-            _("Failed to load legacy host attribute from local plugins: %r") % a
+            _("Failed to load legacy host attribute from local plug-ins: %r") % a
         )
 
-    attrs: Dict[str, Any] = {}
+    attrs: dict[str, Any] = {}
     if depends_on_tags is not None:
         attrs["_depends_on_tags"] = depends_on_tags
         attrs["depends_on_tags"] = lambda self: self._depends_on_tags
@@ -534,7 +669,7 @@ def declare_host_attribute(  # type:ignore[no-untyped-def]
         }
     )
 
-    attrs["openapi_field"] = lambda self: fields.String(description=self.help())
+    attrs["openapi_field"] = lambda self: String(description=self.help())
 
     # Apply the left over missing attributes that we get from the function arguments
     # by creating the final concrete class of this attribute
@@ -543,8 +678,8 @@ def declare_host_attribute(  # type:ignore[no-untyped-def]
 
 
 def _declare_host_attribute_topic(
-    ident: Optional[str], topic_title: Optional[str]
-) -> Type[HostAttributeTopic]:
+    ident: str | None, topic_title: str | None
+) -> type[HostAttributeTopic]:
     """We get the "topic title" here. Create a topic class dynamically and
     returns a reference to this class"""
     if ident is None:
@@ -568,50 +703,55 @@ def _declare_host_attribute_topic(
     return topic_class
 
 
-def undeclare_host_attribute(attrname: str) -> None:
-    if attrname in host_attribute_registry:
-        host_attribute_registry.unregister(attrname)
-
-
-def undeclare_host_tag_attribute(tag_id: str) -> None:
-    attrname = "tag_" + tag_id
-    undeclare_host_attribute(attrname)
-
-
-def _clear_config_based_host_attributes() -> None:
-    for attr in host_attribute_registry.attributes():
-        if attr.from_config():
-            undeclare_host_attribute(attr.name())
-
-
-def _declare_host_tag_attributes() -> None:
-    for topic_spec, tag_groups in active_config.tags.get_tag_groups_by_topic():
+def config_based_tag_group_attributes(
+    tag_groups_by_topic: Sequence[tuple[str, Sequence[TagGroup]]],
+) -> dict[str, ABCHostAttribute]:
+    attributes: dict[str, ABCHostAttribute] = {}
+    for topic_spec, tag_groups in tag_groups_by_topic:
         for tag_group in tag_groups:
-            # Try to translate the title to a builtin topic ID. In case this is not possible mangle the given
+            # Try to translate the title to a built-in topic ID. In case this is not possible mangle the given
             # custom topic to an internal ID and create the topic on demand.
             # TODO: We need to adapt the tag data structure to contain topic IDs
-            topic_id = _transform_attribute_topic_title_to_id(topic_spec)
+            topic_id = transform_attribute_topic_title_to_id(topic_spec)
 
             # Build an internal ID from the given topic
             if topic_id is None:
                 topic_id = str(re.sub(r"[^A-Za-z0-9_]+", "_", topic_spec)).lower()
 
-            if topic_id not in host_attribute_topic_registry:
-                topic = _declare_host_attribute_topic(topic_id, topic_spec)
-            else:
-                topic = host_attribute_topic_registry[topic_id]
+            attribute = type(
+                "HostAttributeTag%s" % str(tag_group.id).title(),
+                (
+                    ABCHostAttributeHostTagCheckbox
+                    if tag_group.is_checkbox_tag_group
+                    else ABCHostAttributeHostTagList,
+                ),
+                {
+                    "_tag_group": tag_group,
+                    "help": lambda _: tag_group.help,
+                    "_topic": _declare_host_attribute_topic(topic_id, topic_spec)
+                    if topic_id not in host_attribute_topic_registry
+                    else host_attribute_topic_registry[topic_id],
+                    "topic": lambda self: self._topic,
+                    "show_in_table": lambda self: False,
+                    "show_in_folder": lambda self: True,
+                    "from_config": lambda self: True,
+                    "openapi_field": lambda self: String(description=self.help()),
+                }
+                | (
+                    {
+                        "_sort_index": sort_index,
+                        "sort_index": classmethod(lambda c: c._sort_index),
+                    }
+                    if (sort_index := _tag_attribute_sort_index(tag_group))
+                    else {}
+                ),
+            )()
 
-            declare_host_attribute(
-                _create_tag_group_attribute(tag_group),
-                show_in_table=False,
-                show_in_folder=True,
-                topic=topic,
-                sort_index=_tag_attribute_sort_index(tag_group),
-                from_config=True,
-            )
+            attributes[attribute.name()] = attribute
+    return attributes
 
 
-def _tag_attribute_sort_index(tag_group: TagGroup) -> Optional[int]:
+def _tag_attribute_sort_index(tag_group: TagGroup) -> int | None:
     """Return the host attribute sort index of tag group attributes
 
     The sort index is not configurable for tag groups, but we want some
@@ -624,98 +764,47 @@ def _tag_attribute_sort_index(tag_group: TagGroup) -> Optional[int]:
     return None
 
 
-def _create_tag_group_attribute(tag_group: TagGroup) -> Type[ABCHostAttributeTag]:
-    if tag_group.is_checkbox_tag_group:
-        base_class: Type = ABCHostAttributeHostTagCheckbox
-    else:
-        base_class = ABCHostAttributeHostTagList
+def config_based_custom_host_attribute_sync_plugins(
+    host_attributes: Sequence[CustomHostAttrSpec],
+) -> dict[str, ABCHostAttribute]:
+    attributes: dict[str, ABCHostAttribute] = {}
+    for attr in host_attributes:
+        vs = TextInput(
+            title=attr["title"],
+            help=attr["help"],
+        )
 
-    return type(
-        "HostAttributeTag%s" % str(tag_group.id).title(),
-        (base_class,),
-        {
-            "_tag_group": tag_group,
-            "help": lambda _: tag_group.help,
-        },
-    )
-
-
-def declare_custom_host_attrs() -> None:
-    for attr in transform_pre_16_host_topics(active_config.wato_host_attrs):
-        if attr["type"] == "TextAscii":
-            # Hack: The API does not perform validate_datatype and we can currently not enable
-            # this as fix in 1.6 (see cmk/gui/plugins/webapi/utils.py::ABCHostAttributeValueSpec.validate_input()).
-            # As a local workaround we use a custom validate function here to ensure we only get ascii characters
-            vs = TextInput(
-                title=attr["title"],
-                help=attr["help"],
-                validate=_validate_is_ascii,
-            )
-        else:
-            raise NotImplementedError()
-
-        a: Type[ABCHostAttributeValueSpec]
+        a: type[ABCHostAttributeValueSpec]
         if attr["add_custom_macro"]:
             a = NagiosValueSpecAttribute(attr["name"], "_" + attr["name"], vs)
         else:
             a = ValueSpecAttribute(attr["name"], vs)
 
-        # Previous to 1.6 the topic was a the "topic title". Since 1.6
-        # it's the internal ID of the topic. Because referenced topics may
-        # have been removed, be compatible and dynamically create a topic
-        # in case one is missing.
-        topic_class = _declare_host_attribute_topic(attr["topic"], attr["topic"].title())
-
-        declare_host_attribute(
-            a,
-            show_in_table=attr["show_in_table"],
-            topic=topic_class,
-            from_config=True,
+        final_class = type(
+            "%sCustomHostAttr" % a.__name__,
+            (a,),
+            {
+                "from_config": lambda self: True,
+                "openapi_field": lambda self: String(description=self.help()),
+                # Previous to 1.6 the topic was a the "topic title". Since 1.6
+                # it's the internal ID of the topic. Because referenced topics may
+                # have been removed, be compatible and dynamically create a topic
+                # in case one is missing.
+                "_topic": _declare_host_attribute_topic(attr["topic"], attr["topic"].title()),
+                "topic": lambda self: self._topic,
+            },
         )
+        attributes[attr["name"]] = final_class()
+    return attributes
 
 
-def _validate_is_ascii(value: str, varprefix: str) -> None:
-    if isinstance(value, str):
-        try:
-            value.encode("ascii")
-        except UnicodeEncodeError:
-            raise MKUserError(varprefix, _("Non-ASCII characters are not allowed here."))
-    elif isinstance(value, bytes):
-        try:
-            value.decode("ascii")
-        except UnicodeDecodeError:
-            raise MKUserError(varprefix, _("Non-ASCII characters are not allowed here."))
-
-
-def transform_pre_16_host_topics(custom_attributes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Previous to 1.6 the titles of the host attribute topics were stored.
-
-    This lead to issues with localized topics. We now have internal IDs for
-    all the topics and try to convert the values here to the new format.
-
-    We translate the titles which have been distributed with Check_MK to their
-    internal topic ID. No action should be needed. Custom topics or topics of
-    other languages are not translated. The attributes are put into the
-    "Custom attributes" topic once. Users will have to re-configure the topic,
-    sorry :-/."""
-    for custom_attr in custom_attributes:
-        if custom_attr["topic"] in host_attribute_topic_registry:
-            continue
-
-        custom_attr["topic"] = (
-            _transform_attribute_topic_title_to_id(custom_attr["topic"]) or "custom_attributes"
-        )
-
-    return custom_attributes
-
-
-def _transform_attribute_topic_title_to_id(topic_title: str) -> Optional[str]:
+def transform_attribute_topic_title_to_id(topic_title: str) -> str | None:
     _topic_title_to_id_map = {
         "Basic settings": "basic",
         "Address": "address",
         "Monitoring agents": "monitoring_agents",
         "Management board": "management_board",
-        "Network Scan": "network_scan",
+        "Network scan": "network_scan",
         "Custom attributes": "custom_attributes",
         "Host tags": "custom_attributes",
         "Tags": "custom_attributes",
@@ -735,18 +824,26 @@ def _transform_attribute_topic_title_to_id(topic_title: str) -> Optional[str]:
         return None
 
 
+def all_host_attributes(config: Config) -> dict[str, ABCHostAttribute]:
+    return (
+        {ident: cls() for ident, cls in host_attribute_registry.items()}
+        | config_based_tag_group_attributes(config.tags.get_tag_groups_by_topic())
+        | config_based_custom_host_attribute_sync_plugins(config.wato_host_attrs)
+    )
+
+
 def host_attribute(name: str) -> ABCHostAttribute:
-    return host_attribute_registry[name]()
+    return all_host_attributes(active_config)[name]
 
 
 # This is the counterpart of "configure_attributes". Another place which
 # is related to these HTTP variables and so on is SearchFolder.
 def collect_attributes(
     for_what: str, new: bool, do_validate: bool = True, varprefix: str = ""
-) -> HostAttributeSpec:
+) -> HostAttributes:
     """Read attributes from HTML variables"""
-    host = {}
-    for attr in host_attribute_registry.attributes():
+    host = HostAttributes()
+    for attr in all_host_attributes(active_config).values():
         attrname = attr.name()
         if not request.var(for_what + "_change_%s" % attrname, ""):
             continue
@@ -756,7 +853,8 @@ def collect_attributes(
         if do_validate and attr.needs_validation(for_what, new):
             attr.validate_input(value, varprefix)
 
-        host[attrname] = value
+        # Mypy can not help here with the dynamic key
+        host[attrname] = value  # type: ignore[literal-required]
     return host
 
 
@@ -771,23 +869,23 @@ class ABCHostAttributeText(ABCHostAttribute, abc.ABC):
     def _size(self) -> int:
         return 25
 
-    def paint(self, value: str, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
+    def paint(self, value: str, hostname: HostName) -> tuple[str, str | HTML]:
         if not value:
             return "", ""
         return "", value
 
-    def render_input(self, varprefix: str, value: Optional[str]) -> None:
+    def render_input(self, varprefix: str, value: str | None) -> None:
         if value is None:
             value = ""
         html.text_input(varprefix + "attr_" + self.name(), value, size=self._size)
 
-    def from_html_vars(self, varprefix: str) -> Optional[str]:
+    def from_html_vars(self, varprefix: str) -> str | None:
         value = request.get_str_input(varprefix + "attr_" + self.name())
         if value is None:
             value = ""
         return value.strip()
 
-    def validate_input(self, value: Optional[str], varprefix: str) -> None:
+    def validate_input(self, value: str | None, varprefix: str) -> None:
         if self.is_mandatory() and not value:
             raise MKUserError(
                 varprefix + "attr_" + self.name(), _("Please specify a value for %s") % self.title()
@@ -798,7 +896,7 @@ class ABCHostAttributeText(ABCHostAttribute, abc.ABC):
                 _("%s may be missing, if must not be empty if it is set.") % self.title(),
             )
 
-    def filter_matches(self, crit: str, value: Optional[str], hostname: HostName) -> bool:
+    def filter_matches(self, crit: str, value: str | None, hostname: HostName) -> bool:
         if value is None:  # Host does not have this attribute
             value = ""
 
@@ -815,18 +913,21 @@ class ABCHostAttributeValueSpec(ABCHostAttribute):
     def valuespec(self) -> ValueSpec:
         raise NotImplementedError()
 
+    def form_spec(self) -> FormSpec:
+        raise NotImplementedError()
+
     def title(self) -> str:
         title = self.valuespec().title()
         assert title is not None
         return title
 
-    def help(self) -> Union[str, HTML, None]:
+    def help(self) -> str | HTML | None:
         return self.valuespec().help()
 
     def default_value(self) -> Any:
         return self.valuespec().default_value()
 
-    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
+    def paint(self, value: Any, hostname: HostName) -> tuple[str, str | HTML]:
         return "", self.valuespec().value_to_html(value)
 
     def render_input(self, varprefix: str, value: Any) -> None:
@@ -836,7 +937,10 @@ class ABCHostAttributeValueSpec(ABCHostAttribute):
         return self.valuespec().from_html_vars(varprefix + self.name())
 
     def validate_input(self, value: Any, varprefix: str) -> None:
-        self.valuespec().validate_value(value, varprefix + self.name())
+        vs = self.valuespec()
+        prefix = varprefix + self.name()
+        vs.validate_datatype(value, prefix)
+        vs.validate_value(value, prefix)
 
 
 class ABCHostAttributeFixedText(ABCHostAttributeText, abc.ABC):
@@ -846,12 +950,12 @@ class ABCHostAttributeFixedText(ABCHostAttributeText, abc.ABC):
     systems (e.g. during an import of a host database from
     another system)."""
 
-    def render_input(self, varprefix: str, value: Optional[str]) -> None:
+    def render_input(self, varprefix: str, value: str | None) -> None:
         if value is not None:
             html.hidden_field(varprefix + "attr_" + self.name(), value)
-            html.write_text(value)
+            html.write_text_permissive(value)
 
-    def from_html_vars(self, varprefix: str) -> Optional[str]:
+    def from_html_vars(self, varprefix: str) -> str | None:
         return request.var(varprefix + "attr_" + self.name())
 
 
@@ -862,7 +966,7 @@ class ABCHostAttributeNagiosText(ABCHostAttributeText):
     def nagios_name(self) -> str:
         raise NotImplementedError()
 
-    def to_nagios(self, value: str) -> Optional[str]:
+    def to_nagios(self, value: str) -> str | None:
         if value:
             return value
         return None
@@ -877,16 +981,16 @@ class ABCHostAttributeEnum(ABCHostAttribute):
 
     @property
     @abc.abstractmethod
-    def _enumlist(self) -> Sequence[Tuple[str, str]]:
+    def _enumlist(self) -> Sequence[tuple[str, str]]:
         raise NotImplementedError()
 
-    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
+    def paint(self, value: Any, hostname: HostName) -> tuple[str, str | HTML]:
         return "", dict(self._enumlist).get(value, self.default_value())
 
     def render_input(self, varprefix: str, value: str) -> None:
         html.dropdown(varprefix + "attr_" + self.name(), self._enumlist, value)
 
-    def from_html_vars(self, varprefix: str) -> Optional[str]:
+    def from_html_vars(self, varprefix: str) -> str | None:
         return request.var(varprefix + "attr_" + self.name(), self.default_value())
 
 
@@ -908,12 +1012,12 @@ class ABCHostAttributeTag(ABCHostAttributeValueSpec, abc.ABC):
     def is_tag_attribute(self) -> bool:
         return True
 
-    def get_tag_groups(self, value: Optional[TagID]) -> TaggroupIDToTagID:
+    def get_tag_groups(self, value: TagID | None) -> Mapping[TagGroupID, TagID]:
         """Return set of tag groups to set (handles secondary tags)"""
         return self._tag_group.get_tag_group_config(value)
 
     def is_show_more(self) -> bool:
-        return self._tag_group.id in ["address_family", "criticality", "networking", "piggyback"]
+        return self._tag_group.id in ["criticality", "networking", "piggyback"]
 
 
 class ABCHostAttributeHostTagList(ABCHostAttributeTag, abc.ABC):
@@ -932,8 +1036,24 @@ class ABCHostAttributeHostTagList(ABCHostAttributeTag, abc.ABC):
                 on_change="cmk.wato.fix_visibility();",
                 encode_value=False,
             ),
-            forth=lambda s: "" if s is None else s,
-            back=lambda s: None if s == "" else s,
+            to_valuespec=lambda s: "" if s is None else s,
+            from_valuespec=lambda s: None if s == "" else s,
+        )
+
+    def form_spec(self) -> SingleChoiceExtended:
+        choices = [(k or "", v) for k, v in self._tag_group.get_tag_choices()]
+        return SingleChoiceExtended(
+            title=Title(  # pylint: disable=localization-of-non-literal-string
+                self._tag_group.title
+            ),
+            elements=[
+                SingleChoiceElementExtended(
+                    name=choice[0],
+                    title=Title(choice[1]),  # pylint: disable=localization-of-non-literal-string
+                )
+                for choice in choices
+            ],
+            prefill=DefaultValue(choices[0][0]),
         )
 
     @property
@@ -948,32 +1068,48 @@ class ABCHostAttributeHostTagList(ABCHostAttributeTag, abc.ABC):
 class ABCHostAttributeHostTagCheckbox(ABCHostAttributeTag, abc.ABC):
     """A checkbox for a host tag group"""
 
-    def valuespec(self) -> Checkbox:
+    def _valuespec(self) -> Checkbox:
         choice = self._tag_group.get_tag_choices()[0]
         return Checkbox(
             title=self._tag_group.title,
             label=_u(choice[1]),
             true_label=self._tag_group.title,
-            false_label="%s %s" % (_("Not"), self._tag_group.title),
+            false_label="{} {}".format(_("Not"), self._tag_group.title),
             onclick="cmk.wato.fix_visibility();",
+        )
+
+    def valuespec(self) -> Transform:
+        return Transform(
+            valuespec=self._valuespec(),
+            to_valuespec=lambda s: s == self._tag_value(),
+            from_valuespec=lambda s: self._tag_value() if s is True else None,
+        )
+
+    def form_spec(self) -> TransformDataForLegacyFormatOrRecomposeFunction:
+        return TransformDataForLegacyFormatOrRecomposeFunction(
+            wrapped_form_spec=BooleanChoice(
+                title=Title(  # pylint: disable=localization-of-non-literal-string
+                    self._tag_group.title
+                ),
+                label=Label(  # pylint: disable=localization-of-non-literal-string
+                    self._tag_group.get_tag_choices()[0][1]
+                ),
+            ),
+            from_disk=lambda s: s == self._tag_value(),
+            to_disk=lambda s: self._tag_value() if s is True else None,
         )
 
     @property
     def is_checkbox_tag(self) -> bool:
         return True
 
-    def render_input(self, varprefix: str, value: Optional[TagID]) -> None:
-        super().render_input(varprefix, bool(value))
+    def render_input(self, varprefix: str, value: TagID | None) -> None:
+        self._valuespec().render_input(varprefix + self.name(), bool(value))
 
-    def from_html_vars(self, varprefix: str) -> Optional[TagID]:
-        if super().from_html_vars(varprefix):
-            return self._tag_value()
-        return None
-
-    def _tag_value(self) -> Optional[TagID]:
+    def _tag_value(self) -> TagID | None:
         return self._tag_group.get_tag_choices()[0][0]
 
-    def get_tag_groups(self, value: Optional[TagID]) -> TaggroupIDToTagID:
+    def get_tag_groups(self, value: TagID | None) -> Mapping[TagGroupID, TagID]:
         if not value:
             return {}
         return super().get_tag_groups(self._tag_value())
@@ -984,7 +1120,7 @@ class ABCHostAttributeNagiosValueSpec(ABCHostAttributeValueSpec):
     def nagios_name(self) -> str:
         raise NotImplementedError()
 
-    def to_nagios(self, value: str) -> Optional[str]:
+    def to_nagios(self, value: str) -> str | None:
         rendered = self.valuespec().value_to_html(value)
         if rendered:
             return str(rendered)
@@ -994,16 +1130,16 @@ class ABCHostAttributeNagiosValueSpec(ABCHostAttributeValueSpec):
         return True
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
+# TODO: Kept for pre 1.6 plug-in compatibility
 def TextAttribute(
     name: str,
     title: str,
-    help_txt: Optional[str] = None,
+    help_txt: str | None = None,
     default_value: str = "",
     mandatory: bool = False,
     allow_empty: bool = True,
     size: int = 25,
-) -> Type[ABCHostAttributeText]:
+) -> type[ABCHostAttributeText]:
     return type(
         "HostAttribute%s" % name.title(),
         (ABCHostAttributeText,),
@@ -1024,17 +1160,17 @@ def TextAttribute(
     )
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
-def NagiosTextAttribute(  # type:ignore[no-untyped-def]
+# TODO: Kept for pre 1.6 plug-in compatibility
+def NagiosTextAttribute(
     name: str,
     nag_name: str,
     title: str,
-    help_txt: Optional[str] = None,
+    help_txt: str | None = None,
     default_value: str = "",
     mandatory: bool = False,
     allow_empty: bool = True,
     size: int = 25,
-):
+) -> type[ABCHostAttributeNagiosText]:
     return type(
         "HostAttribute%s" % name.title(),
         (ABCHostAttributeNagiosText,),
@@ -1057,10 +1193,10 @@ def NagiosTextAttribute(  # type:ignore[no-untyped-def]
     )
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
+# TODO: Kept for pre 1.6 plug-in compatibility
 def FixedTextAttribute(
-    name: str, title: str, help_txt: Optional[str] = None
-) -> Type[ABCHostAttributeFixedText]:
+    name: str, title: str, help_txt: str | None = None
+) -> type[ABCHostAttributeFixedText]:
     return type(
         "HostAttributeFixedText%s" % name.title(),
         (ABCHostAttributeFixedText,),
@@ -1075,8 +1211,8 @@ def FixedTextAttribute(
     )
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
-def ValueSpecAttribute(name: str, vs: ValueSpec) -> Type[ABCHostAttributeValueSpec]:
+# TODO: Kept for pre 1.6 plug-in compatibility
+def ValueSpecAttribute(name: str, vs: ValueSpec) -> type[ABCHostAttributeValueSpec]:
     return type(
         "HostAttributeValueSpec%s" % name.title(),
         (ABCHostAttributeValueSpec,),
@@ -1089,10 +1225,10 @@ def ValueSpecAttribute(name: str, vs: ValueSpec) -> Type[ABCHostAttributeValueSp
     )
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
+# TODO: Kept for pre 1.6 plug-in compatibility
 def NagiosValueSpecAttribute(
     name: str, nag_name: str, vs: ValueSpec
-) -> Type[ABCHostAttributeNagiosValueSpec]:
+) -> type[ABCHostAttributeNagiosValueSpec]:
     return type(
         "NagiosValueSpecAttribute%s" % name.title(),
         (ABCHostAttributeNagiosValueSpec,),
@@ -1107,14 +1243,14 @@ def NagiosValueSpecAttribute(
     )
 
 
-# TODO: Kept for pre 1.6 plugin compatibility
+# TODO: Kept for pre 1.6 plug-in compatibility
 def EnumAttribute(
     name: str,
     title: str,
     help_txt: str,
     default_value: str,
-    enumlist: Sequence[Tuple[str, str]],
-) -> Type[ABCHostAttributeEnum]:
+    enumlist: Sequence[tuple[str, str]],
+) -> type[ABCHostAttributeEnum]:
     return type(
         "HostAttributeEnum%s" % name.title(),
         (ABCHostAttributeEnum,),
@@ -1130,64 +1266,3 @@ def EnumAttribute(
             "_enumlist": enumlist,
         },
     )
-
-
-def _validate_host_tags(host_tags):
-    """Check if the tag group exists and the tag value is valid"""
-    for tag_group_id, tag_id in host_tags.items():
-        for tag_group in active_config.tags.tag_groups:
-            if tag_group.id == tag_group_id:
-                for grouped_tag in tag_group.tags:
-                    if grouped_tag.id == tag_id:
-                        break
-                else:
-                    raise MKUserError(None, _("Unknown tag %s") % escaping.escape_attribute(tag_id))
-                break
-        else:
-            raise MKUserError(
-                None, _("Unknown tag group %s") % escaping.escape_attribute(tag_group_id)
-            )
-
-
-def validate_host_attributes(  # type:ignore[no-untyped-def]
-    attributes, extra_attrs: Sequence[str] = (), new=False
-):
-    # `extra_attrs` is only necessary for the webapi and should be removed later.
-    _validate_general_host_attributes(
-        dict((key, value) for key, value in attributes.items() if not key.startswith("tag_")),
-        extra_attrs,
-        new,
-    )
-    _validate_host_tags(
-        dict((key[4:], value) for key, value in attributes.items() if key.startswith("tag_"))
-    )
-
-
-def _validate_general_host_attributes(  # type:ignore[no-untyped-def]
-    host_attributes, extra_attrs: Sequence[str], new: bool
-):
-    """Check if the given attribute name exists, no type check"""
-    all_host_attribute_names = _retrieve_host_attributes()
-    all_host_attribute_names.extend(extra_attrs)
-    for name, value in host_attributes.items():
-        if name not in all_host_attribute_names:
-            raise MKUserError(None, _("Unknown attribute: %s") % escaping.escape_attribute(name))
-
-        # For real host attributes validate the values
-        try:
-            attr: Optional[ABCHostAttribute] = host_attribute(name)
-        except KeyError:
-            attr = None
-
-        if attr is not None:
-            if attr.needs_validation("host", new):
-                attr.validate_input(value, "")
-
-        # The site attribute gets an extra check
-        if name == "site" and value not in allsites().keys():
-            raise MKUserError(None, _("Unknown site %s") % escaping.escape_attribute(value))
-
-
-def _retrieve_host_attributes() -> List[str]:
-    """Returns list of registered host attribute names"""
-    return list(host_attribute_registry.keys())

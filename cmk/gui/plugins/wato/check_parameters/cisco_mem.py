@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.check_parameters.filesystem_utils import size_trend_elements
@@ -24,7 +23,7 @@ from cmk.gui.valuespec import (
 
 
 def _parameter_valuespec_cisco_mem():
-    elements: List[DictionaryEntry] = [
+    elements: list[DictionaryEntry] = [
         (
             "levels",
             Alternative(
@@ -67,6 +66,6 @@ rulespec_registry.register(
         group=RulespecGroupCheckParametersOperatingSystem,
         item_spec=lambda: TextInput(title=_("Memory Pool Name"), allow_empty=False),
         parameter_valuespec=_parameter_valuespec_cisco_mem,
-        title=lambda: _("Cisco Memory Usage"),
+        title=lambda: _("Cisco memory usage"),
     )
 )

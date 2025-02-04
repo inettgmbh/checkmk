@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -9,13 +9,12 @@
 
 #include <chrono>
 #include <iostream>
-#include <ranges>
 #include <string>
 #include <unordered_map>
 
-#include "cfg.h"
 #include "common/cfg_info.h"
 #include "tools/_raii.h"
+#include "wnx/cfg.h"
 
 using namespace std::string_literals;
 namespace rs = std::ranges;
@@ -33,7 +32,7 @@ bool IsHeaderless(std::string_view name) noexcept { return name == kMsExch; }
 std::string WmiCachedDataHelper(std::string &cache_data,
                                 const std::string &wmi_data, char separator) {
     // for very old servers
-    if (!g_add_wmi_status_column) {
+    if constexpr (!g_add_wmi_status_column) {
         return wmi_data;
     }
 
@@ -70,6 +69,8 @@ struct WmiSource {
     std::vector<std::wstring> service_names;
 };
 
+#if 0
+/// reference
 const std::vector<std::wstring> msexch_service_all_names = {
     L"MSExchangeADTopology",
     L"MSExchangeAntispamUpdate",
@@ -101,7 +102,7 @@ const std::vector<std::wstring> msexch_service_all_names = {
     L"MSExchangeUM",
     L"MSExchangeUMCR",
 };
-
+#endif
 const std::vector<std::wstring> msexch_service_reasonable_names = {
     L"MSExchangeDiagnostics",
     L"MSExchangeHM",
@@ -303,9 +304,9 @@ std::pair<std::string, wtools::WmiStatus> GenerateWmiTable(
 
     const auto object_name = wtools::ToUtf8(wmi_object);
     tools::TimeLog tl(object_name);  // start measure
-    const auto id = [&]() {
-        return fmt::formatv(R"("{}\{}")", wtools::ToUtf8(wmi_namespace),
-                            object_name);
+    const auto id = [&] {
+        return fmt::format(R"("{}\{}")", wtools::ToUtf8(wmi_namespace),
+                           object_name);
     };
 
     wtools::WmiWrapper wrapper;
@@ -324,7 +325,7 @@ std::pair<std::string, wtools::WmiStatus> GenerateWmiTable(
     }
     const auto &[ret, status] =
         wrapper.queryTable(columns_table, wmi_object, separator,
-                           cfg::groups::global.getWmiTimeout());
+                           cfg::groups::g_global.getWmiTimeout());
 
     tl.writeLog(ret.size());
 
@@ -333,7 +334,7 @@ std::pair<std::string, wtools::WmiStatus> GenerateWmiTable(
 
 namespace {
 std::wstring CharToWideString(char ch) {
-    return wtools::ConvertToUTF16(std::string(1, ch));
+    return wtools::ConvertToUtf16(std::string(1, ch));
 }
 
 bool IsAllAbsent(const std::vector<std::wstring> &services) {
@@ -398,7 +399,7 @@ std::string WmiBase::getData() {
 bool WmiBase::isAllowedByCurrentConfig() const {
     const auto name = getUniqName();
 
-    if (!cfg::groups::global.allowedSection(name)) {
+    if (!cfg::groups::g_global.allowedSection(name)) {
         XLOG::t("'{}' is skipped by config", name);
         return false;
     }
@@ -412,7 +413,7 @@ bool WmiBase::isAllowedByCurrentConfig() const {
     // 2. with sub_section, check situation when parent
     // is allowed, but all sub  DISABLED DIRECTLY
     for (const auto &sub : sub_objects_) {
-        if (!cfg::groups::global.isSectionDisabled(sub.getUniqName())) {
+        if (!cfg::groups::g_global.isSectionDisabled(sub.getUniqName())) {
             return true;
         }
     }
@@ -474,4 +475,4 @@ std::string SubSection::generateContent(Mode mode) {
     }
     return {};
 }
-};  // namespace cma::provider
+}  // namespace cma::provider

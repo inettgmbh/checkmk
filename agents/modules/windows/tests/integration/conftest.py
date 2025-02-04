@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,16 +8,15 @@ import shutil
 import tempfile
 from pathlib import Path
 from subprocess import PIPE, Popen
-from typing import List, Optional
 
-import pytest  # type: ignore[import]
+import pytest
 
 
 def pytest_addoption(parser):
     parser.addoption("--expected_version", action="store", default="3.10.4")
 
 
-tested_pythons = ["python-3.4.cab", "python-3.cab"]
+tested_pythons = ["python-3.cab"]
 # I know this is not a best method to reach artifacts, but in Windows not so many options.
 artifact_location = Path("..\\..\\..\\..\\..\\artefacts")
 
@@ -46,9 +44,6 @@ def fixture_regression_data(expected_version):
                 b"include-system-site-packages = false\r\n",
             ]
         ),
-        "python-3.4.cab": b"home = C:\\ProgramData\\checkmk\\agent\\modules\\python-3\r\n"
-        b"version_info = 3.4.4\r\n"
-        b"include-system-site-packages = false\r\n",
     }
 
 
@@ -64,7 +59,7 @@ def fixture_python_subdir():
     shutil.rmtree(tmpdir)
 
 
-def run_proc(command: List[str], *, cwd: Optional[Path] = None):  # type:ignore[no-untyped-def]
+def run_proc(command: list[str], *, cwd: Path | None = None) -> None:
     with Popen(command, stdout=PIPE, stderr=PIPE, cwd=cwd) as process:
         pipe, err = process.communicate()
         ret = process.wait()
@@ -76,7 +71,7 @@ def run_proc(command: List[str], *, cwd: Optional[Path] = None):  # type:ignore[
 
 
 @pytest.fixture(scope="session", autouse=True)
-def python_to_test(python_subdir, regression_data) -> Path:  # type:ignore[no-untyped-def]
+def python_to_test(python_subdir, regression_data) -> Path:  # type: ignore[no-untyped-def]
     """This is quite complicated simulator to verify python module and prepare the module for
     testing. During deployment every step will be validated, not because it is required(this method
     also contradicts a bit to the TDD philosophy), but to prevent extremely strange errors during

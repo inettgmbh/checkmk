@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import io
 import os
 import platform
 import re
@@ -68,6 +66,7 @@ def testfile_engine():
 
 
 @pytest.fixture(
+    name="testconfig",
     params=[
         ("default", True),
         ("from_start", True),
@@ -83,7 +82,7 @@ def testfile_engine():
         "default_with_systemtime",
     ],
 )
-def testconfig(request, make_ini_config):
+def fixture_testconfig(request, make_ini_config):
     Globals.alone = request.param[1]
     if Globals.alone:
         make_ini_config.set("global", "sections", Globals.section)
@@ -94,12 +93,13 @@ def testconfig(request, make_ini_config):
     Globals.config_param_in_use = request.param[0]
     tag = "" if request.param[0] == "default" else "%s " % request.param[0]
     make_ini_config.set(
-        Globals.section, "textfile", "%s%s|%s%s" % (tag, Globals.testlog1, tag, Globals.testlog2)
+        Globals.section, "textfile", f"{tag}{Globals.testlog1}|{tag}{Globals.testlog2}"
     )
     return make_ini_config
 
 
 @pytest.fixture(
+    name="testconfig_glob",
     params=[
         "no_glob",
         "star_begin",
@@ -108,9 +108,9 @@ def testconfig(request, make_ini_config):
         "question_begin",
         "question_end",
         "question_middle",
-    ]
+    ],
 )
-def testconfig_glob(request, testconfig):
+def fixture_testconfig_glob(request, testconfig):
     entry = {
         "no_glob": Globals.testentry2,
         "star_begin": "*" + Globals.testentry2[2:],
@@ -124,8 +124,8 @@ def testconfig_glob(request, testconfig):
     return testconfig
 
 
-@pytest.fixture
-def expected_output_no_statefile():
+@pytest.fixture(name="expected_output_no_statefile")
+def fixture_expected_output_no_statefile():
     expected_output = [re.escape(r"<<<logwatch>>>"), logtitle(Globals.testlog1)]
     if Globals.config_param_in_use == "from_start":
         expected_output += [r"\. %s" % Globals.testentry1, r"C %s" % Globals.testentry2]
@@ -137,8 +137,8 @@ def expected_output_no_statefile():
     return expected_output
 
 
-@pytest.fixture
-def expected_output_with_statefile():
+@pytest.fixture(name="expected_output_with_statefile")
+def fixture_expected_output_with_statefile():
     expected_output = [re.escape(r"<<<logwatch>>>"), logtitle(Globals.testlog1)]
     if Globals.config_param_in_use != "nocontext":
         expected_output.append(r"\. %s" % Globals.testentry1)
@@ -189,26 +189,29 @@ def verify_logstate():
             sorted(expected_logstate.items()), sorted(actual_logstate.items())
         ):
             assert expected_log == actual_log
-            assert (
-                expected_state[0] == actual_state[0]
-            ), "expected file id for log '%s' is %d but actual file id %d" % (
-                expected_log,
-                expected_state[0],
-                actual_state[0],
+            assert expected_state[0] == actual_state[0], (
+                "expected file id for log '%s' is %d but actual file id %d"
+                % (
+                    expected_log,
+                    expected_state[0],
+                    actual_state[0],
+                )
             )
-            assert (
-                expected_state[1] == actual_state[1]
-            ), "expected file size for log '%s' is %d but actual file size %d" % (
-                expected_log,
-                expected_state[1],
-                actual_state[1],
+            assert expected_state[1] == actual_state[1], (
+                "expected file size for log '%s' is %d but actual file size %d"
+                % (
+                    expected_log,
+                    expected_state[1],
+                    actual_state[1],
+                )
             )
-            assert (
-                expected_state[2] == actual_state[2]
-            ), "expected offset for log '%s' is %d but actual offset number %d" % (
-                expected_log,
-                expected_state[2],
-                actual_state[2],
+            assert expected_state[2] == actual_state[2], (
+                "expected offset for log '%s' is %d but actual offset number %d"
+                % (
+                    expected_log,
+                    expected_state[2],
+                    actual_state[2],
+                )
             )
 
 
@@ -217,7 +220,7 @@ def manage_logfiles(request):
     Globals.utf_encoding = request.param
     if platform.system() == "Windows":
         for log in [Globals.testlog1, Globals.testlog2]:
-            with io.open(log, "w", encoding=request.param) as logfile:
+            with open(log, "w", encoding=request.param) as logfile:
                 for entry in [str(Globals.testentry1), str(Globals.testentry2)]:
                     logfile.write("%s\r\n" % entry)
     yield

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -33,8 +33,7 @@ def _vsphere_esx_hostsystem_cluster_elements():
                 ),
                 title=_("Clusters: node specific CPU utilization"),
                 help=_(
-                    "Configure thresholds that apply to clusters based on how many nodes "
-                    "they have."
+                    "Configure thresholds that apply to clusters based on how many nodes they have."
                 ),
             ),
         ),
@@ -45,7 +44,7 @@ def _parameter_valuespec_cpu_utilization_esx_vsphere_hostsystem():
     return Dictionary(
         help=_(
             "This rule configures levels for the CPU utilization (not load) for "
-            "VMWare ESX host systems. "
+            "VMware ESX host systems. "
             "The utilization percentage is computed with respect to the total "
             "number of CPUs. "
         ),

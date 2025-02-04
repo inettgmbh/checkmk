@@ -4,6 +4,38 @@ log() {
     echo "+++ $1"
 }
 
+failure() {
+    echo "$(basename "$0"):" "$@" >&2
+    exit 1
+}
+
+# some style settings defined here
+txtRed=$'\e[41m'
+txtGreen=$'\e[32m'
+txtBlue=$'\e[34m'
+resetColor=$'\e[0m'
+
+print_red() {
+    printf "%s%s%s\n" "${txtRed}" "$1" "${resetColor}"
+}
+
+print_green() {
+    printf "%s%s%s\n" "${txtGreen}" "$1" "${resetColor}"
+}
+
+print_blue() {
+    printf "%s%s%s\n" "${txtBlue}" "$1" "${resetColor}"
+}
+
+print_debug() {
+    print_blue "    $1"
+}
+
+get_desired_python_version() {
+    # to use "make print-PYTHON_VERISON" the git repo with "Makefile" and "artifacts.make" would be necessary at a known location
+    sed -n 's|^PYTHON_VERSION = \"\(\S*\)\"$|\1|p' "${1}"/package_versions.bzl
+}
+
 _artifact_name() {
     local DIR_NAME="$1"
     local DISTRO="$2"
@@ -15,9 +47,15 @@ _artifact_name() {
 _download_from_mirror() {
     local TARGET_PATH=$1
     local MIRROR_URL=$2
+    local MIRROR_CREDENTIALS=$3
+
+    if [ -z "${MIRROR_CREDENTIALS}" ]; then
+        log "No credentials given, not downloading, continuing with build ..."
+        return
+    fi
 
     log "Downloading ${MIRROR_URL}"
-    curl -1 -sSf -o "${TARGET_PATH}" "${MIRROR_URL}" || return
+    curl -u "${MIRROR_CREDENTIALS}" -1 -sSf -o "${TARGET_PATH}" "${MIRROR_URL}" || return
     log "Got ${TARGET_PATH} file from ${MIRROR_URL}"
 }
 
@@ -71,7 +109,7 @@ mirrored_download() {
     local MIRROR_URL=${MIRROR_BASE_URL}$FILE_NAME
     local MIRROR_CREDENTIALS="${NEXUS_USERNAME}:${NEXUS_PASSWORD}"
 
-    if ! _download_from_mirror "${TARGET_PATH}" "${MIRROR_URL}"; then
+    if ! _download_from_mirror "${TARGET_PATH}" "${MIRROR_URL}" "${MIRROR_CREDENTIALS}"; then
         log "File not available from ${MIRROR_URL}, downloading from ${UPSTREAM_URL}"
 
         _download_from_upstream "${TARGET_PATH}" "${UPSTREAM_URL}"
@@ -147,7 +185,7 @@ cached_build() {
     local MIRROR_URL=${MIRROR_BASE_URL}$FILE_NAME
     local MIRROR_CREDENTIALS="${NEXUS_USERNAME}:${NEXUS_PASSWORD}"
 
-    if _download_from_mirror "${ARCHIVE_PATH}" "${MIRROR_URL}"; then
+    if _download_from_mirror "${ARCHIVE_PATH}" "${MIRROR_URL}" "${MIRROR_CREDENTIALS}"; then
         _unpack_package "${ARCHIVE_PATH}" "${TARGET_DIR}"
     else
         build_package
@@ -177,7 +215,6 @@ find_defines_make() {
     while [ ! -e defines.make ]; do
         if [ "$PWD" = / ]; then
             failure "could not find defines.make"
-            break
         fi
         cd ..
     done
@@ -188,4 +225,13 @@ get_version() {
     local SEARCH_PATH="$1"
     local NAME="$2"
     make --no-print-directory --file="$(find_defines_make "$SEARCH_PATH")" print-"$NAME"
+}
+
+test_package() {
+    log "Testing for ${1% *} in \$PATH"
+    CMD_OUTPUT="$($1 2>&1 || true)"
+    echo "$CMD_OUTPUT" | grep "$2" >/dev/null || (
+        echo "Invalid output of \"$1\": \"$($1)\" was expected to match with grep \"$2\""
+        exit 1
+    )
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -12,9 +12,9 @@
 #include <string>
 
 #include "common/wtools.h"
-#include "tools/_raii.h"
 #include "tools/_win.h"
-#include "tools/_xlog.h"
+
+namespace rs = std::ranges;
 
 namespace cma::provider {
 
@@ -43,8 +43,8 @@ std::pair<uint64_t, uint64_t> GetSpacesByVolumeId(std::string_view volume_id) {
     ULARGE_INTEGER avail{.QuadPart = 0};
     ULARGE_INTEGER total{.QuadPart = 0};
     ULARGE_INTEGER free{.QuadPart = 0};
-    int ret = ::GetDiskFreeSpaceExA(volume_id.data(), &avail, &total, &free);
-    if (ret == FALSE) {
+    if (::GetDiskFreeSpaceExA(volume_id.data(), &avail, &total, &free) ==
+        FALSE) {
         XLOG::d("GetDiskFreeSpaceExA for volume '{}' is failed with error [{}]",
                 volume_id, ::GetLastError());
         return {0, 0};
@@ -52,24 +52,22 @@ std::pair<uint64_t, uint64_t> GetSpacesByVolumeId(std::string_view volume_id) {
     return {avail.QuadPart, total.QuadPart};
 }
 
-uint64_t CalcUsage(uint64_t avail, uint64_t total) {
+uint64_t CalcUsage(uint64_t avail, uint64_t total) noexcept {
     if (avail > total || total == 0) {
         return 0;
     }
 
-    return 100 - (100 * avail) / total;
+    return 100 - 100 * avail / total;
 }
 
 std::string ProduceFileSystemOutput(std::string_view volume_id) {
     auto [fs_name, volume_name] = df::GetNamesByVolumeId(volume_id);
     auto [avail, total] = df::GetSpacesByVolumeId(volume_id);
 
-    auto usage = CalcUsage(avail, total);
-
     if (volume_name.empty())
         volume_name = volume_id;
     else
-        std::replace(volume_name.begin(), volume_name.end(), ' ', '_');
+        rs::replace(volume_name, ' ', '_');
 
     return fmt::format("{}\t{}\t{}\t{}\t{}\t{}%\t{}\n",  //
                        volume_name,                      //
@@ -77,7 +75,7 @@ std::string ProduceFileSystemOutput(std::string_view volume_id) {
                        total / 1024,                     //
                        (total - avail) / 1024,           //
                        avail / 1024,                     //
-                       usage,                            //
+                       CalcUsage(avail, total),          //
                        volume_id);
 }
 
@@ -117,7 +115,6 @@ public:
     }
 
     [[nodiscard]] bool exists() const { return !wtools::IsBadHandle(handle_); }
-
     [[nodiscard]] std::string result() const { return storage_.get(); }
 
 private:
@@ -186,7 +183,6 @@ std::vector<std::string> GetDriveVector() {
         if (::GetDriveTypeA(drive) != DRIVE_UNKNOWN) {
             drives.emplace_back(drive);
         }
-
         drive += strlen(drive) + 1;
     }
 
@@ -194,27 +190,45 @@ std::vector<std::string> GetDriveVector() {
 }
 }  // namespace df
 
-std::string Df::makeBody() {
-    std::string out;
-    auto drives = df::GetDriveVector();
-    XLOG::t("Processing of [{}] drives", drives.size());
+namespace {
 
-    int count = 0;
-    for (auto &drive : drives) {
-        auto drive_type = ::GetDriveTypeA(drive.c_str());
-
-        if (drive_type == DRIVE_FIXED)  // means local hard disks
-        {
-            out += df::ProduceFileSystemOutput(drive);
-            out += df::ProduceMountPointsOutput(drive);
-            count++;
-        } else
-            XLOG::t("Drive '{}' is skipped due to type [{}]", drive,
-                    drive_type);
-    }
-    XLOG::d.i("Processed [{}] drives", count);
-
-    return out;
+bool IsFixedDrive(std::string_view volume_id) {
+    return ::GetDriveTypeA(volume_id.data()) == DRIVE_FIXED;
 }
 
-};  // namespace cma::provider
+std::string ProduceFormattedInfoForFixedDrive(std::string_view volume_id) {
+    return IsFixedDrive(volume_id) ? df::ProduceFileSystemOutput(volume_id) +
+                                         df::ProduceMountPointsOutput(volume_id)
+                                   : std::string{};
+}
+
+std::pair<std::string, int> ProduceFormattedInfoForFixedDrives(
+    const std::vector<std::string> &volumes) {
+    std::string out;
+    int count = 0;
+    for (const auto &v : volumes) {
+        const auto fixed_drive_info = ProduceFormattedInfoForFixedDrive(v);
+        if (fixed_drive_info.empty()) {
+            XLOG::t("Volume '{}' is skipped", v);
+            continue;
+        }
+        count++;
+        out += fixed_drive_info;
+    }
+    return {out, count};
+}
+
+}  // namespace
+
+std::string Df::makeBody() {
+    const auto drives = df::GetDriveVector();
+    XLOG::t("Processing of [{}] drives", drives.size());
+
+    const auto [output, count] = ProduceFormattedInfoForFixedDrives(drives);
+    XLOG::d.i("Processed [{}] fixed drives of total [{}]", count,
+              drives.size());
+
+    return output;
+}
+
+}  // namespace cma::provider

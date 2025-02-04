@@ -1,24 +1,21 @@
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the
+// terms and conditions defined in the file COPYING, which is part of this
+// source code package.
 
-// provides basic api to start and stop service
 #include "stdafx.h"
 
 #include "providers/ohm.h"
 
-#include <fmt/format.h>
-
 #include <filesystem>
-#include <regex>
 #include <string>
 #include <string_view>
-#include <tuple>
 
-#include "cfg.h"
-#include "cma_core.h"
-#include "common/wtools.h"
-#include "glob_match.h"
-#include "logger.h"
-#include "tools/_raii.h"
-#include "tools/_xlog.h"
+#include "tools/_process.h"
+#include "wnx/cfg.h"
+#include "wnx/cma_core.h"
+#include "wnx/logger.h"
+
 namespace fs = std::filesystem;
 
 namespace cma::provider {

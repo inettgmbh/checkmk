@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Mapping
+
 import pytest
 
-from tests.testlib import Check
-
-from .checktestlib import assertCheckResultsEqual, BasicCheckResult, CheckResult
+from .checktestlib import assertCheckResultsEqual, BasicCheckResult, Check, CheckResult
 
 # Mark all tests in this file as check related tests
 pytestmark = pytest.mark.checks
@@ -21,7 +21,9 @@ pytestmark = pytest.mark.checks
         ({"levels": (0, 1)}, 2, " (warn/crit at 0/1)"),
     ],
 )
-def test_check_win_license(params, expected_status, expected_levels_info) -> None:
+def test_check_win_license(
+    params: Mapping[str, tuple[float, float]], expected_status: int, expected_levels_info: str
+) -> None:
     check = Check("msoffice_serviceplans")
 
     item = "bundle"

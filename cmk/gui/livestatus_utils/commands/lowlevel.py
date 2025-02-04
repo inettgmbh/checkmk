@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import time
-from typing import Any, List, Optional
+from typing import Any
 
-# TODO: typing of connection when livestatus.py is on pypi
-from livestatus import SiteId
+from livestatus import MultiSiteConnection, SiteId
 
-from cmk.utils.site import omd_site
+from cmk.ccc.site import omd_site
 
 from cmk.gui.livestatus_utils.commands.type_defs import LivestatusCommand
 
 
-def send_command(  # type:ignore[no-untyped-def]
-    connection,
+def send_command(
+    connection: MultiSiteConnection,
     command: LivestatusCommand,
-    params: List[Any],
-    site_id: Optional[SiteId] = None,
-):
+    params: list[Any],
+    site_id: SiteId | None = None,
+) -> None:
     """Send a command to livestatus.
 
     Args:

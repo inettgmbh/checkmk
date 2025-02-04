@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,10 +9,38 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Age, Checkbox, Dictionary, Integer, MonitoringState, RegExp, Tuple
+from cmk.gui.valuespec import (
+    Age,
+    Checkbox,
+    Dictionary,
+    Integer,
+    MonitoringState,
+    Percentage,
+    RegExp,
+    Tuple,
+)
 
 
-def _parameter_valuespec_mobileiron_compliance():
+def _parameter_valuespec_mobileiron_statistics() -> Dictionary:
+    return Dictionary(
+        title=_("Mobileiron statistics parameters"),
+        elements=[
+            (
+                "non_compliant_summary_levels",
+                Tuple(
+                    title=_("Levels for non-compliant devices"),
+                    elements=[
+                        Percentage(title=_("Warning at"), default_value=10.0),
+                        Percentage(title=_("Critical at"), default_value=20.0),
+                    ],
+                ),
+            )
+        ],
+        optional_keys=[],
+    )
+
+
+def _parameter_valuespec_mobileiron_compliance() -> Dictionary:
     return Dictionary(
         title=_("Mobileiron compliance parameters"),
         elements=[
@@ -38,7 +66,7 @@ def _parameter_valuespec_mobileiron_compliance():
     )
 
 
-def _parameter_valuespec_mobileiron_versions():
+def _parameter_valuespec_mobileiron_versions() -> Dictionary:
     return Dictionary(
         title=_("Mobileiron versions parameters"),
         elements=[
@@ -71,9 +99,7 @@ def _parameter_valuespec_mobileiron_versions():
             ),
             (
                 "patchlevel_unparsable",
-                MonitoringState(
-                    default_value=0, title=_("State in case of unparsable patch level")
-                ),
+                MonitoringState(default_value=0, title=_("State in case of unknown patch level")),
             ),
             (
                 "patchlevel_age",
@@ -87,7 +113,7 @@ def _parameter_valuespec_mobileiron_versions():
             ),
             (
                 "os_build_unparsable",
-                MonitoringState(default_value=0, title=_("State in case of unparsable OS build")),
+                MonitoringState(default_value=0, title=_("State in case of unknown OS build")),
             ),
             (
                 "os_age",
@@ -106,7 +132,17 @@ def _parameter_valuespec_mobileiron_versions():
 
 rulespec_registry.register(
     CheckParameterRulespecWithoutItem(
-        title=lambda: _("Mobileiron/Compliance"),
+        title=lambda: _("Mobileiron statistics"),
+        check_group_name="mobileiron_statistics",
+        group=RulespecGroupCheckParametersApplications,
+        match_type="dict",
+        parameter_valuespec=_parameter_valuespec_mobileiron_statistics,
+    )
+)
+
+rulespec_registry.register(
+    CheckParameterRulespecWithoutItem(
+        title=lambda: _("Mobileiron compliance"),
         check_group_name="mobileiron_compliance",
         group=RulespecGroupCheckParametersApplications,
         match_type="dict",
@@ -116,7 +152,7 @@ rulespec_registry.register(
 
 rulespec_registry.register(
     CheckParameterRulespecWithoutItem(
-        title=lambda: _("Mobileiron/Versions"),
+        title=lambda: _("Mobileiron versions"),
         check_group_name="mobileiron_versions",
         group=RulespecGroupCheckParametersApplications,
         match_type="dict",

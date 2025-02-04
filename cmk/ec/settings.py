@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Settings handling for the Check_MK event console."""
@@ -11,23 +11,20 @@
 import sys
 from argparse import ArgumentParser, ArgumentTypeError, RawDescriptionHelpFormatter
 from pathlib import Path
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple
 
 
 class AnnotatedPath(NamedTuple):
-    """a filesystem path with a user-presentable description"""
+    """a filesystem path with a user-presentable description."""
 
     description: str
     value: Path
 
 
 class Paths(NamedTuple):
-    """filesystem paths related to the event console"""
+    """filesystem paths related to the event console."""
 
-    main_config_file: AnnotatedPath
-    config_dir: AnnotatedPath
-    rule_pack_dir: AnnotatedPath
-    mkp_rule_pack_dir: AnnotatedPath
+    active_config_dir: AnnotatedPath
     unix_socket: AnnotatedPath
     event_socket: AnnotatedPath
     event_pipe: AnnotatedPath
@@ -45,18 +42,13 @@ class Paths(NamedTuple):
     mongodb_config_file: AnnotatedPath
 
 
-def _default_paths(omd_root: Path, default_config_dir: Path) -> Paths:
-    """Returns all default filesystem paths related to the event console"""
+def create_paths(omd_root: Path) -> Paths:
+    """Returns all default filesystem paths related to the event console."""
     run_dir = omd_root / "tmp/run/mkeventd"
     state_dir = omd_root / "var/mkeventd"
     return Paths(
-        main_config_file=AnnotatedPath("main configuration", default_config_dir / "mkeventd.mk"),
-        config_dir=AnnotatedPath("configuration directory", default_config_dir / "mkeventd.d"),
-        rule_pack_dir=AnnotatedPath(
-            "rule pack directory", default_config_dir / "mkeventd.d" / "wato"
-        ),
-        mkp_rule_pack_dir=AnnotatedPath(
-            "rule pack export directory", default_config_dir / "mkeventd.d" / "mkp" / "rule_packs"
+        active_config_dir=AnnotatedPath(
+            "active configuration directory", state_dir / "active_config"
         ),
         unix_socket=AnnotatedPath("Unix socket", run_dir / "status"),
         event_socket=AnnotatedPath("event socket", run_dir / "eventsocket"),
@@ -65,7 +57,7 @@ def _default_paths(omd_root: Path, default_config_dir: Path) -> Paths:
         log_file=AnnotatedPath("log file", omd_root / "var/log/mkeventd.log"),
         history_dir=AnnotatedPath("history directory", state_dir / "history"),
         messages_dir=AnnotatedPath("messages directory", state_dir / "messages"),
-        master_config_file=AnnotatedPath("master configuraion", state_dir / "master_config"),
+        master_config_file=AnnotatedPath("master configuration", state_dir / "master_config"),
         slave_status_file=AnnotatedPath("slave status", state_dir / "slave_status"),
         spool_dir=AnnotatedPath("spool directory", state_dir / "spool"),
         status_file=AnnotatedPath("status file", state_dir / "status"),
@@ -83,13 +75,13 @@ def _default_paths(omd_root: Path, default_config_dir: Path) -> Paths:
 
 
 class PortNumber(NamedTuple):
-    """a network port number"""
+    """a network port number."""
 
     value: int
 
 
 class PortNumbers(NamedTuple):
-    """network port numbers related to the event console"""
+    """network port numbers related to the event console."""
 
     syslog_udp: PortNumber
     syslog_tcp: PortNumber
@@ -97,20 +89,20 @@ class PortNumbers(NamedTuple):
 
 
 def _default_port_numbers() -> PortNumbers:
-    """Returns all port numbers related to the event console"""
+    """Returns all port numbers related to the event console."""
     return PortNumbers(
         syslog_udp=PortNumber(514), syslog_tcp=PortNumber(514), snmptrap_udp=PortNumber(162)
     )
 
 
 class FileDescriptor(NamedTuple):
-    """a Unix file descriptor number"""
+    """a Unix file descriptor number."""
 
     value: int
 
 
 class ECArgumentParser(ArgumentParser):
-    """An argument parser for the event console"""
+    """An argument parser for the event console."""
 
     def __init__(self, prog: str, version: str, paths: Paths, port_numbers: PortNumbers) -> None:
         super().__init__(
@@ -190,24 +182,26 @@ class ECArgumentParser(ArgumentParser):
 
     @staticmethod
     def _file_descriptor(value: str) -> FileDescriptor:
-        """A custom argument type for file descriptors, i.e. non-negative integers"""
+        """A custom argument type for file descriptors, i.e. non-negative integers."""
         try:
             file_desc = int(value)
             if file_desc < 0:
                 raise ValueError
-        except ValueError:
-            raise ArgumentTypeError("invalid file descriptor value: %r" % value)
+        except ValueError as e:
+            raise ArgumentTypeError(f"invalid file descriptor value: {repr(value)}") from e
         return FileDescriptor(file_desc)
 
 
 # a communication endpoint, e.g. for syslog or SNMP
-EndPoint = Union[PortNumber, FileDescriptor]
+EndPoint = PortNumber | FileDescriptor
 
 
 def _endpoint(
-    enabled: bool, file_descriptor: FileDescriptor, default_port_number: PortNumber
-) -> Optional[EndPoint]:
-    """Returns a communication endpoint based on given commandline arguments"""
+    enabled: bool,
+    file_descriptor: FileDescriptor | None,
+    default_port_number: PortNumber,
+) -> EndPoint | None:
+    """Returns a communication endpoint based on given commandline arguments."""
     if not enabled:
         return None
     if file_descriptor is None:
@@ -216,12 +210,12 @@ def _endpoint(
 
 
 class Options(NamedTuple):
-    """various post-processed commandline options"""
+    """various post-processed commandline options."""
 
     verbosity: int
-    syslog_udp: Optional[EndPoint]
-    syslog_tcp: Optional[EndPoint]
-    snmptrap_udp: Optional[EndPoint]
+    syslog_udp: EndPoint | None
+    syslog_tcp: EndPoint | None
+    snmptrap_udp: EndPoint | None
     foreground: bool
     debug: bool
     profile_status: bool
@@ -229,15 +223,15 @@ class Options(NamedTuple):
 
 
 class Settings(NamedTuple):
-    """all settings of the event console"""
+    """all settings of the event console."""
 
     paths: Paths
     options: Options
 
 
-def settings(version: str, omd_root: Path, default_config_dir: Path, argv: list[str]) -> Settings:
-    """Returns all event console settings"""
-    paths = _default_paths(omd_root, default_config_dir)
+def create_settings(version: str, omd_root: Path, argv: list[str]) -> Settings:
+    """Returns all event console settings."""
+    paths = create_paths(omd_root)
     port_numbers = _default_port_numbers()
     parser = ECArgumentParser(Path(argv[0]).name, version, paths, port_numbers)
     args = parser.parse_args(argv[1:])
@@ -255,14 +249,17 @@ def settings(version: str, omd_root: Path, default_config_dir: Path, argv: list[
 
 
 if __name__ == "__main__":
-    import cmk.utils.paths
-    import cmk.utils.version as cmk_version
+    import cmk.ccc.version as cmk_version
 
-    print(
-        settings(
-            str(cmk_version.__version__),
-            cmk.utils.paths.omd_root,
-            Path(cmk.utils.paths.default_config_dir),
-            sys.argv,
+    import cmk.utils.paths
+
+    sys.stdout.write(
+        repr(
+            create_settings(
+                str(cmk_version.__version__),
+                cmk.utils.paths.omd_root,
+                sys.argv,
+            )
         )
+        + "\n"
     )

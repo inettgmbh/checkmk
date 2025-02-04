@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Callable, Iterable, List, Optional
-from typing import Tuple as TupleType
-from typing import Type
+from collections.abc import Callable, Iterable
 
-from cmk.utils.aws_constants import (
-    AWSEC2InstFamilies,
-    AWSEC2InstTypes,
-    AWSEC2LimitsDefault,
-    AWSEC2LimitsSpecial,
-)
-
-from cmk.gui.i18n import _
+from cmk.gui.i18n import _, translate_to_current_language
 from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     CheckParameterRulespecWithoutItem,
@@ -34,9 +25,15 @@ from cmk.gui.valuespec import (
     ListOf,
     Percentage,
     TextInput,
-    Transform,
     Tuple,
     ValueSpec,
+)
+
+from cmk.plugins.aws.constants import (  # pylint: disable=cmk-module-layer-violation
+    AWSEC2InstFamilies,
+    AWSEC2InstTypes,
+    AWSEC2LimitsDefault,
+    AWSEC2LimitsSpecial,
 )
 
 
@@ -143,7 +140,7 @@ def _vs_cpu_credits_balance():
 def _vs_elements_http_errors(
     http_err_codes: Iterable[str],
     title_add: Callable[[str], str] = lambda http_err_code: "",
-) -> Iterable[TupleType[str, Tuple]]:
+) -> Iterable[tuple[str, Tuple]]:
     return [
         (
             "levels_http_%s_perc" % http_err_code,
@@ -185,11 +182,10 @@ def _item_spec_aws_limits_generic():
 def vs_aws_limits(
     resource: str,
     default_limit: int,
-    vs_limit_cls: Optional[Type[Filesize]] = None,
+    vs_limit_cls: type[Filesize] | None = None,
     unit: str = "",
     title_default: str = _("Limit from AWS API"),
 ) -> Alternative:
-
     if vs_limit_cls is None:
         vs_limit = Integer(
             title=resource,
@@ -205,7 +201,7 @@ def vs_aws_limits(
         )
 
     if resource:
-        title: Optional[str] = _("Set limit and levels for %s") % resource
+        title: str | None = _("Set limit and levels for %s") % resource
     else:
         title = None
 
@@ -644,24 +640,24 @@ def _vs_limits_vcpu_families():
             choices=[
                 (
                     "%s_vcpu" % inst_fam,
-                    fam_name,
+                    fam_name.localize(translate_to_current_language),
                     vs_aws_limits(
-                        fam_name,
+                        fam_name.localize(translate_to_current_language),
                         AWSEC2LimitsSpecial.get("%s_vcpu" % inst_fam, AWSEC2LimitsDefault)[0],
                     ),
                 )
                 for inst_fam, fam_name in AWSEC2InstFamilies.items()
             ],
         ),
-        title=_("Set limits and levels for running on-demand vCPUs on instance Families"),
+        title=_("Set limits and levels for running on-demand vCPUs on instance families"),
     )
 
 
 def _parameter_valuespec_aws_ec2_limits() -> Dictionary:
     return Dictionary(
         elements=[
-            ("vpc_elastic_ip_addresses", vs_aws_limits(_("VPC Elastic IP Addresses"), 5)),
-            ("elastic_ip_addresses", vs_aws_limits(_("Elastic IP Addresses"), 5)),
+            ("vpc_elastic_ip_addresses", vs_aws_limits(_("VPC Elastic IP addresses"), 5)),
+            ("elastic_ip_addresses", vs_aws_limits(_("Elastic IP addresses"), 5)),
             ("vpc_sec_group_rules", vs_aws_limits(_("Rules of VPC security group"), 120)),
             ("vpc_sec_groups", vs_aws_limits(_("VPC security groups"), 2500)),
             (
@@ -738,6 +734,34 @@ rulespec_registry.register(
     )
 )
 
+
+def _parameter_valuespec_aws_reservation_utilization():
+    return Dictionary(
+        elements=[
+            (
+                "levels_utilization_percent",
+                Tuple(
+                    title=_("Lower levels for reservation utilization"),
+                    elements=[
+                        Percentage(title=_("Warning at"), default_value=95.0),
+                        Percentage(title=_("Critical at"), default_value=90.0),
+                    ],
+                ),
+            )
+        ],
+    )
+
+
+rulespec_registry.register(
+    CheckParameterRulespecWithoutItem(
+        check_group_name="aws_reservation_utilization",
+        group=RulespecGroupCheckParametersApplications,
+        match_type="dict",
+        parameter_valuespec=_parameter_valuespec_aws_reservation_utilization,
+        title=lambda: _("AWS/CE Total Reservation Utilization"),
+    )
+)
+
 # .
 #   .--ELB-----------------------------------------------------------------.
 #   |                          _____ _     ____                            |
@@ -771,13 +795,11 @@ def _parameter_valuespec_aws_elb_statistics():
                     elements=[
                         Float(
                             title=_("Warning at"),
-                            display_format="%.3f",
                             default_value=0.001,
                             unit="/s",
                         ),
                         Float(
                             title=_("Critical at"),
-                            display_format="%.3f",
                             default_value=0.001,
                             unit="/s",
                         ),
@@ -814,47 +836,32 @@ rulespec_registry.register(
 )
 
 
-def _transform_aws_elb_http(p):
-
-    if "levels_load_balancers" in p:
-        return p
-    p_trans = {"levels_load_balancers": p, "levels_backend_targets": {}}
-
-    for http_err_code in ["4xx", "5xx"]:
-        levels_key = "levels_http_%s_perc" % http_err_code
-        if levels_key in p:
-            p_trans["levels_backend_targets"][levels_key] = p[levels_key]
-
-    return p_trans
-
-
-def _parameter_valuespec_aws_elb_http():
-    return Transform(
-        valuespec=Dictionary(
-            title=_("Upper levels for HTTP errors"),
-            elements=[
-                (
-                    "levels_load_balancers",
-                    Dictionary(
-                        title=_("Upper levels for Load Balancers"),
-                        elements=_vs_elements_http_errors(
-                            ["3xx", "4xx", "5xx", "500", "502", "503", "504"],
-                            title_add=lambda http_err_code: ""
+def _parameter_valuespec_aws_elb_http() -> Dictionary:
+    return Dictionary(
+        title=_("Upper levels for HTTP errors"),
+        elements=[
+            (
+                "levels_load_balancers",
+                Dictionary(
+                    title=_("Upper levels for Load Balancers"),
+                    elements=_vs_elements_http_errors(
+                        ["3xx", "4xx", "5xx", "500", "502", "503", "504"],
+                        title_add=lambda http_err_code: (
+                            ""
                             if http_err_code in ["4xx", "5xx"]
-                            else " (Application Load Balancers only)",
+                            else " (Application Load Balancers only)"
                         ),
                     ),
                 ),
-                (
-                    "levels_backend_targets",
-                    Dictionary(
-                        title=_("Upper levels for Backend"),
-                        elements=_vs_elements_http_errors(["2xx", "3xx", "4xx", "5xx"]),
-                    ),
+            ),
+            (
+                "levels_backend_targets",
+                Dictionary(
+                    title=_("Upper levels for Backend"),
+                    elements=_vs_elements_http_errors(["2xx", "3xx", "4xx", "5xx"]),
                 ),
-            ],
-        ),
-        forth=_transform_aws_elb_http,
+            ),
+        ],
     )
 
 
@@ -994,7 +1001,7 @@ def _parameter_valuespec_aws_elbv2_limits() -> Dictionary:
                 "network_load_balancer_target_groups",
                 vs_aws_limits(_("Network Load Balancer Target Groups"), 3000),
             ),
-            ("load_balancer_target_groups", vs_aws_limits(_("Load balancers Target Groups"), 3000)),
+            ("load_balancer_target_groups", vs_aws_limits(_("Load balancers target groups"), 3000)),
         ]
     )
 
@@ -1314,8 +1321,8 @@ def _parameter_valuespec_aws_rds_replica_lag():
                 Tuple(
                     title=_("Upper levels on the replica lag"),
                     elements=[
-                        Float(title=_("Warning at"), unit="s", display_format="%.3f"),
-                        Float(title=_("Critical at"), unit="s", display_format="%.3f"),
+                        Float(title=_("Warning at"), unit="s"),
+                        Float(title=_("Critical at"), unit="s"),
                     ],
                 ),
             ),
@@ -1462,14 +1469,13 @@ rulespec_registry.register(
 
 
 def _vs_aws_dynamodb_capacity(title: str, unit: str) -> Dictionary:
-
-    elements_extr: List[ValueSpec] = [
+    elements_extr: list[ValueSpec] = [
         Float(title=_("Warning at"), unit=unit),
         Float(title=_("Critical at"), unit=unit),
     ]
 
     # mypy is unhappy without splitting into elements_avg and elements_single_minmmax
-    elements_avg: List[DictionaryEntry] = [
+    elements_avg: list[DictionaryEntry] = [
         (
             "levels_average",
             Dictionary(
@@ -1516,7 +1522,7 @@ def _vs_aws_dynamodb_capacity(title: str, unit: str) -> Dictionary:
         ),
     ]
 
-    elements_single_minmmax: List[DictionaryEntry] = [
+    elements_single_minmmax: list[DictionaryEntry] = [
         (
             "levels_%s" % extr,
             Dictionary(
@@ -1535,7 +1541,7 @@ def _vs_aws_dynamodb_capacity(title: str, unit: str) -> Dictionary:
 
 def _parameter_valuespec_aws_dynamodb_capacity() -> Dictionary:
     return Dictionary(
-        title=_("Levels on Read/Write Capacity"),
+        title=_("Levels on read/write capacity"),
         elements=[
             (
                 "levels_read",
@@ -1565,7 +1571,7 @@ def _parameter_valuespec_aws_dynamodb_latency() -> Dictionary:
         title=_("Levels on latency"),
         elements=[
             (
-                "levels_seconds_%s_%s" % (operation.lower(), statistic),
+                f"levels_seconds_{operation.lower()}_{statistic}",
                 Tuple(
                     title=_("Upper levels on %s latency of successful %s requests")
                     % (statistic, operation),

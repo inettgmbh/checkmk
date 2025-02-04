@@ -1,11 +1,11 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
 
 #pragma once
-#if !defined(___RAII_H)
-#define ___RAII_H
+#ifndef RAII_H
+#define RAII_H
 // **********************************************************
 // ON_OUT_OF_SCOPE: Usage example
 // NOTE 1: This is a SUPPLEMENT for full-featured RAAI.

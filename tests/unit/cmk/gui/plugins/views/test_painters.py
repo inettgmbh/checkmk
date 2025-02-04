@@ -1,25 +1,42 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import datetime
+from collections.abc import Sequence
+from functools import partial
+from pathlib import Path
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
+
 import pytest
+import time_machine
 
-from tests.testlib import on_time
+import cmk.ccc.version as cmk_version
 
-import cmk.utils.version as cmk_version
-from cmk.utils.structured_data import StructuredDataNode
+from cmk.utils import paths
+from cmk.utils.livestatus_helpers.testing import MockLiveStatusConnection
+from cmk.utils.paths import default_config_dir
+from cmk.utils.structured_data import deserialize_tree
+from cmk.utils.user import UserId
 
 from cmk.gui import sites
+from cmk.gui.config import active_config
 from cmk.gui.http import request
-from cmk.gui.plugins.views.utils import painter_registry
-from cmk.gui.type_defs import PainterSpec
+from cmk.gui.painter.v0 import all_painters
+from cmk.gui.painter.v0.painters import _paint_custom_notes
+from cmk.gui.type_defs import ColumnSpec, Row
 from cmk.gui.utils.html import HTML
-from cmk.gui.views import painters_of_datasource, View
+from cmk.gui.view import View
+from cmk.gui.views.page_edit_view import painters_of_datasource
+from cmk.gui.visual_link import render_link_to_view
 
 
 @pytest.fixture(name="live")
-def fixture_livestatus_test_config(mock_livestatus):
+def fixture_livestatus_test_config(
+    mock_livestatus: MockLiveStatusConnection,
+) -> MockLiveStatusConnection:
     live = mock_livestatus
     live.set_sites(["NO_SITE"])
     live.add_table(
@@ -53,7 +70,7 @@ def fixture_livestatus_test_config(mock_livestatus):
 
 @pytest.mark.usefixtures("load_config")
 def test_registered_painters() -> None:
-    painters = painter_registry.keys()
+    painters = all_painters(active_config).keys()
     expected_painters = [
         "aggr_acknowledged",
         "aggr_assumed_state",
@@ -69,6 +86,7 @@ def test_registered_painters() -> None:
         "aggr_state_num",
         "aggr_treestate",
         "aggr_treestate_boxed",
+        "aggr_treestate_frozen_diff",
         "alert_stats_crit",
         "alert_stats_ok",
         "alert_stats_problem",
@@ -87,6 +105,7 @@ def test_registered_painters() -> None:
         "crash_ident",
         "crash_time",
         "crash_type",
+        "crash_source",
         "crash_version",
         "downtime_author",
         "downtime_comment",
@@ -96,7 +115,6 @@ def test_registered_painters() -> None:
         "downtime_fixed",
         "downtime_id",
         "downtime_origin",
-        "downtime_recurring",
         "downtime_start_time",
         "downtime_type",
         "downtime_what",
@@ -188,6 +206,7 @@ def test_registered_painters() -> None:
         "host_next_check",
         "host_next_notification",
         "host_normal_interval",
+        "host_notes_url",
         "host_notification_number",
         "host_notification_postponement_reason",
         "host_notifications_enabled",
@@ -239,11 +258,15 @@ def test_registered_painters() -> None:
         "inv_hardware_cpu_logical_cpus",
         "inv_hardware_cpu_max_speed",
         "inv_hardware_cpu_model",
+        "inv_hardware_cpu_nodes",
         "inv_hardware_cpu_sharing_mode",
         "inv_hardware_cpu_smt_threads",
         "inv_hardware_cpu_threads",
         "inv_hardware_cpu_threads_per_cpu",
+        "inv_hardware_cpu_type",
         "inv_hardware_cpu_voltage",
+        "inv_hardware_firmware",
+        "inv_hardware_firmware_redfish",
         "inv_hardware_memory",
         "inv_hardware_memory_arrays",
         "inv_hardware_memory_total_ram_usable",
@@ -256,10 +279,17 @@ def test_registered_painters() -> None:
         "inv_hardware_storage_disks",
         "inv_hardware_storage_disks_size",
         "inv_hardware_system",
+        "inv_hardware_system_device_number",
+        "inv_hardware_system_description",
         "inv_hardware_system_expresscode",
+        "inv_hardware_system_mac_address",
         "inv_hardware_system_manufacturer",
         "inv_hardware_system_model",
         "inv_hardware_system_model_name",
+        "inv_hardware_system_node_name",
+        "inv_hardware_system_nodes",
+        "inv_hardware_system_partition_name",
+        "inv_hardware_system_pki_appliance_version",
         "inv_hardware_system_product",
         "inv_hardware_system_serial",
         "inv_hardware_system_serial_number",
@@ -273,6 +303,7 @@ def test_registered_painters() -> None:
         "inv_networking_hostname",
         "inv_networking_kube",
         "inv_networking_routes",
+        "inv_networking_sip_interfaces",
         "inv_networking_total_ethernet_ports",
         "inv_networking_total_interfaces",
         "inv_networking_tunnels",
@@ -281,16 +312,37 @@ def test_registered_painters() -> None:
         "inv_networking_wlan_controller_accesspoints",
         "inv_software",
         "inv_software_applications",
+        "inv_software_applications_azure",
+        "inv_software_applications_azure_application_gateways",
+        "inv_software_applications_azure_application_gateways_rules",
+        "inv_software_applications_azure_application_gateways_rules_backends",
+        "inv_software_applications_azure_application_gateways_rules_listeners",
+        "inv_software_applications_azure_application_gateways_rules_listeners_private_ips",
+        "inv_software_applications_azure_application_gateways_rules_listeners_public_ips",
+        "inv_software_applications_azure_load_balancers",
+        "inv_software_applications_azure_load_balancers_inbound_nat_rules",
+        "inv_software_applications_azure_load_balancers_inbound_nat_rules_backend_ip_configs",
+        "inv_software_applications_azure_load_balancers_inbound_nat_rules_private_ips",
+        "inv_software_applications_azure_load_balancers_inbound_nat_rules_public_ips",
+        "inv_software_applications_azure_load_balancers_outbound_rules",
+        "inv_software_applications_azure_load_balancers_outbound_rules_backend_pools",
+        "inv_software_applications_azure_load_balancers_outbound_rules_backend_pools_addresses",
         "inv_software_applications_check_mk",
         "inv_software_applications_check_mk_cluster",
         "inv_software_applications_check_mk_cluster_is_cluster",
         "inv_software_applications_check_mk_cluster_nodes",
-        "inv_software_applications_check_mk_host_labels",
         "inv_software_applications_check_mk_num_hosts",
         "inv_software_applications_check_mk_num_services",
         "inv_software_applications_check_mk_sites",
         "inv_software_applications_check_mk_versions",
         "inv_software_applications_checkmk-agent",
+        "inv_software_applications_checkmk-agent_version",
+        "inv_software_applications_checkmk-agent_agentdirectory",
+        "inv_software_applications_checkmk-agent_datadirectory",
+        "inv_software_applications_checkmk-agent_spooldirectory",
+        "inv_software_applications_checkmk-agent_pluginsdirectory",
+        "inv_software_applications_checkmk-agent_localdirectory",
+        "inv_software_applications_checkmk-agent_agentcontroller",
         "inv_software_applications_checkmk-agent_local_checks",
         "inv_software_applications_checkmk-agent_plugins",
         "inv_software_applications_citrix",
@@ -384,12 +436,20 @@ def test_registered_painters() -> None:
         "inv_software_applications_oracle_sga",
         "inv_software_applications_oracle_systemparameter",
         "inv_software_applications_oracle_tablespaces",
+        "inv_software_applications_synthetic_monitoring",
+        "inv_software_applications_synthetic_monitoring_plans",
+        "inv_software_applications_synthetic_monitoring_tests",
         "inv_software_applications_vmwareesx",
         "inv_software_bios",
         "inv_software_bios_date",
         "inv_software_bios_vendor",
         "inv_software_bios_version",
         "inv_software_configuration",
+        "inv_software_configuration_organisation",
+        "inv_software_configuration_organisation_address",
+        "inv_software_configuration_organisation_network_id",
+        "inv_software_configuration_organisation_organisation_id",
+        "inv_software_configuration_organisation_organisation_name",
         "inv_software_configuration_snmp_info",
         "inv_software_configuration_snmp_info_contact",
         "inv_software_configuration_snmp_info_location",
@@ -401,6 +461,7 @@ def test_registered_painters() -> None:
         "inv_software_kernel_config",
         "inv_software_os",
         "inv_software_os_arch",
+        "inv_software_os_build",
         "inv_software_os_install_date",
         "inv_software_os_kernel_version",
         "inv_software_os_name",
@@ -483,6 +544,11 @@ def test_registered_painters() -> None:
         "invfan_name",
         "invfan_serial",
         "invfan_software",
+        "invfirmwareredfish_component",
+        "invfirmwareredfish_description",
+        "invfirmwareredfish_location",
+        "invfirmwareredfish_updateable",
+        "invfirmwareredfish_version",
         "invhist_changed",
         "invhist_delta",
         "invhist_new",
@@ -631,6 +697,18 @@ def test_registered_painters() -> None:
         "invswpac_summary",
         "invswpac_vendor",
         "invswpac_version",
+        "invsyntheticmonitoringtests_application",
+        "invsyntheticmonitoringtests_bottom_level_suite_name",
+        "invsyntheticmonitoringtests_plan_id",
+        "invsyntheticmonitoringtests_suite_name",
+        "invsyntheticmonitoringtests_test_item",
+        "invsyntheticmonitoringtests_test_name",
+        "invsyntheticmonitoringtests_top_level_suite_name",
+        "invsyntheticmonitoringtests_variant",
+        "invsyntheticmonitoringplans_application",
+        "invsyntheticmonitoringplans_plan_id",
+        "invsyntheticmonitoringplans_suite_name",
+        "invsyntheticmonitoringplans_variant",
         "invtunnels_index",
         "invtunnels_linkpriority",
         "invtunnels_peerip",
@@ -650,6 +728,7 @@ def test_registered_painters() -> None:
         "log_comment",
         "log_contact_name",
         "log_date",
+        "log_details_history",
         "log_icon",
         "log_lineno",
         "log_message",
@@ -723,6 +802,7 @@ def test_registered_painters() -> None:
         "svc_next_check",
         "svc_next_notification",
         "svc_normal_interval",
+        "svc_notes_url",
         "svc_notification_number",
         "svc_notification_postponement_reason",
         "svc_notifications_enabled",
@@ -749,8 +829,9 @@ def test_registered_painters() -> None:
         "wato_folder_rel",
     ]
 
-    if not cmk_version.is_raw_edition():
+    if cmk_version.edition(paths.omd_root) is not cmk_version.Edition.CRE:
         expected_painters += [
+            "dcd_batch",
             "svc_metrics_forecast",
             "svc_metrics_hist",
             "sla_fixed",
@@ -766,9 +847,10 @@ def test_registered_painters() -> None:
             "deployment_last_download",
             "deployment_last_error",
             "deployment_target_hash",
+            "downtime_recurring",
         ]
 
-    if cmk_version.is_managed_edition():
+    if cmk_version.edition(paths.omd_root) is cmk_version.Edition.CME:
         expected_painters += [
             "host_customer",
             "customer_id",
@@ -786,22 +868,22 @@ def test_registered_painters() -> None:
             "customer_num_services_warn",
         ]
 
-    assert sorted(painters) == sorted(expected_painters)
+    assert set(painters) == set(expected_painters)
 
 
-# We only get all painters after the plugins and config have been loaded. Since there currently no
-# way to create test parameters while depending on a fixture we can not use pytests parametrization
-@pytest.mark.usefixtures("load_config")
 @pytest.fixture(name="service_painter_idents")
-def fixture_service_painter_names():
+def fixture_service_painter_names() -> list[str]:
     return sorted(list(painters_of_datasource("services").keys()))
 
 
-def test_service_painters(  # type:ignore[no-untyped-def]
-    request_context, service_painter_idents, live
+@pytest.mark.usefixtures("request_context", "patch_theme")
+def test_service_painters(
+    service_painter_idents: Sequence[str], live: MockLiveStatusConnection
 ) -> None:
-    with live(expect_status_query=False), request.stashed_vars(), on_time(
-        "2018-04-15 16:50", "CET"
+    with (
+        live(expect_status_query=False),
+        request.stashed_vars(),
+        time_machine.travel(datetime.datetime(2018, 4, 15, 16, 50, tzinfo=ZoneInfo("CET"))),
     ):
         request.del_vars()
 
@@ -809,23 +891,49 @@ def test_service_painters(  # type:ignore[no-untyped-def]
             _test_painter(painter_ident, live)
 
 
-def _test_painter(painter_ident, live):
+def _test_painter(painter_ident: str, live: MockLiveStatusConnection) -> None:
     _set_expected_queries(painter_ident, live)
+
+    name, params = _painter_name_spec(painter_ident)
 
     view = View(
         view_name="",
         view_spec={
             "group_painters": [],
-            "painters": [PainterSpec(_painter_name_spec(painter_ident), None, None, None)],
+            "painters": [ColumnSpec(name=name, parameters=params)],
             "sorters": [],
             "datasource": "services",
+            "browser_reload": 30,
+            "column_headers": "pergroup",
+            "description": "",
+            "hidden": False,
+            "hidebutton": False,
+            "layout": "table",
+            "mustsearch": False,
+            "name": "allhosts",
+            "num_columns": 3,
+            "owner": UserId.builtin(),
+            "play_sounds": False,
+            "public": True,
+            "title": "Test view",
+            "topic": "overview",
+            "sort_index": 20,
+            "icon": "folder",
+            "user_sortable": True,
+            "single_infos": [],
+            "context": {},
+            "link_from": {},
+            "add_context_to_title": True,
+            "is_show_more": False,
+            "packaged": False,
+            "megamenu_search_terms": [],
         },
         context={},
     )
 
     row = _service_row()
     for cell in view.row_cells:
-        _tdclass, content = cell.render(row)
+        _tdclass, content = cell.render(row, partial(render_link_to_view, request=request))
         assert isinstance(content, (str, HTML))
 
         if isinstance(content, str) and "<" in content:
@@ -887,7 +995,7 @@ def _service_row():
         "host_in_check_period": 1,
         "host_in_notification_period": 1,
         "host_in_service_period": 1,
-        "host_inventory": StructuredDataNode.deserialize(
+        "host_inventory": deserialize_tree(
             {
                 "hardware": {
                     "memory": {
@@ -992,9 +1100,9 @@ def _service_row():
                                     "num_services": "79",
                                     "rrdcached": "stopped",
                                     "site": "heute",
-                                    "stunnel": "not " "existent",
+                                    "stunnel": "not existent",
                                     "used_version": "2021.03.18.cee",
-                                    "xinetd": "not " "existent",
+                                    "xinetd": "not existent",
                                 },
                                 {
                                     "apache": "stopped",
@@ -1014,9 +1122,9 @@ def _service_row():
                                     "num_services": "74",
                                     "rrdcached": "stopped",
                                     "site": "old",
-                                    "stunnel": "not " "existent",
+                                    "stunnel": "not existent",
                                     "used_version": "1.6.0-2021.03.19.cee",
-                                    "xinetd": "not " "existent",
+                                    "xinetd": "not existent",
                                 },
                                 {
                                     "apache": "running",
@@ -1036,9 +1144,9 @@ def _service_row():
                                     "num_services": "69",
                                     "rrdcached": "running",
                                     "site": "abc",
-                                    "stunnel": "not " "existent",
+                                    "stunnel": "not existent",
                                     "used_version": "2.0.0-2021.03.31.cee",
-                                    "xinetd": "not " "existent",
+                                    "xinetd": "not existent",
                                 },
                                 {
                                     "apache": "stopped",
@@ -1072,8 +1180,8 @@ def _service_row():
                                     "mknotifyd": "running",
                                     "rrdcached": "running",
                                     "site": "beta",
-                                    "stunnel": "not " "existent",
-                                    "xinetd": "not " "existent",
+                                    "stunnel": "not existent",
+                                    "xinetd": "not existent",
                                 },
                                 {
                                     "apache": "running",
@@ -1085,7 +1193,7 @@ def _service_row():
                                     "mknotifyd": "running",
                                     "rrdcached": "running",
                                     "site": "beta_slave_1",
-                                    "stunnel": "not " "existent",
+                                    "stunnel": "not existent",
                                     "xinetd": "running",
                                 },
                                 {
@@ -1111,7 +1219,7 @@ def _service_row():
                                     "mknotifyd": "running",
                                     "rrdcached": "running",
                                     "site": "crawl_central",
-                                    "stunnel": "not " "existent",
+                                    "stunnel": "not existent",
                                     "xinetd": "running",
                                 },
                                 {
@@ -1139,8 +1247,8 @@ def _service_row():
                                     "mknotifyd": "running",
                                     "rrdcached": "running",
                                     "site": "lmtest",
-                                    "stunnel": "not " "existent",
-                                    "xinetd": "not " "existent",
+                                    "stunnel": "not existent",
+                                    "xinetd": "not existent",
                                 },
                                 {
                                     "apache": "stopped",
@@ -1152,8 +1260,8 @@ def _service_row():
                                     "mknotifyd": "stopped",
                                     "rrdcached": "stopped",
                                     "site": "stable2",
-                                    "stunnel": "not " "existent",
-                                    "xinetd": "not " "existent",
+                                    "stunnel": "not existent",
+                                    "xinetd": "not existent",
                                 },
                                 {"autostart": False, "site": "cmk", "used_version": ""},
                             ],
@@ -1678,7 +1786,37 @@ def _painter_name_spec(painter_ident):
         return painter_ident, {"uuid": "e13957f5-1b0b-43a7-a452-3bff7187542e"}
     if painter_ident == "svc_metrics_forecast":
         return painter_ident, {"uuid": "3c659189-29f3-411a-8456-6a07fdae4d51"}
-    return painter_ident
+    if painter_ident == "sla_fixed":
+        return painter_ident, {
+            "layout_options": {"full_title": False, "hide_subresults": False, "summary": "off"},
+            "sla_config": (
+                "sla_configuration_1",
+                {
+                    "service_outage_count_painter": {"display_type": "timespan"},
+                    "service_state_percentage_painter": {
+                        "display_type": "timespan",
+                        "float_precision": 0,
+                    },
+                },
+            ),
+            "timerange_spec": "m1",
+        }
+    if painter_ident == "sla_specific":
+        return painter_ident, {
+            "layout_options": {"full_title": False, "hide_subresults": False, "summary": "off"},
+            "sla_config": (
+                "sla_configuration_1",
+                {
+                    "service_outage_count_painter": {"display_type": "timespan"},
+                    "service_state_percentage_painter": {
+                        "display_type": "timespan",
+                        "float_precision": 0,
+                    },
+                },
+            ),
+            "timerange_spec": "m1",
+        }
+    return painter_ident, {}
 
 
 def _set_expected_queries(painter_ident, live):
@@ -1688,3 +1826,344 @@ def _set_expected_queries(painter_ident, live):
             "GET hosts\nColumns: host_name\nLocaltime: 1523811000\nOutputFormat: json\nKeepAlive: on\nResponseHeader: fixed16"
         )
         return
+    if painter_ident == "svc_long_plugin_output":
+        live.add_table(
+            "status",
+            [
+                {
+                    "max_long_output_size": 2000,
+                }
+            ],
+        )
+        live.expect_query(
+            "GET status\nColumns: max_long_output_size\nLocaltime: 1523811000\nOutputFormat: python3\nKeepAlive: on\nResponseHeader: fixed16",
+        )
+        return
+
+
+def _load_notes_into_files(notes_dirs: list[Path], notes: list[dict[str, Any]]) -> list[str]:
+    expected_notes: list[str] = []
+
+    for path in notes_dirs:
+        path.mkdir(parents=True, exist_ok=True)
+
+    for note in notes:
+        with open(note["file"], "w") as f:
+            f.write(note["content"])
+            if note["on_response"]:
+                expected_notes.append(note["content"])
+
+    return expected_notes
+
+
+@pytest.mark.parametrize(
+    "notes_type, notes_dir, notes_file, row, notes",
+    [
+        pytest.param(
+            "service",
+            Path(default_config_dir) / "notes/services" / "heute",
+            Path(default_config_dir) / "notes/services" / "heute" / "SomeService",
+            {
+                "host_address": "127.0.0.1",
+                "service_description": "SomeService",
+                "host_name": "heute",
+                "site": "my_site",
+            },
+            ["A Service note", "One more service note"],
+            id="Service note for dedicated host",
+        ),
+        pytest.param(
+            "service",
+            Path(default_config_dir) / "notes/services" / "*",
+            Path(default_config_dir) / "notes/services" / "*" / "AnotherService",
+            {
+                "host_address": "127.0.0.1",
+                "service_description": "AnotherService",
+                "host_name": "some_host",
+                "site": "my_site",
+            },
+            ["Another service note", "Last service note"],
+            id="Service note for multiple hosts",
+        ),
+        pytest.param(
+            "host",
+            Path(default_config_dir) / "notes/hosts",
+            Path(default_config_dir) / "notes/hosts" / "this_host",
+            {
+                "host_address": "127.0.0.1",
+                "host_name": "this_host",
+                "site": "my_site",
+            },
+            ["First host node", "Second host node"],
+            id="A host note for dedicated host",
+        ),
+        pytest.param(
+            "host",
+            Path(default_config_dir) / "notes/hosts",
+            Path(default_config_dir) / "notes/hosts" / "*",
+            {
+                "host_address": "127.0.0.1",
+                "host_name": "another_host",
+                "site": "my_site",
+            },
+            ["First host node", "Second host node", "And so on"],
+            id="A host note for multiple hosts",
+        ),
+    ],
+)
+def test_paint_custom_notes(
+    notes_type: Literal["host", "service"],
+    notes_dir: Path,
+    notes_file: Path,
+    row: Row,
+    notes: list[str],
+    request_context: None,
+) -> None:
+    notes_dir.mkdir(parents=True)
+    with open(notes_file, "w") as f:
+        f.write("<hr>".join(notes))
+
+    assert notes_file.read_text() == str(
+        _paint_custom_notes(notes_type, row, config=active_config)[1]
+    )
+
+
+@pytest.mark.parametrize(
+    "object_type, host_name, service_name, notes_dirs, notes",
+    [
+        pytest.param(
+            "host",
+            "localhost",
+            "",
+            [
+                Path(default_config_dir) / "notes/hosts",
+            ],
+            [
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "localhost",
+                    "content": "Notes for host localhost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "*ost",
+                    "content": "Notes for hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "*",
+                    "content": "Notes for all hosts",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "ost",
+                    "content": "This note should be ignored",
+                    "on_response": False,
+                },
+            ],
+            id="Inclusion of host notes files",
+        ),
+        pytest.param(
+            "service",
+            "localhost",
+            "Uptime",
+            [
+                Path(default_config_dir) / "notes/services" / "*",
+                Path(default_config_dir) / "notes/services" / "*ost",
+                Path(default_config_dir) / "notes/services/localhost",
+                Path(default_config_dir) / "notes/services/no_match",
+            ],
+            [
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "Pendorcho",
+                    "content": "This note should be ignored (localhost:Pendorcho)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "Uptime",
+                    "content": "Notes for service Uptime on host localhost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "*time",
+                    "content": "Notes for services ending with time on host localhost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "*",
+                    "content": "Notes for all services on host localhost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "Pendorcho",
+                    "content": "This note should be ignored (*ost:Pendorcho)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "Uptime",
+                    "content": "Notes for service Uptime on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "*time",
+                    "content": "Notes for services ending with time on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "*",
+                    "content": "Notes for all services on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "Pendorcho",
+                    "content": "This note should be ignored (*:Pendorcho)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "Uptime",
+                    "content": "Notes for service Uptime on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "*time",
+                    "content": "Notes for services ending with time on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "*",
+                    "content": "Notes for all services on hosts ending with ost",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "no_match" / "Pendorcho",
+                    "content": "This note should be ignored (no_match:Pendorcho)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "no_match" / "Uptime",
+                    "content": "This note should be ignored (no_match:Uptime)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "no_match" / "*time",
+                    "content": "This note should be ignored (no_match:*time)",
+                    "on_response": False,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "no_match" / "*",
+                    "content": "This note should be ignored (no_match:*)",
+                    "on_response": False,
+                },
+            ],
+            id="Inclusion of service notes files",
+        ),
+        pytest.param(
+            "host",
+            "localhost",
+            "",
+            [
+                Path(default_config_dir) / "notes/hosts",
+            ],
+            [
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "localhost",
+                    "content": "this note contains javascript <script>alert('hello')</script>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "*ost",
+                    "content": "this note contains a table <table><tr><td>cell1</td><td>cell2</td></tr></table>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/hosts" / "*",
+                    "content": 'This note contains a paragraph with some style <p style="color: red">paragraph</p>',
+                    "on_response": True,
+                },
+            ],
+            id="HTML content on hosts notes",
+        ),
+        pytest.param(
+            "service",
+            "localhost",
+            "Uptime",
+            [
+                Path(default_config_dir) / "notes/services" / "*",
+                Path(default_config_dir) / "notes/services" / "*ost",
+                Path(default_config_dir) / "notes/services/localhost",
+                Path(default_config_dir) / "notes/services/no_match",
+            ],
+            [
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "Uptime",
+                    "content": "this note contains javascript <script>alert('hello')</script>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "*time",
+                    "content": "this note contains a table <table><tr><td>cell1</td><td>cell2</td></tr></table>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "localhost" / "*",
+                    "content": 'This note contains a paragraph with some style <p style="color: red">paragraph</p>',
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "Uptime",
+                    "content": "This note has a <strong>tag</strong>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "*time",
+                    "content": "<h1>This</h1> is a heading",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*ost" / "*",
+                    "content": '<table border="1"><tr style="background-color:#d35400"><th>Title</th></tr><tr><td>Content</td</tr></table>',
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "Uptime",
+                    "content": "<script>alert('hello')</script>",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "*time",
+                    "content": "multi </br> line </br> note",
+                    "on_response": True,
+                },
+                {
+                    "file": Path(default_config_dir) / "notes/services" / "*" / "*",
+                    "content": "even broken <tags> are allowed",
+                    "on_response": True,
+                },
+            ],
+            id="HTML content on services notes",
+        ),
+    ],
+)
+def test_paint_custom_notes_file_inclusion_and_html_tags(
+    object_type: Literal["host", "service"],
+    host_name: str,
+    service_name: str | None,
+    notes_dirs: list[Path],
+    notes: list[dict[str, Any]],
+    request_context: None,
+) -> None:
+    expected_notes: list[str] = _load_notes_into_files(notes_dirs, notes)
+
+    row: Row = {
+        "host_name": host_name,
+        "service_description": service_name,
+        "site": "my_site",
+        "host_address": "127.0.0.1",
+    }
+
+    displayed_custom_notes = _paint_custom_notes(object_type, row, config=active_config)[1]
+    assert isinstance(displayed_custom_notes, HTML)
+
+    notes_as_string = str(displayed_custom_notes)
+    expected_string = str(HTML.without_escaping("<hr>".join(expected_notes)))
+
+    assert expected_string == notes_as_string

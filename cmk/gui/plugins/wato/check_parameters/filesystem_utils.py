@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Module to hold shared code for filesystem check parameter module internals"""
 
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from enum import Enum
-from typing import Any, Callable, List, Literal, Mapping, MutableMapping, Optional, Sequence, Union
+from typing import Any, Literal
 
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
@@ -33,8 +34,6 @@ MutableParamType = MutableMapping[str, Any]
 class FilesystemElements(Enum):
     levels = "levels"
     levels_percent = "levels_percent"  # sansymphony_pool
-    levels_unbound = "levels_unbound"  # These are percentage levels with no maximum value.
-    # I assume this is due to overprovisioning of virtual filesystems, see netapp_volumes
     show_levels = "show_levels"  # TODO: deprecate
     magic_factor = "magic_factor"
     reserved = "reserved"
@@ -62,9 +61,8 @@ def match_dual_level_type(value):
 
 def _get_free_used_dynamic_valuespec(
     level_perspective: Literal["used", "free"],
-    default_value=(80.0, 90.0),
+    default_value: tuple[float, float] = (80.0, 90.0),
     *,
-    maxvalue: Union[None, float],
     do_include_absolutes: bool = True,
 ) -> ValueSpec:
     if level_perspective == "used":
@@ -75,7 +73,7 @@ def _get_free_used_dynamic_valuespec(
         title = _("free space")
         course = _("below")
 
-    vs_subgroup: List[ValueSpec] = [
+    vs_subgroup: list[ValueSpec] = [
         Tuple(
             title=_("Percentage"),
             elements=[
@@ -83,13 +81,13 @@ def _get_free_used_dynamic_valuespec(
                     title=_("Warning if %s") % course,
                     unit="%",
                     minvalue=0.0 if level_perspective == "used" else 0.0001,
-                    maxvalue=maxvalue,
+                    maxvalue=None,
                 ),
                 Percentage(
                     title=_("Critical if %s") % course,
                     unit="%",
                     minvalue=0.0 if level_perspective == "used" else 0.0001,
-                    maxvalue=maxvalue,
+                    maxvalue=None,
                 ),
             ],
         )
@@ -144,7 +142,6 @@ def _tuple_convert(val: tuple[float, ...]) -> tuple[float, ...]:
 
 
 def _transform_filesystem_free(value):
-
     if isinstance(value, tuple):
         return _tuple_convert(value)
 
@@ -155,9 +152,8 @@ def _transform_filesystem_free(value):
 
 
 def _filesystem_levels_elements(
-    maxvalue: Optional[float] = 101.0,
     do_include_absolutes: bool = True,
-) -> List[DictionaryEntry]:
+) -> list[DictionaryEntry]:
     return [
         (
             "levels",
@@ -169,19 +165,17 @@ def _filesystem_levels_elements(
                 elements=[
                     _get_free_used_dynamic_valuespec(
                         "used",
-                        maxvalue=maxvalue,
                         do_include_absolutes=do_include_absolutes,
                     ),
                     Transform(
                         valuespec=_get_free_used_dynamic_valuespec(
                             "free",
                             default_value=(20.0, 10.0),
-                            maxvalue=maxvalue,
                             do_include_absolutes=do_include_absolutes,
                         ),
                         title=_("Levels for free space"),
-                        forth=_transform_filesystem_free,
-                        back=_transform_filesystem_free,
+                        to_valuespec=_transform_filesystem_free,
+                        from_valuespec=_transform_filesystem_free,
                     ),
                 ],
             ),
@@ -189,19 +183,11 @@ def _filesystem_levels_elements(
     ]
 
 
-def _filesystem_levels_elements_bound() -> List[DictionaryEntry]:
-    return _filesystem_levels_elements()
-
-
-def _filesystem_levels_elements_unbound() -> List[DictionaryEntry]:
-    return _filesystem_levels_elements(maxvalue=None)
-
-
-def _filesystem_levels_percent_only() -> List[DictionaryEntry]:
+def _filesystem_levels_percent_only() -> list[DictionaryEntry]:
     return _filesystem_levels_elements(do_include_absolutes=False)
 
 
-def _filesystem_show_levels_elements() -> List[DictionaryEntry]:
+def _filesystem_show_levels_elements() -> list[DictionaryEntry]:
     return [
         (
             "show_levels",
@@ -219,7 +205,7 @@ def _filesystem_show_levels_elements() -> List[DictionaryEntry]:
 
 
 # Note: This hack is only required on very old filesystem checks (prior August 2013)
-def _filesystem_levels_elements_hack() -> List[DictionaryEntry]:
+def _filesystem_levels_elements_hack() -> list[DictionaryEntry]:
     return [
         # Beware: this is a nasty hack that helps us to detect new-style parameters.
         # Something hat has todo with float/int conversion and has not been documented
@@ -235,16 +221,17 @@ def _filesystem_levels_elements_hack() -> List[DictionaryEntry]:
     ]
 
 
-def _filesystem_reserved_elements() -> List[DictionaryEntry]:
+def _filesystem_reserved_elements() -> list[DictionaryEntry]:
     return [
         (
             "show_reserved",
             DropdownChoice(
                 title=_("Show space reserved for the <tt>root</tt> user"),
                 help=_(
-                    "Check_MK treats space that is reserved for the <tt>root</tt> user on Linux and Unix as "
+                    # xgettext: no-python-format
+                    "Checkmk treats space that is reserved for the <tt>root</tt> user on Linux and Unix as "
                     "used space. Usually, 5% are being reserved for root when a new filesystem is being created. "
-                    "With this option you can have Check_MK display the current amount of reserved but yet unused "
+                    "With this option you can have Checkmk display the current amount of reserved but yet unused "
                     "space."
                 ),
                 choices=[
@@ -260,9 +247,10 @@ def _filesystem_reserved_elements() -> List[DictionaryEntry]:
                     "Exclude space reserved for the <tt>root</tt> user from calculation of used space"
                 ),
                 help=_(
-                    "By default Check_MK treats space that is reserved for the <tt>root</tt> user on Linux and Unix as "
+                    # xgettext: no-python-format
+                    "By default Checkmk treats space that is reserved for the <tt>root</tt> user on Linux and Unix as "
                     "used space. Usually, 5% are being reserved for root when a new filesystem is being created. "
-                    "With this option you can have Check_MK exclude the current amount of reserved but yet unused "
+                    "With this option you can have Checkmk exclude the current amount of reserved but yet unused "
                     "space from the calculations regarding the used space percentage."
                 ),
                 choices=[
@@ -274,7 +262,7 @@ def _filesystem_reserved_elements() -> List[DictionaryEntry]:
     ]
 
 
-def _filesystem_volume_name() -> List[DictionaryEntry]:
+def _filesystem_volume_name() -> list[DictionaryEntry]:
     return [
         (
             "show_volume_name",
@@ -287,7 +275,7 @@ def _filesystem_volume_name() -> List[DictionaryEntry]:
     ]
 
 
-def _filesystem_inodes_elements() -> List[DictionaryEntry]:
+def _filesystem_inodes_elements() -> list[DictionaryEntry]:
     return [
         (
             "inodes_levels",
@@ -326,7 +314,7 @@ def _filesystem_inodes_elements() -> List[DictionaryEntry]:
                     ),
                     FixedValue(
                         value=None,
-                        totext="",
+                        totext=_("No levels on inodes"),
                         title=_("Ignore levels"),
                     ),
                 ],
@@ -339,7 +327,11 @@ def _filesystem_inodes_elements() -> List[DictionaryEntry]:
                 title=_("Display inode usage in check output..."),
                 choices=[
                     ("onproblem", _("Only in case of a problem")),
-                    ("onlow", _("Only in case of a problem or if inodes are below 50%")),
+                    (
+                        "onlow",
+                        # xgettext: no-python-format
+                        _("Only in case of a problem or if inodes are below 50%"),
+                    ),
                     ("always", _("Always")),
                 ],
                 default_value="onlow",
@@ -348,7 +340,7 @@ def _filesystem_inodes_elements() -> List[DictionaryEntry]:
     ]
 
 
-def _filesystem_magic_elements() -> List[DictionaryEntry]:
+def _filesystem_magic_elements() -> list[DictionaryEntry]:
     return [
         (
             "magic",
@@ -397,7 +389,7 @@ def _filesystem_magic_elements() -> List[DictionaryEntry]:
     ]
 
 
-def size_trend_elements() -> List[DictionaryEntry]:
+def size_trend_elements() -> list[DictionaryEntry]:
     return [
         (
             "trend_range",
@@ -504,10 +496,9 @@ def size_trend_elements() -> List[DictionaryEntry]:
     ]
 
 
-FILESYSTEM_ELEMENTS_SELECTOR: Mapping[FilesystemElements, Callable[[], List[DictionaryEntry]]] = {
-    FilesystemElements.levels: _filesystem_levels_elements_bound,
+FILESYSTEM_ELEMENTS_SELECTOR: Mapping[FilesystemElements, Callable[[], list[DictionaryEntry]]] = {
+    FilesystemElements.levels: _filesystem_levels_elements,
     FilesystemElements.levels_percent: _filesystem_levels_percent_only,
-    FilesystemElements.levels_unbound: _filesystem_levels_elements_unbound,
     FilesystemElements.show_levels: _filesystem_show_levels_elements,
     FilesystemElements.reserved: _filesystem_reserved_elements,
     FilesystemElements.volume_name: _filesystem_volume_name,
@@ -519,11 +510,11 @@ FILESYSTEM_ELEMENTS_SELECTOR: Mapping[FilesystemElements, Callable[[], List[Dict
 
 def vs_filesystem(
     *,
-    elements: Optional[Sequence[FilesystemElements]] = None,
-    extra_elements: Optional[List[DictionaryEntry]] = None,
-    ignored_keys: Optional[Sequence[str]] = None,
+    elements: Sequence[FilesystemElements] | None = None,
+    extra_elements: list[DictionaryEntry] | None = None,
+    ignored_keys: Sequence[str] | None = None,
+    title: str | None = None,
 ) -> Dictionary:
-
     if extra_elements is None:
         extra_elements = []
 
@@ -562,4 +553,5 @@ def vs_filesystem(
             "flex_levels"
         ],
         ignored_keys=ignored_keys,
+        title=title,
     )

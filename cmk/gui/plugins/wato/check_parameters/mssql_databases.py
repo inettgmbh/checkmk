@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -19,15 +19,15 @@ def _parameter_valuespec_mssql_databases():
                 "map_db_states",
                 Dictionary(
                     elements=[
-                        ("ONLINE", MonitoringState(title=_("Database Online"))),
-                        ("OFFLINE", MonitoringState(title=_("Database Offline"))),
-                        ("RESTORING", MonitoringState(title=_("Database Files are restored"))),
+                        ("ONLINE", MonitoringState(title=_("Database online"))),
+                        ("OFFLINE", MonitoringState(title=_("Database offline"))),
+                        ("RESTORING", MonitoringState(title=_("Database files are restored"))),
                         ("RECOVERING", MonitoringState(title=_("Database is being recovered"))),
                         (
                             "RECOVERY_PENDING",
                             MonitoringState(title=_("Database must be recovered")),
                         ),
-                        ("SUSPECT", MonitoringState(title=_("Database Suspect"))),
+                        ("SUSPECT", MonitoringState(title=_("Database suspect"))),
                         ("EMERGENCY", MonitoringState(title=_("Database changed to emergency"))),
                     ],
                     title=_("Map Database States"),

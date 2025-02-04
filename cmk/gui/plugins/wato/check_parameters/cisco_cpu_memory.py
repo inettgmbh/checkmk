@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.check_parameters.filesystem_utils import match_dual_level_type
 from cmk.gui.plugins.wato.utils import (
-    CheckParameterRulespecWithoutItem,
+    CheckParameterRulespecWithItem,
     rulespec_registry,
     RulespecGroupCheckParametersOperatingSystem,
 )
-from cmk.gui.valuespec import Alternative, Dictionary, Integer, Percentage, Transform, Tuple
+from cmk.gui.valuespec import (
+    Alternative,
+    Dictionary,
+    Integer,
+    Percentage,
+    TextInput,
+    Transform,
+    Tuple,
+)
 
 
 def _parameter_valuespec_memory():
@@ -83,8 +91,8 @@ def _parameter_valuespec_memory():
                                 "Specify the threshold levels for the free memory space. The free memory "
                                 "excludes the reserved kernel memory."
                             ),
-                            forth=lambda val: tuple(-x for x in val),
-                            back=lambda val: tuple(-x for x in val),
+                            to_valuespec=lambda val: tuple(-x for x in val),
+                            from_valuespec=lambda val: tuple(-x for x in val),
                         ),
                     ],
                 ),
@@ -94,10 +102,11 @@ def _parameter_valuespec_memory():
 
 
 rulespec_registry.register(
-    CheckParameterRulespecWithoutItem(
+    CheckParameterRulespecWithItem(
         check_group_name="cisco_cpu_memory",
         group=RulespecGroupCheckParametersOperatingSystem,
         parameter_valuespec=_parameter_valuespec_memory,
         title=lambda: _("Cisco CPU Memory"),
+        item_spec=lambda: TextInput(title=_("CPUs physical name")),
     )
 )

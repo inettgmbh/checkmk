@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -8,38 +8,48 @@
 #include "providers/agent_plugins.h"
 
 #include <filesystem>
+#include <fstream>
 
-#include "cfg.h"
 #include "common/wtools.h"
 #include "tools/_misc.h"
+#include "wnx/cfg.h"
 namespace fs = std::filesystem;
 using namespace std::string_literals;
 
 namespace cma::provider {
 namespace {
-enum class FileType { ps1, cmd, vbs, py, other };
+enum class FileType { ps1, cmd, vbs, py, exe, other };
 
-size_t GetLength(std::ifstream &ifs) {
-    ifs.seekg(0, ifs.end);
-    const auto length = ifs.tellg();
-    ifs.seekg(0, ifs.beg);
-    return static_cast<size_t>(length);
+std::optional<size_t> GetLength(std::ifstream &ifs) {
+    try {
+        ifs.seekg(0, std::ios_base::end);
+        const auto length = ifs.tellg();
+        ifs.seekg(0, std::ios_base::beg);
+        return {static_cast<size_t>(length)};
+    } catch (const std::ios_base::failure &e) {
+        XLOG::d("Can't get length exception '{}'", e.what());
+        return {};
+    }
 }
 
 std::string ReadFileToString(const fs::path &file) {
     std::string ret;
     std::ifstream ifs(file, std::ifstream::in);
-    if (ifs) {
-        const auto length = GetLength(ifs);
-        ret.resize(static_cast<size_t>(length));
-        ifs.read(ret.data(), length);
-        if (ifs.good() || ifs.eof()) {
-            return ret;
-        }
-        XLOG::d("Can't read '{}'", file.u8string());
-    } else {
+    if (!ifs) {
         XLOG::d("Can't open '{}'", file.u8string());
+        return {};
     }
+    const auto length = GetLength(ifs);
+    if (!length.has_value()) {
+        return {};
+    }
+
+    ret.resize(*length);
+    ifs.read(ret.data(), static_cast<std::streamsize>(*length));
+    if (ifs.good() || ifs.eof()) {
+        return ret;
+    }
+    XLOG::d("Can't read '{}'", file.u8string());
     return {};
 }
 
@@ -54,6 +64,7 @@ std::string Marker(FileType file_type) {
         case FileType::py:
             return "__version__ = "s;
         case FileType::other:
+        case FileType::exe:
             return {};
     }
     // unreachable
@@ -62,24 +73,52 @@ std::string Marker(FileType file_type) {
 
 std::string FindVersionInfo(const fs::path &file, FileType file_type) {
     try {
-        std::string ret = ReadFileToString(file);
-        auto marker = Marker(file_type);
-        if (marker.empty()) {
-            XLOG::t("This file type '{}' is not supported", file);
-            return {};
+        switch (file_type) {
+            case FileType::exe: {
+                // code below is tested manually
+                const auto plugin_name = file.stem().string();
+                if (plugin_name == "mk-sql") {
+                    auto result =
+                        wtools::RunCommand(file.wstring() + L" --version");
+                    tools::AllTrim(result);
+                    const auto output = tools::SplitString(result, " ");
+                    if (output.size() == 2 &&
+                        file.stem().string() == output[0]) {
+                        return fmt::format("{}:CMK_VERSION = \"{}\"", file,
+                                           output[1]);
+                    }
+                } else {
+                    return fmt::format("{}:CMK_VERSION = n/a", file);
+                }
+                return {};
+            }
+            case FileType::ps1:
+            case FileType::cmd:
+            case FileType::py:
+            case FileType::vbs: {
+                const auto ret = ReadFileToString(file);
+                const auto marker = Marker(file_type);
+                if (marker.empty()) {
+                    XLOG::t("This file type '{}' is not supported", file);
+                    return {};
+                }
+                const auto offset = ret.find(marker);
+                if (offset == std::string::npos) {
+                    return fmt::format("{}:CMK_VERSION = unversioned", file);
+                }
+                const auto end = ret.find('\n', offset);
+                if (end == std::string::npos) {
+                    XLOG::t("This file type '{}' strange!", file);
+                    return {};
+                }
+                auto version_text = ret.substr(offset + marker.length(),
+                                               end - offset - marker.length());
+                return fmt::format("{}:CMK_VERSION = {}", file, version_text);
+            }
+            case FileType::other:
+                XLOG::t("This file type '{}' not supported", file);
+                return {};
         }
-        const auto offset = ret.find(marker);
-        if (offset == std::string::npos) {
-            return fmt::format("{}:CMK_VERSION = unversioned", file);
-        }
-        const auto end = ret.find("\n", offset);
-        if (end == std::string::npos) {
-            XLOG::t("This file type '{}' strange!", file);
-            return {};
-        }
-        auto version_text = ret.substr(offset + marker.length(),
-                                       end - offset - marker.length());
-        return fmt::format("{}:CMK_VERSION = {}", file, version_text);
 
     } catch (const std::exception &e) {
         XLOG::d("Can't access '{}', exception '{}'", file.u8string(), e.what());
@@ -101,8 +140,7 @@ std::vector<std::string> ScanDir(const fs::path &dir) {
         const std::unordered_map<std::wstring, FileType> map = {
             {L".ps1", FileType::ps1}, {L".cmd", FileType::cmd},
             {L".bat", FileType::cmd}, {L".vbs", FileType::vbs},
-            {L".py", FileType::py},
-        };
+            {L".py", FileType::py},   {L".exe", FileType::exe}};
         const auto type =
             map.contains(extension) ? map.at(extension) : FileType::other;
         auto version_text = FindVersionInfo(file, type);
@@ -128,4 +166,4 @@ std::string AgentPlugins::makeBody() {
     out.pop_back();
     return out;
 }
-};  // namespace cma::provider
+}  // namespace cma::provider

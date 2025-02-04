@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,8 +20,18 @@ def _parameter_valuespec_netapp_snapshots():
                 Tuple(
                     title=_("Levels for used configured reserve"),
                     elements=[
-                        Percentage(title=_("Warning at or above"), unit="%", default_value=85.0),
-                        Percentage(title=_("Critical at or above"), unit="%", default_value=90.0),
+                        Percentage(
+                            title=_("Warning at or above"),
+                            unit="%",
+                            default_value=85.0,
+                            maxvalue=None,
+                        ),
+                        Percentage(
+                            title=_("Critical at or above"),
+                            unit="%",
+                            default_value=90.0,
+                            maxvalue=None,
+                        ),
                     ],
                 ),
             ),

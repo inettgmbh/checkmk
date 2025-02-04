@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Mapping
+from typing import Final
 
-from tests.testlib import import_module, repo_path
+from pytest import MonkeyPatch
+
+from tests.testlib.unit.utils import import_module_hack
+
+import cmk.utils.paths
 
 _NON_STD_PREFIX: Mapping[str, str] = {
     "mkbackup_lock_dir": "/%.0s",
@@ -34,7 +39,6 @@ _STR_PATHS: Final = {
     "data_source_cache_dir",
     "snmp_scan_cache_dir",
     "include_cache_dir",
-    "tmp_dir",
     "logwatch_dir",
     "nagios_objects_file",
     "nagios_command_pipe_path",
@@ -52,14 +56,14 @@ _STR_PATHS: Final = {
     "inventory_archive_dir",
     "inventory_delta_cache_dir",
     "status_data_dir",
-    "robotmk_html_log_dir",
     "share_dir",
     "checks_dir",
     "inventory_dir",
-    "check_manpages_dir",
+    "legacy_check_manpages_dir",
     "agents_dir",
     "web_dir",
     "lib_dir",
+    "autoinventory_dir",
 }
 
 
@@ -72,7 +76,6 @@ def _ignore(varname: str) -> bool:
 
 def _check_paths(root: str, namespace_dict: Mapping[str, object]) -> None:
     for var, value in namespace_dict.items():
-
         if _ignore(var):
             continue
 
@@ -81,15 +84,17 @@ def _check_paths(root: str, namespace_dict: Mapping[str, object]) -> None:
             assert value.startswith(root)
             continue
 
+        if var == "cse_config_dir":
+            continue
+
         assert isinstance(value, Path)
         required_prefix = _NON_STD_PREFIX.get(var, "%s") % root
         assert str(value).startswith(required_prefix), repr((var, value, required_prefix))
 
 
-def test_paths_in_omd_and_opt_root(monkeypatch) -> None:  # type:ignore[no-untyped-def]
-
+def test_paths_in_omd_and_opt_root(monkeypatch: MonkeyPatch) -> None:
     omd_root = "/omd/sites/dingeling"
     with monkeypatch.context() as m:
         m.setitem(os.environ, "OMD_ROOT", omd_root)
-        test_paths = import_module("%s/cmk/utils/paths.py" % repo_path())
+        test_paths = import_module_hack(cmk.utils.paths.__file__)
         _check_paths(omd_root, test_paths.__dict__)

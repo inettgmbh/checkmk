@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Sequence
+
 import pytest
 
-from tests.testlib import Check
+from cmk.base.check_legacy_includes.fc_port import fc_parse_counter
 
 pytestmark = pytest.mark.checks
 
@@ -133,8 +135,5 @@ pytestmark = pytest.mark.checks
         ),  # "00 00 00 00 00 DA 85 00"
     ],
 )
-def test_services_split(oid_value, expected) -> None:  # type:ignore[no-untyped-def]
-    check = Check("fc_port")
-    fc_parse_counter = check.context["fc_parse_counter"]
-    actual = fc_parse_counter(oid_value)
-    assert actual == expected
+def test_services_split(oid_value: Sequence[int], expected: int) -> None:
+    assert fc_parse_counter(oid_value) == expected

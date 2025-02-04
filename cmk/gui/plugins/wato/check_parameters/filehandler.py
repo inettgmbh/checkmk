@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -19,10 +19,9 @@ def _parameter_valuespec_filehandler():
                 "levels",
                 Tuple(
                     title=_("Levels"),
-                    default_value=(80.0, 90.0),
                     elements=[
-                        Percentage(title=_("Warning at"), unit=_("%")),
-                        Percentage(title=_("Critical at"), unit=_("%")),
+                        Percentage(title=_("Warning at"), unit=_("%"), default_value=80.0),
+                        Percentage(title=_("Critical at"), unit=_("%"), default_value=90.0),
                     ],
                 ),
             ),

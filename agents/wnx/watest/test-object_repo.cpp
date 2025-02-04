@@ -6,7 +6,7 @@
 #include <chrono>
 #include <filesystem>
 
-#include "cfg_details.h"
+#include "wnx/cfg_details.h"
 #include "common/object_repo.h"
 #pragma warning(disable : 4996)  // have to test deprectaed API too
 
@@ -35,7 +35,6 @@ TEST(ObjectRepo, CheckShared) {
         EXPECT_EQ(*a4, val);
         for (auto k = 0; k < 100000; k++) {
             auto a3 = fs.createObject("a", val);
-            ;
         }
         EXPECT_TRUE(fs.count() == 5);
 
@@ -43,7 +42,7 @@ TEST(ObjectRepo, CheckShared) {
             auto result = fs.getObject(v);
             ASSERT_TRUE(result);
             EXPECT_EQ(*result, val);
-        };
+        }
         fs.removeObject("c");
         EXPECT_TRUE(fs.count() == 4);
         EXPECT_FALSE(fs.getObject("c"));

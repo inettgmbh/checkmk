@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 
 import pytest
-from freezegun import freeze_time
+import time_machine
 
-from tests.testlib import Check
+from cmk.agent_based.v2 import State, StringTable
 
-from cmk.base.plugins.agent_based.agent_based_api.v1 import State
-from cmk.base.plugins.agent_based.agent_based_api.v1.type_defs import StringTable
+from .checktestlib import Check
 
 
-@freeze_time("2020-01-13")
+@time_machine.travel("2020-01-13")
 @pytest.mark.parametrize(
     "info, expected_status",
     [

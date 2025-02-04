@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+
+from cmk.agent_based.legacy.v0_unstable import LegacyCheckDefinition
 
 
 class CheckHandler:
     """Collect the info on all checks"""
 
     def __init__(self) -> None:
-        self.cache: dict = {}
+        self.cache: dict[str, list[str]] = {}
 
-    def get_applicables(self, checkname, check_info):
+    def get_applicables(
+        self, checkname: str, check_info: dict[str, LegacyCheckDefinition]
+    ) -> list[str]:
         """get a list of names of all (sub)checks that apply"""
         if checkname in self.cache:
             return self.cache[checkname]

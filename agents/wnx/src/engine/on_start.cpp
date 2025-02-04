@@ -1,33 +1,41 @@
 // Configuration Parameters for whole Agent
 #include "stdafx.h"
 
-#include "on_start.h"
+#include "wnx/on_start.h"
 
 #include <atomic>
 #include <string>
-#include <string_view>
 
-#include "cfg.h"
-#include "cma_core.h"
 #include "common/cfg_info.h"
-#include "windows_service_api.h"
+#include "wnx/cfg.h"
+#include "wnx/cfg_details.h"
+#include "wnx/cma_core.h"
+#include "wnx/windows_service_api.h"
 
 namespace fs = std::filesystem;
 
 namespace cma {
 
-// internal global variables:
-static bool S_ConfigLoaded = false;
-static std::atomic<bool> S_OnStartCalled = false;
+bool OnStart(AppType proposed_type, const std::wstring &config_file);
+inline bool OnStart(AppType type) { return OnStart(type, L""); }
+bool OnStartApp() { return OnStart(AppType::automatic); }
+bool OnStartTest() { return OnStart(AppType::test); }
 
-bool ConfigLoaded() { return S_ConfigLoaded; }
+
+// internal global variables:
+namespace {
+bool g_config_loaded = false;
+std::atomic g_s_on_start_called = false;
+}  // namespace
+
+bool ConfigLoaded() { return g_config_loaded; }
 
 std::pair<fs::path, fs::path> FindTestDirs(const fs::path &base) {
     auto root_dir = fs::path{base} / "test" / "root";
     auto data_dir = fs::path{base} / "test" / "data";
-    std::error_code ec;
 
-    if (fs::exists(root_dir, ec) && fs::exists(data_dir, ec)) {
+    if (std::error_code ec;
+        fs::exists(root_dir, ec) && fs::exists(data_dir, ec)) {
         return {root_dir, data_dir};
     }
 
@@ -39,8 +47,7 @@ std::pair<fs::path, fs::path> FindAlternateDirs(AppType app_type) {
         case AppType::exe:
             for (const auto &env_var :
                  {env::regression_base_dir, env::integration_base_dir}) {
-                auto dir = tools::win::GetEnv(env_var);
-                if (!dir.empty()) {
+                if (auto dir = tools::win::GetEnv(env_var); !dir.empty()) {
                     XLOG::l.i(
                         "YOU ARE USING '{}' set by environment variable '{}'",
                         wtools::ToUtf8(dir), wtools::ToUtf8(env_var));
@@ -59,7 +66,9 @@ std::pair<fs::path, fs::path> FindAlternateDirs(AppType app_type) {
             }
             return FindTestDirs(dir);
         }
-        default:
+        case AppType::failed:
+        case AppType::srv:
+        case AppType::automatic:
             XLOG::l("Bad Mode [{}]", static_cast<int>(app_type));
             return {};
     }
@@ -92,7 +101,7 @@ bool FindAndPrepareWorkingFolders(AppType app_type) {
             XLOG::l.crit("Invalid value of the AppType automatic [{}]",
                          static_cast<int>(app_type));
             return false;
-    };
+    }
     LogFolders();
     return true;
 }
@@ -139,42 +148,44 @@ void UninstallAlert::set() noexcept {
 
 bool LoadConfigBase(const std::vector<std::wstring> &config_filenames,
                     YamlCacheOp cache_op) {
-    S_ConfigLoaded = cfg::InitializeMainConfig(config_filenames, cache_op);
+    g_config_loaded = cfg::InitializeMainConfig(config_filenames, cache_op);
 
-    if (S_ConfigLoaded) {
+    if (g_config_loaded) {
         cfg::ProcessKnownConfigGroups();
         cfg::SetupEnvironmentFromGroups();
     }
 
     XLOG::l.i("Loaded start config {}",
-              wtools::ToUtf8(cma::cfg::GetPathOfLoadedConfig()));
+              wtools::ToUtf8(cfg::GetPathOfLoadedConfig()));
     return true;
 }
 
-bool LoadConfigFull(const std::wstring &ConfigFile) {
+bool LoadConfigFull(const std::wstring &config_file) {
     cfg::details::KillDefaultConfig();
     // load config is here
     auto cfg_files = cfg::DefaultConfigArray();
-    if (!ConfigFile.empty()) {
+    if (!config_file.empty()) {
         cfg_files.clear();
-        cfg_files.push_back(ConfigFile);
+        cfg_files.push_back(config_file);
     }
 
     return LoadConfigBase(cfg_files, YamlCacheOp::update);
 }
 
 bool OnStartCore(AppType type, const std::wstring &config_file) {
-    if (!cfg::FindAndPrepareWorkingFolders(type)) return false;
+    if (!cfg::FindAndPrepareWorkingFolders(type)) {
+        return false;
+    }
     wtools::InitWindowsCom();
 
     return LoadConfigFull(config_file);
 }
 
-// must be called on start
+/// must be called on the start
 bool OnStart(AppType proposed_type, const std::wstring &config_file) {
-    auto type = CalcAppType(proposed_type);
+    const auto type = CalcAppType(proposed_type);
 
-    auto already_loaded = S_OnStartCalled.exchange(true);
+    const auto already_loaded = g_s_on_start_called.exchange(true);
     if (type == AppType::srv) {
         XLOG::details::LogWindowsEventAlways(XLOG::EventLevel::information, 35,
                                              "check_mk_service is loading");

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -10,8 +9,8 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Iterator
 from itertools import chain, repeat
-from typing import Iterator
 
 import pytest
 
@@ -134,7 +133,7 @@ def expected_output_engine():
             r"^$",
             r"Node,MACAddress,Name,NetConnectionID,NetConnectionStatus,Speed",
         ]
-        re_variadic = r"[^,]+,([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})?,[^,]+,[^,]*,\d*,\d*" r"|^$"
+        re_variadic = r"[^,]+,([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})?,[^,]+,[^,]*,\d*,\d*|^$"
         if Globals.plugintype == "plugins":
             re_variadic += r"|%s" % re.escape(r"<<<>>>")
         if not Globals.alone:
@@ -172,9 +171,7 @@ def plugin_dir_engine(request):
 @pytest.fixture(name="manage_plugins", params=["netstat_an.bat", "wmic_if.bat"], autouse=True)
 def manage_plugins_engine(request, plugin_dir):
     Globals.pluginname = request.param
-    source_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "files\\regression"
-    )
+    source_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "files\\regression")
 
     if not os.path.exists(plugin_dir):
         os.mkdir(plugin_dir)
@@ -195,7 +192,7 @@ def manage_plugins_engine(request, plugin_dir):
                     time.sleep(1)
 
 
-def test_section_plugin_group(  # type:ignore[no-untyped-def]
+def test_section_plugin_group(  # type: ignore[no-untyped-def]
     request, testconfig, expected_output, actual_output, testfile
 ) -> None:
     # request.node.name gives test name

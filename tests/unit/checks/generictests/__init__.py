@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Module for generic testing of a 'dataset' derived from various sources.
@@ -42,15 +42,9 @@ check function(s)). In the following, 'sc-dict' refers to a dictionary with
 Some more advanced ones are
 
   * `freeze_time`    : [str] Mocked time.
-                       If present its value is passed to `freezegun.freeze_time`.
+                       If present its value is passed to `time_machine.travel`.
                        If you specify the empty string it will be replaced by the
                        current time if processed by generictests.regression.
-  * `extra_sections` : [sc-dict] Extra sections that are appended to the info
-                       / parsed variable.
-                       If present, its values are extra sections (the actual
-                       content, not their names!) appended to the info/parsed
-                       argument before passed to the discovery or check
-                       function.
   * `mock_host_conf` : [sc-dict] If present, its values are passed to
                            `MockHostExtraConf`
                        as defined in checktestlib module.
@@ -61,6 +55,9 @@ Some more advanced ones are
                            `mock_item_state`
                        as defined in checktestlib module.
 """
+
 from .checkhandler import checkhandler
 from .run import run
 from .utils import DATASET_FILES, DATASET_NAMES
+
+__all__ = ["checkhandler", "run", "DATASET_FILES", "DATASET_NAMES"]

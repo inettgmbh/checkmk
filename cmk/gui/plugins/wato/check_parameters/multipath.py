@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,9 +16,9 @@ from cmk.gui.valuespec import (
     Checkbox,
     Dictionary,
     Integer,
+    Migrate,
     Percentage,
     TextInput,
-    Transform,
     Tuple,
 )
 
@@ -35,13 +35,13 @@ def _valuespec_inventory_multipath_rules():
                     help=_(
                         "If a multipath device has an alias then you can use it for specifying "
                         "the device instead of the UUID. The alias will then be part of the service "
-                        "description. The UUID will be displayed in the plugin output."
+                        "description. The UUID will be displayed in the plug-in output."
                     ),
                 ),
             ),
         ],
         help=_(
-            "This rule controls whether the UUID or the alias is used in the service description during "
+            "This rule controls whether the UUID or the alias is used in the service name during "
             "discovery of Multipath devices on Linux."
         ),
     )
@@ -85,7 +85,7 @@ def _multipath_lower_levels():
 
 
 def _parameter_valuespec_multipath():
-    return Transform(
+    return Migrate(
         valuespec=Dictionary(
             help=_(
                 "This rules sets the expected number of active paths for a multipath LUN "
@@ -95,7 +95,7 @@ def _parameter_valuespec_multipath():
                 ("levels", _multipath_lower_levels()),
             ],
         ),
-        forth=lambda p: p if isinstance(p, dict) else {"levels": p},
+        migrate=lambda p: p if isinstance(p, dict) else {"levels": p},
     )
 
 

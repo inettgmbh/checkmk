@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+# Copyright (C) 2023 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+
+from collections.abc import Mapping, Sequence
 
 import pytest
 
-from tests.testlib import Check
+from .checktestlib import Check
 
 
 @pytest.mark.parametrize(
@@ -86,8 +91,11 @@ from tests.testlib import Check
         ),
     ],
 )
-def test_wmi_cpu_load_discovery(  # type:ignore[no-untyped-def]
-    info, item, expected_item_data
+def test_f5_bigip_vserver_parsing(
+    info: list[Sequence[str]],
+    item: str,
+    expected_item_data: Mapping[str, str | Sequence[float]],
 ) -> None:
-    check = Check("f5_bigip_vserver")
-    assert sorted(check.run_parse(info)[item].items()) == sorted(expected_item_data.items())
+    parsed = Check("f5_bigip_vserver").run_parse(info)
+    assert isinstance(parsed, dict)
+    assert sorted(parsed[item].items()) == sorted(expected_item_data.items())

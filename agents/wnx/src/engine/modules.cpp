@@ -6,22 +6,24 @@
 
 #include "stdafx.h"
 
-#include "modules.h"
+#include "wnx/modules.h"
 
 #include <fmt/format.h>
+#include <fmt/xchar.h>
 
 #include <filesystem>
+#include <fstream>
 #include <ranges>
 #include <string>
 
-#include "cfg.h"
-#include "cma_core.h"
 #include "common/cfg_info.h"
-#include "common/fmt_ext.h"
 #include "common/wtools.h"
-#include "logger.h"
 #include "tools/_misc.h"
-#include "zip.h"
+#include "tools/_process.h"
+#include "wnx/cfg.h"
+#include "wnx/cma_core.h"
+#include "wnx/logger.h"
+#include "wnx/zip.h"
 
 using namespace std::literals;
 namespace fs = std::filesystem;
@@ -105,7 +107,7 @@ fs::path Module::findBin(const fs::path &modules_dir) const noexcept {
 }
 
 bool ModuleCommander::IsQuickReinstallAllowed() noexcept {
-    auto enabled_in_config =
+    const auto enabled_in_config =
         GetVal(groups::kModules, vars::kModulesQuickReinstall, true);
     return cfg::g_quick_module_reinstall_allowed && enabled_in_config;
 }
@@ -131,7 +133,7 @@ bool Module::prepareToWork(const fs::path &backup_dir,
 }
 
 namespace {
-/// \brief extracts usual extension and unusual, e.g. ".checkmk.py"
+/// extracts usual extension and unusual, e.g. ".checkmk.py"
 std::string ExtractExtension(const fs::path &script) {
     if (!script.has_extension()) {
         return std::string{kNoExtension};
@@ -184,8 +186,9 @@ std::wstring Module::buildCommandLineForced(
         if (bin().empty()) {
             return {};
         }
-        auto actual_dir = fs::path{GetUserDir()} / dir();
-        return fmt::format((actual_dir / exec()).wstring(), script.wstring());
+        const auto actual_dir = fs::path{GetUserDir()} / dir();
+        return fmt::format(fmt::runtime((actual_dir / exec()).wstring()),
+                           script.wstring());
     } catch (const std::exception &e) {
         XLOG::d("can't build valid command line for '{}', exception is '{}'",
                 name(), e);
@@ -263,7 +266,7 @@ ModuleCommander::GetSystemExtensions() {
     try {
         name_ = node[vars::kModulesName].as<std::string>();
         exec_ =
-            wtools::ConvertToUTF16(node[vars::kModulesExec].as<std::string>());
+            wtools::ConvertToUtf16(node[vars::kModulesExec].as<std::string>());
         exts_ = GetArray<std::string>(node[vars::kModulesExts]);
 
         // dir is optional
@@ -273,7 +276,7 @@ ModuleCommander::GetSystemExtensions() {
             dir = std::string{defaults::kModulesDir};
         }
 
-        dir_ = fmt::format(dir, name());
+        dir_ = fmt::format(fmt::runtime(dir), name());
 
     } catch (const std::exception &e) {
         XLOG::l("failed loading module '{}'", e);
@@ -472,13 +475,13 @@ std::vector<char> ReadFileBeginning(const fs::path &name, size_t count) {
         f.open(name, std::ios::binary);
         std::vector<char> data;
         data.resize(count);
-        f.read(data.data(), count);
+        f.read(data.data(), static_cast<std::streamsize>(count));
         f.close();
 
         return data;
     } catch (const std::ifstream::failure &e) {
         XLOG::l("Exception '{}' reading file '{}'", e.what(), name);
-    };
+    }
 
     return {};
 }

@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Sequence
+
 import pytest
 
-import cmk.gui.plugins.views.utils as utils
+from cmk.utils.user import UserId
+
+from cmk.gui.config import active_config
+from cmk.gui.display_options import display_options
+from cmk.gui.http import request, response
 from cmk.gui.logged_in import user
-from cmk.gui.plugins.views.utils import (
-    _encode_sorter_url,
-    _parse_url_sorters,
-    Cell,
-    group_value,
-    Painter,
-    PainterRegistry,
-    replace_action_url_macros,
-    SorterSpec,
-)
-from cmk.gui.type_defs import PainterSpec
-from cmk.gui.views import View
+from cmk.gui.painter.v0 import Cell, Painter, PainterRegistry, register_painter, registry
+from cmk.gui.painter.v0.helpers import RenderLink, replace_action_url_macros
+from cmk.gui.painter_options import PainterOptions
+from cmk.gui.theme.current_theme import theme
+from cmk.gui.type_defs import ColumnSpec, Row, SorterSpec, ViewSpec
+from cmk.gui.views.layout import group_value
+from cmk.gui.views.page_show_view import _parse_url_sorters
+from cmk.gui.views.sort_url import _encode_sorter_url
+from cmk.gui.views.store import multisite_builtin_views
+
+
+@pytest.fixture(name="view_spec")
+def view_spec_fixture(request_context: None) -> ViewSpec:
+    return multisite_builtin_views["allhosts"]
 
 
 @pytest.mark.parametrize(
@@ -26,17 +34,24 @@ from cmk.gui.views import View
     [
         (
             "-svcoutput,svc_perf_val01,svc_metrics_hist",
-            [("svcoutput", True), ("svc_perf_val01", False), ("svc_metrics_hist", False)],
+            [
+                SorterSpec(sorter="svcoutput", negate=True),
+                SorterSpec(sorter="svc_perf_val01", negate=False),
+                SorterSpec(sorter="svc_metrics_hist", negate=False),
+            ],
         ),
         (
             "sitealias,perfometer~CPU utilization,site",
-            [("sitealias", False), ("perfometer", False, "CPU utilization"), ("site", False)],
+            [
+                SorterSpec(sorter="sitealias", negate=False),
+                SorterSpec(sorter="perfometer", negate=False, join_key="CPU utilization"),
+                SorterSpec(sorter="site", negate=False),
+            ],
         ),
     ],
 )
-def test_url_sorters_parse_encode(url, sorters) -> None:  # type:ignore[no-untyped-def]
-    sorters = [SorterSpec(*s) for s in sorters]
-    assert _parse_url_sorters(url) == sorters
+def test_url_sorters_parse_encode(url: str, sorters: Sequence[SorterSpec]) -> None:
+    assert _parse_url_sorters(sorters, [], url) == sorters
     assert _encode_sorter_url(sorters) == url
 
 
@@ -64,29 +79,22 @@ def test_url_sorters_parse_encode(url, sorters) -> None:  # type:ignore[no-untyp
         ),
     ],
 )
+@pytest.mark.usefixtures("request_context")
 def test_replace_action_url_macros(
-    monkeypatch,
-    request_context,
-    url,
-    what,
-    row,
-    result,
-):
-    monkeypatch.setattr(
-        user,
-        "id",
-        "user",
-    )
-    assert replace_action_url_macros(url, what, row) == result
+    monkeypatch: pytest.MonkeyPatch, url: str, what: str, row: Row, result: str
+) -> None:
+    with monkeypatch.context() as m:
+        m.setattr(user, "id", UserId("user"))
+        assert replace_action_url_macros(url, what, row) == result
 
 
-def test_group_value(monkeypatch) -> None:  # type:ignore[no-untyped-def]
-    monkeypatch.setattr(utils, "painter_registry", PainterRegistry())
+def test_group_value(monkeypatch: pytest.MonkeyPatch, view_spec: ViewSpec) -> None:
+    monkeypatch.setattr(registry, "painter_registry", painter_registry := PainterRegistry())
 
-    def rendr(row) -> tuple[str, str]:  # type:ignore[no-untyped-def]
+    def rendr(row: Row) -> tuple[str, str]:
         return ("abc", "xyz")
 
-    utils.register_painter(
+    register_painter(
         "tag_painter",
         {
             "title": "Tag painter",
@@ -100,7 +108,14 @@ def test_group_value(monkeypatch) -> None:  # type:ignore[no-untyped-def]
         },
     )
 
-    painter: Painter = utils.painter_registry["tag_painter"]()
-    dummy_cell: Cell = Cell(View("", {}, {}), PainterSpec(painter.ident))
+    painter: Painter = painter_registry["tag_painter"](
+        user=user,
+        config=active_config,
+        request=request,
+        painter_options=PainterOptions.get_instance(),
+        theme=theme,
+        url_renderer=RenderLink(request, response, display_options),
+    )
+    dummy_cell: Cell = Cell(ColumnSpec(name=painter.ident), None, painter_registry)
 
     assert group_value({"host_tags": {"networking": "dmz"}}, [dummy_cell]) == ("dmz",)

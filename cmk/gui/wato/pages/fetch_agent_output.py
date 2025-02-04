@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -7,31 +7,59 @@ import abc
 import ast
 import os
 from pathlib import Path
-from typing import Dict
 
-import cmk.utils.store as store
-from cmk.utils.site import omd_site
+from pydantic import BaseModel
 
-import cmk.gui.background_job as background_job
-import cmk.gui.gui_background_job as gui_background_job
+from livestatus import SiteId
+
+from cmk.ccc import store
+from cmk.ccc.exceptions import MKGeneralException
+from cmk.ccc.site import omd_site
+
+from cmk.utils.hostaddress import HostName
+
+from cmk.gui.background_job import (
+    BackgroundJob,
+    BackgroundJobRegistry,
+    BackgroundProcessInterface,
+    InitialStatusArgs,
+    JobStatusSpec,
+    JobTarget,
+)
 from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem
-from cmk.gui.exceptions import HTTPRedirect, MKGeneralException, MKUserError
+from cmk.gui.config import active_config
+from cmk.gui.exceptions import HTTPRedirect, MKUserError
+from cmk.gui.gui_background_job import ActionHandler, JobRenderer
 from cmk.gui.htmllib.header import make_header
-from cmk.gui.htmllib.html import html
-from cmk.gui.http import request, response
+from cmk.gui.htmllib.html import html, HTMLGenerator
+from cmk.gui.http import ContentDispositionType, request, response
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
-from cmk.gui.pages import Page, page_registry
-from cmk.gui.plugins.views.utils import make_host_breadcrumb
+from cmk.gui.pages import Page, PageRegistry
 from cmk.gui.site_config import get_site_config, site_is_local
+from cmk.gui.theme import make_theme
 from cmk.gui.utils.escaping import escape_attribute
 from cmk.gui.utils.transaction_manager import transactions
 from cmk.gui.utils.urls import makeuri, makeuri_contextless
-from cmk.gui.watolib.automation_commands import automation_command_registry, AutomationCommand
+from cmk.gui.view_breadcrumbs import make_host_breadcrumb
+from cmk.gui.watolib.automation_commands import AutomationCommand, AutomationCommandRegistry
 from cmk.gui.watolib.automations import do_remote_automation
 from cmk.gui.watolib.check_mk_automations import get_agent_output
-from cmk.gui.watolib.hosts_and_folders import CREHost, Folder, Host
-from cmk.gui.watolib.wato_background_job import WatoBackgroundJob
+from cmk.gui.watolib.hosts_and_folders import folder_from_request, Host
+
+
+def register(
+    page_registry: PageRegistry,
+    automation_command_registry: AutomationCommandRegistry,
+    job_registry: BackgroundJobRegistry,
+) -> None:
+    page_registry.register_page("fetch_agent_output")(PageFetchAgentOutput)
+    page_registry.register_page("download_agent_output")(PageDownloadAgentOutput)
+    automation_command_registry.register(AutomationFetchAgentOutputStart)
+    automation_command_registry.register(AutomationFetchAgentOutputGetStatus)
+    automation_command_registry.register(AutomationFetchAgentOutputGetFile)
+    job_registry.register(FetchAgentOutputBackgroundJob)
+
 
 # .
 #   .--Agent-Output--------------------------------------------------------.
@@ -45,19 +73,19 @@ from cmk.gui.watolib.wato_background_job import WatoBackgroundJob
 #   | Page for downloading the current agent output / SNMP walk of a host  |
 #   '----------------------------------------------------------------------'
 # TODO: This feature is used exclusively from the GUI. Why is the code in
-#       wato.py? The only reason is because the WATO automation is used. Move
+#       wato.py? The only reason is because the Setup automation is used. Move
 #       to better location.
 
 
 class FetchAgentOutputRequest:
-    def __init__(self, host: CREHost, agent_type: str) -> None:
+    def __init__(self, host: Host, agent_type: str) -> None:
         self.host = host
         self.agent_type = agent_type
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, str]) -> "FetchAgentOutputRequest":
+    def deserialize(cls, serialized: dict[str, str]) -> "FetchAgentOutputRequest":
         host_name = serialized["host_name"]
-        host = Host.host(host_name)
+        host = Host.host(HostName(host_name))
         if host is None:
             raise MKGeneralException(
                 _(
@@ -68,11 +96,11 @@ class FetchAgentOutputRequest:
                 )
                 % (host_name, omd_site())
             )
-        host.need_permission("read")
+        host.permissions.need_permission("read")
 
         return cls(host, serialized["agent_type"])
 
-    def serialize(self) -> Dict[str, str]:
+    def serialize(self) -> dict[str, str]:
         return {
             "host_name": self.host.name(),
             "agent_type": self.agent_type,
@@ -99,26 +127,21 @@ class AgentOutputPage(Page, abc.ABC):
 
         self._back_url = request.get_url_input("back_url", deflt="") or None
 
-        host = Folder.current().host(host_name)
+        host = folder_from_request(request.var("folder"), host_name).host(HostName(host_name))
         if not host:
             raise MKGeneralException(
-                _('Host is not managed by WATO. Click <a href="%s">here</a> to go back.')
+                _('Host is not managed by Setup. Click <a href="%s">here</a> to go back.')
                 % escape_attribute(self._back_url)
             )
-        host.need_permission("read")
+        host.permissions.need_permission("read")
 
         self._request = FetchAgentOutputRequest(host=host, agent_type=ty)
 
     @staticmethod
-    def file_name(api_request: FetchAgentOutputRequest) -> str:
-        return "%s-%s-%s.txt" % (
-            api_request.host.site_id(),
-            api_request.host.name(),
-            api_request.agent_type,
-        )
+    def file_name(site_id: SiteId, host_name: HostName, agent_type: str) -> str:
+        return f"{site_id}-{host_name}-{agent_type}.txt"
 
 
-@page_registry.register_page("fetch_agent_output")
 class PageFetchAgentOutput(AgentOutputPage):
     def page(self) -> None:
         title = self._title()
@@ -149,7 +172,7 @@ class PageFetchAgentOutput(AgentOutputPage):
         if not transactions.transaction_valid():
             return
 
-        action_handler = gui_background_job.ActionHandler(self._breadcrumb(self._title()))
+        action_handler = ActionHandler(self._breadcrumb(self._title()))
 
         if action_handler.handle_actions() and action_handler.did_delete_job():
             raise HTTPRedirect(
@@ -167,40 +190,42 @@ class PageFetchAgentOutput(AgentOutputPage):
         job_status = self._get_job_status()
 
         html.h3(_("Job status"))
-        if job_status["is_active"]:
+        if job_status.is_active:
             html.immediate_browser_redirect(0.8, makeuri(request, []))
 
-        job = FetchAgentOutputBackgroundJob(self._request)
-        gui_background_job.JobRenderer.show_job_details(job.get_job_id(), job_status)
+        job = FetchAgentOutputBackgroundJob.from_api_request(self._request)
+        JobRenderer.show_job_details(job.get_job_id(), job_status, job.may_stop(), job.may_delete())
 
     def _start_fetch(self) -> None:
         """Start the job on the site the host is monitored by"""
-        if site_is_local(self._request.host.site_id()):
+        if site_is_local(active_config, self._request.host.site_id()):
             start_fetch_agent_job(self._request)
             return
 
         do_remote_automation(
-            get_site_config(self._request.host.site_id()),
+            get_site_config(active_config, self._request.host.site_id()),
             "fetch-agent-output-start",
             [
                 ("request", repr(self._request.serialize())),
             ],
         )
 
-    def _get_job_status(self) -> Dict:
-        if site_is_local(self._request.host.site_id()):
+    def _get_job_status(self) -> JobStatusSpec:
+        if site_is_local(active_config, self._request.host.site_id()):
             return get_fetch_agent_job_status(self._request)
 
-        return do_remote_automation(
-            get_site_config(self._request.host.site_id()),
-            "fetch-agent-output-get-status",
-            [
-                ("request", repr(self._request.serialize())),
-            ],
+        return JobStatusSpec.model_validate(
+            do_remote_automation(
+                get_site_config(active_config, self._request.host.site_id()),
+                "fetch-agent-output-get-status",
+                [
+                    ("request", repr(self._request.serialize())),
+                ],
+            )
         )
 
 
-class ABCAutomationFetchAgentOutput(AutomationCommand, abc.ABC):
+class ABCAutomationFetchAgentOutput(AutomationCommand[FetchAgentOutputRequest]):
     def get_request(self) -> FetchAgentOutputRequest:
         user.need_permission("wato.download_agent_output")
 
@@ -210,7 +235,6 @@ class ABCAutomationFetchAgentOutput(AutomationCommand, abc.ABC):
         return FetchAgentOutputRequest.deserialize(ast.literal_eval(ascii_input))
 
 
-@automation_command_registry.register
 class AutomationFetchAgentOutputStart(ABCAutomationFetchAgentOutput):
     """Is called by AgentOutputPage._start_fetch() to execute the background job on a remote site"""
 
@@ -221,67 +245,91 @@ class AutomationFetchAgentOutputStart(ABCAutomationFetchAgentOutput):
         start_fetch_agent_job(api_request)
 
 
-def start_fetch_agent_job(api_request):
-    job = FetchAgentOutputBackgroundJob(api_request)
-    try:
-        job.start()
-    except background_job.BackgroundJobAlreadyRunning:
-        pass
+def start_fetch_agent_job(api_request: FetchAgentOutputRequest) -> None:
+    job = FetchAgentOutputBackgroundJob.from_api_request(api_request)
+    if (
+        result := job.start(
+            JobTarget(
+                callable=fetch_agent_output_entry_point,
+                args=FetchAgentOutputJobArgs(
+                    site_id=api_request.host.site_id(),
+                    host_name=api_request.host.name(),
+                    agent_type=api_request.agent_type,
+                ),
+            ),
+            InitialStatusArgs(
+                title=_("Fetching %s of %s / %s")
+                % (
+                    api_request.agent_type,
+                    api_request.host.site_id(),
+                    api_request.host.name(),
+                ),
+                user=str(user.id) if user.id else None,
+            ),
+        )
+    ).is_error():
+        raise MKUserError(None, str(result.error))
 
 
-@automation_command_registry.register
 class AutomationFetchAgentOutputGetStatus(ABCAutomationFetchAgentOutput):
     """Is called by AgentOutputPage._get_job_status() to execute the background job on a remote site"""
 
-    def command_name(self):
+    def command_name(self) -> str:
         return "fetch-agent-output-get-status"
 
-    def execute(self, api_request: FetchAgentOutputRequest) -> Dict:
-        return get_fetch_agent_job_status(api_request)
+    def execute(self, api_request: FetchAgentOutputRequest) -> dict:
+        return dict(get_fetch_agent_job_status(api_request))
 
 
-def get_fetch_agent_job_status(api_request: FetchAgentOutputRequest) -> Dict:
-    job = FetchAgentOutputBackgroundJob(api_request)
-    return job.get_status_snapshot().get_status_as_dict()[job.get_job_id()]
+def get_fetch_agent_job_status(api_request: FetchAgentOutputRequest) -> JobStatusSpec:
+    job = FetchAgentOutputBackgroundJob.from_api_request(api_request)
+    return job.get_status_snapshot().status
 
 
-@gui_background_job.job_registry.register
-class FetchAgentOutputBackgroundJob(WatoBackgroundJob):
+class FetchAgentOutputJobArgs(BaseModel, frozen=True):
+    site_id: SiteId
+    host_name: HostName
+    agent_type: str
+
+
+def fetch_agent_output_entry_point(
+    job_interface: BackgroundProcessInterface, args: FetchAgentOutputJobArgs
+) -> None:
+    FetchAgentOutputBackgroundJob(args.site_id, args.host_name, args.agent_type).fetch_agent_output(
+        job_interface
+    )
+
+
+class FetchAgentOutputBackgroundJob(BackgroundJob):
     """The background job is always executed on the site where the host is located on"""
 
     job_prefix = "agent-output-"
 
     @classmethod
+    def from_api_request(
+        cls, api_request: FetchAgentOutputRequest
+    ) -> "FetchAgentOutputBackgroundJob":
+        return cls(api_request.host.site_id(), api_request.host.name(), api_request.agent_type)
+
+    @classmethod
     def gui_title(cls) -> str:
         return _("Fetch agent output")
 
-    def __init__(self, api_request: FetchAgentOutputRequest) -> None:
-        self._request = api_request
+    def __init__(self, site_id: SiteId, host_name: HostName, agent_type: str) -> None:
+        self._site_id = site_id
+        self._host_name = host_name
+        self._agent_type = agent_type
+        job_id = f"{self.job_prefix}{site_id}-{host_name}-{agent_type}"
+        super().__init__(job_id)
 
-        host = self._request.host
-        job_id = "%s%s-%s-%s" % (
-            self.job_prefix,
-            host.site_id(),
-            host.name(),
-            self._request.agent_type,
-        )
-        title = _("Fetching %s of %s / %s") % (
-            self._request.agent_type,
-            host.site_id(),
-            host.name(),
-        )
-        super().__init__(job_id, title=title)
+    def fetch_agent_output(self, job_interface: BackgroundProcessInterface) -> None:
+        with job_interface.gui_context():
+            self._fetch_agent_output(job_interface)
 
-        self.set_function(self._fetch_agent_output)
+    def _fetch_agent_output(self, job_interface: BackgroundProcessInterface) -> None:
+        job_interface.send_progress_update(_("Fetching '%s'...") % self._agent_type)
 
-    def _fetch_agent_output(self, job_interface):
-        job_interface.send_progress_update(_("Fetching '%s'...") % self._request.agent_type)
-
-        agent_output_result = get_agent_output(
-            self._request.host.site_id(),
-            self._request.host.name(),
-            self._request.agent_type,
-        )
+        agent_output_result = get_agent_output(self._site_id, self._host_name, self._agent_type)
 
         if not agent_output_result.success:
             job_interface.send_progress_update(
@@ -289,7 +337,8 @@ class FetchAgentOutputBackgroundJob(WatoBackgroundJob):
             )
 
         preview_filepath = os.path.join(
-            job_interface.get_work_dir(), AgentOutputPage.file_name(self._request)
+            job_interface.get_work_dir(),
+            AgentOutputPage.file_name(self._site_id, self._host_name, self._agent_type),
         )
 
         store.save_bytes_to_file(
@@ -299,41 +348,48 @@ class FetchAgentOutputBackgroundJob(WatoBackgroundJob):
 
         download_url = makeuri_contextless(
             request,
-            [("host", self._request.host.name()), ("type", self._request.agent_type)],
+            [("host", self._host_name), ("type", self._agent_type)],
             filename="download_agent_output.py",
         )
 
-        button = html.render_icon_button(download_url, _("Download"), "agent_output")
         job_interface.send_progress_update("Job finished.")
         job_interface.send_result_message(
-            _("%s Click on the icon to download the agent output.") % button
+            _("%s Click on the icon to download the agent output.")
+            % HTMLGenerator.render_icon_button(
+                url=download_url,
+                title=_("Download"),
+                icon="agent_output",
+                theme=make_theme(validate_choices=False),
+            )
         )
 
 
-@page_registry.register_page("download_agent_output")
 class PageDownloadAgentOutput(AgentOutputPage):
     def page(self) -> None:
-        file_name = self.file_name(self._request)
+        file_name = self.file_name(
+            self._request.host.site_id(), self._request.host.name(), self._request.agent_type
+        )
         file_content = self._get_agent_output_file()
 
         response.set_content_type("text/plain")
-        response.headers["Content-Disposition"] = "Attachment; filename=%s" % file_name
+        response.set_content_disposition(ContentDispositionType.ATTACHMENT, file_name)
         response.set_data(file_content)
 
     def _get_agent_output_file(self) -> bytes:
-        if site_is_local(self._request.host.site_id()):
+        if site_is_local(active_config, self._request.host.site_id()):
             return get_fetch_agent_output_file(self._request)
 
-        return do_remote_automation(
-            get_site_config(self._request.host.site_id()),
+        raw_response = do_remote_automation(
+            get_site_config(active_config, self._request.host.site_id()),
             "fetch-agent-output-get-file",
             [
                 ("request", repr(self._request.serialize())),
             ],
         )
+        assert isinstance(raw_response, bytes)
+        return raw_response
 
 
-@automation_command_registry.register
 class AutomationFetchAgentOutputGetFile(ABCAutomationFetchAgentOutput):
     def command_name(self) -> str:
         return "fetch-agent-output-get-file"
@@ -343,8 +399,13 @@ class AutomationFetchAgentOutputGetFile(ABCAutomationFetchAgentOutput):
 
 
 def get_fetch_agent_output_file(api_request: FetchAgentOutputRequest) -> bytes:
-    job = FetchAgentOutputBackgroundJob(api_request)
-    filepath = Path(job.get_work_dir(), AgentOutputPage.file_name(api_request))
+    job = FetchAgentOutputBackgroundJob.from_api_request(api_request)
+    filepath = Path(
+        job.get_work_dir(),
+        AgentOutputPage.file_name(
+            api_request.host.site_id(), api_request.host.name(), api_request.agent_type
+        ),
+    )
     # The agent output need to be treated as binary data since each agent section can have an
     # individual encoding
     with filepath.open("rb") as f:

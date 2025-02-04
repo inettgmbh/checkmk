@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 
 import enum
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any
 
-from cmk.utils.type_defs import Labels
+from cmk.utils.labels import Labels
 
 
 class ObjectRefType(enum.Enum):
@@ -30,7 +30,7 @@ class ObjectRef:
     labels: Labels = field(default_factory=dict)
 
     def serialize(self):
-        serialized: Dict[str, Any] = {
+        serialized: dict[str, Any] = {
             "object_type": self.object_type.name,
             "ident": self.ident,
         }
@@ -39,7 +39,7 @@ class ObjectRef:
         return serialized
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "ObjectRef":
+    def deserialize(cls, serialized: dict[str, Any]) -> "ObjectRef":
         return cls(
             object_type=ObjectRefType(serialized["object_type"]),
             ident=serialized["ident"],

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -41,7 +41,7 @@ def test_make_object_diff_changed_dict_value() -> None:
 def test_make_object_diff_multiple_changes() -> None:
     assert (
         make_diff_text({"a": "0", "b": "1"}, {"a": "1"})
-        == 'Attribute "b" with value "1" removed.\nValue of "a" changed from "0" to "1".'
+        == 'Value of "a" changed from "0" to "1".\nAttribute "b" with value "1" removed.'
     )
 
 

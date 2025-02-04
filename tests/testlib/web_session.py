@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import ast
-import json
 import logging
 import os
 import re
 import urllib.parse
+from collections.abc import Collection, Container
+from http.cookiejar import Cookie
 
 import requests
-from bs4 import BeautifulSoup  # type: ignore[import]
+from bs4 import BeautifulSoup
+
+from tests.testlib.version import version_from_env
 
 
 class APIError(Exception):
@@ -22,42 +24,40 @@ logger = logging.getLogger()
 
 
 class CMKWebSession:
-    def __init__(self, site) -> None:  # type:ignore[no-untyped-def]
+    def __init__(self, site) -> None:  # type: ignore[no-untyped-def]
         super().__init__()
-        self.transids: list = []
         # Resources are only fetched and verified once per session
         self.verified_resources: set = set()
         self.site = site
         self.session = requests.Session()
 
-    def check_redirect(self, path, expected_target=None):
+    def check_redirect(self, path: str, expected_target: str | None = None) -> None:
         response = self.get(path, expected_code=302, allow_redirects=False)
         if expected_target:
             if response.headers["Location"] != expected_target:
                 raise AssertionError(
-                    "REDIRECT FAILED: '%s' != '%s'"
-                    % (response.headers["Location"], expected_target)
+                    "REDIRECT FAILED: '{}' != '{}'".format(
+                        response.headers["Location"], expected_target
+                    )
                 )
             assert response.headers["Location"] == expected_target
 
-    def get(self, *args, **kwargs):
+    def get(self, *args, **kwargs) -> requests.Response:  # type: ignore[no-untyped-def]
         return self.request("get", *args, **kwargs)
 
-    def post(self, *args, **kwargs):
+    def post(self, *args, **kwargs) -> requests.Response:  # type: ignore[no-untyped-def]
         return self.request("post", *args, **kwargs)
 
-    def request(
+    def request(  # type: ignore[no-untyped-def]
         self,
-        method,
-        path,
-        expected_code=200,
-        add_transid=False,
-        allow_redirect_to_login=False,
+        method: str | bytes,
+        path: str,
+        expected_code: int = 200,
+        *,
+        allow_redirect_to_login: bool = False,
         **kwargs,
-    ):
+    ) -> requests.Response:
         url = self.site.url_for_path(path)
-        if add_transid:
-            url = self._add_transid(url)
 
         # May raise "requests.exceptions.ConnectionError: ('Connection aborted.', BadStatusLine("''",))"
         # suddenly without known reason. This may be related to some
@@ -76,19 +76,17 @@ class CMKWebSession:
         self._handle_http_response(response, expected_code, allow_redirect_to_login)
         return response
 
-    def _add_transid(self, url):
-        if not self.transids:
-            raise Exception("Tried to add a transid, but none available at the moment")
-        return url + ("&" if "?" in url else "?") + "_transid=" + self.transids.pop()
-
-    def _handle_http_response(self, response, expected_code, allow_redirect_to_login):
-        assert (
-            response.status_code == expected_code
-        ), "Got invalid status code (%d != %d) for URL %s (Location: %s)" % (
-            response.status_code,
-            expected_code,
-            response.url,
-            response.headers.get("Location", "None"),
+    def _handle_http_response(
+        self, response: requests.Response, expected_code: int, allow_redirect_to_login: bool
+    ) -> None:
+        assert response.status_code == expected_code, (
+            "Got invalid status code (%d != %d) for URL %s (Location: %s)"
+            % (
+                response.status_code,
+                expected_code,
+                response.url,
+                response.headers.get("Location", "None"),
+            )
         )
 
         if not allow_redirect_to_login and response.history:
@@ -101,41 +99,38 @@ class CMKWebSession:
         if self._get_mime_type(response) == "text/html":
             soup = BeautifulSoup(response.text, "lxml")
 
-            self.transids += self._extract_transids(response.text, soup)
             self._find_errors(response.text)
             self._check_html_page_resources(response.url, soup)
 
-    def _get_mime_type(self, response):
+    def _get_mime_type(self, response: requests.Response) -> str:
         assert "Content-Type" in response.headers
         return response.headers["Content-Type"].split(";", 1)[0]
 
-    def _extract_transids(self, body, soup):
-        """Extract transids from pages used in later actions issued by tests."""
-
-        transids = set()
-
-        # Extract from form hidden fields
-        for element in soup.findAll(attrs={"name": "_transid"}):
-            transids.add(element["value"])
-
-        # Extract from URLs in the body
-        transids.update(re.findall("_transid=([0-9/]+)", body))
-
-        return list(transids)
-
-    def _find_errors(self, body):
+    def _find_errors(self, body: str) -> None:
         matches = re.search("<div class=error>(.*?)</div>", body, re.M | re.DOTALL)
         assert not matches, "Found error message: %s" % matches.groups()
 
-    def _check_html_page_resources(self, url, soup):
+    def _check_html_page_resources(self, url: str | bytes | None, soup: BeautifulSoup) -> None:
         base_url = urllib.parse.urlparse(url).path
         if ".py" in base_url:
             base_url = os.path.dirname(base_url)
 
         # There might be other resources like iframe, audio, ... but we don't care about them
         self._check_resources(soup, base_url, "img", "src", ["image/png", "image/svg+xml"])
+        # The CSE includes a new onboarding feature. This is loaded from an external source hosted
+        # by checkmk. We do not want to check it in the integration tests
+        script_filters = (
+            [("src", "https://static.saas-dev.cloudsandbox.checkmk.cloud")]
+            if version_from_env().is_saas_edition()
+            else None
+        )
         self._check_resources(
-            soup, base_url, "script", "src", ["application/javascript", "text/javascript"]
+            soup,
+            base_url,
+            "script",
+            "src",
+            ["application/javascript", "text/javascript"],
+            filters=script_filters,
         )
         self._check_resources(
             soup, base_url, "link", "href", ["text/css"], filters=[("rel", "stylesheet")]
@@ -149,7 +144,15 @@ class CMKWebSession:
             filters=[("rel", "shortcut icon")],
         )
 
-    def _check_resources(self, soup, base_url, tag, attr, allowed_mime_types, filters=None):
+    def _check_resources(
+        self,
+        soup: BeautifulSoup,
+        base_url: str | bytes,
+        tag: str,
+        attr: str,
+        allowed_mime_types: Container,
+        filters: Collection | None = None,
+    ) -> None:
         for url in self._find_resource_urls(tag, attr, soup, filters):
             # Only check resources once per session
             if url in self.verified_resources:
@@ -157,12 +160,15 @@ class CMKWebSession:
             self.verified_resources.add(url)
 
             assert not url.startswith("/")
+            assert isinstance(base_url, str)
             req = self.get(base_url + "/" + url, verify=False)
 
             mime_type = self._get_mime_type(req)
             assert mime_type in allowed_mime_types
 
-    def _find_resource_urls(self, tag, attribute, soup, filters=None):
+    def _find_resource_urls(
+        self, tag: str, attribute: str, soup: BeautifulSoup, filters: Collection | None = None
+    ) -> list:
         urls = []
 
         for element in soup.findAll(tag):
@@ -180,11 +186,24 @@ class CMKWebSession:
 
         return urls
 
-    def login(self, username="cmkadmin", password="cmk"):
-        login_page = self.get("", allow_redirect_to_login=True).text
-        assert "_username" in login_page, "_username not found on login page - page broken?"
-        assert "_password" in login_page
-        assert "_login" in login_page
+    def login(
+        self,
+        username: str = "cmkadmin",
+        password: str = "cmk",
+    ) -> None:
+        r = self.get("", allow_redirect_to_login=True)
+
+        login_page_patterns = ("_username", "_password", "_login")
+        main_page_patterns = ("sidebar", "dashboard.py")
+        logged_in = all(_ in r.text for _ in main_page_patterns) and not any(
+            _ in r.text for _ in login_page_patterns
+        )
+
+        assert not logged_in, "Logged in unexpectedly!"
+
+        login_page = r.text
+        for pattern in login_page_patterns:
+            assert pattern in login_page, f"{pattern} not found in login page - page broken?"
 
         r = self.post(
             "login.py",
@@ -195,105 +214,30 @@ class CMKWebSession:
                 "_login": "Login",
             },
         )
-        auth_cookie = self.session.cookies.get("auth_%s" % self.site.id)
+        auth_cookie = self.session.cookies.get(f"auth_{self.site.id}")
         assert auth_cookie
         assert auth_cookie.startswith("%s:" % username)
 
-        assert "sidebar" in r.text
-        assert "dashboard.py" in r.text
+        main_page = r.text
+        for pattern in main_page_patterns:
+            assert pattern in main_page, f"{pattern} not found in main page - page broken?"
 
-    def enforce_non_localized_gui(self):
-        all_users = self.get_all_users()
-        all_users["cmkadmin"]["language"] = "en"
-        self.edit_htpasswd_users(all_users)
-
-        # Verify the language is as expected now
-        r = self.get("user_profile.py")
-        assert "Edit profile" in r.text, "Body: %s" % r.text
-
-    def logout(self):
+    def logout(self) -> None:
         r = self.get("logout.py", allow_redirect_to_login=True)
         assert 'action="login.py"' in r.text
 
-    #
-    # Web-API for managing hosts, services etc.
-    #
+    def is_logged_in(self) -> bool:
+        r = self.get("info.py", allow_redirect_to_login=True)
+        return all(x in r.text for x in ("About Checkmk", "Your IT monitoring platform"))
 
-    def _automation_credentials(self):
-        return {
-            "_username": "automation",
-            "_secret": self.site.get_automation_secret(),
-        }
+    def get_auth_cookie(self) -> Cookie | None:
+        """return the auth cookie
 
-    def _api_request(self, url, data, expect_error=False, output_format="json"):
-        data.update(self._automation_credentials())
+        apparently the get on these cookies return a str with only some information, also this is
+        untyped and mypy would need some suppressions.
+        We usually get two cookies so this for loop should not hurt too much"""
 
-        req = self.post(url, data=data)
-
-        if output_format == "json":
-            try:
-                response = json.loads(req.text)
-            except json.JSONDecodeError:
-                raise APIError(f"invalid json: {req.text}")
-        elif output_format == "python":
-            response = ast.literal_eval(req.text)
-        else:
-            raise NotImplementedError()
-
-        assert req.headers["access-control-allow-origin"] == "*"
-
-        if not expect_error:
-            assert response["result_code"] == 0, "An error occured: %r" % response
-        else:
-            raise APIError(response["result"])
-
-        return response["result"]
-
-    def set_ruleset(self, ruleset_name, ruleset_spec):
-        from cmk.utils.python_printer import pformat  # pylint: disable=import-outside-toplevel
-
-        request = {
-            "ruleset_name": ruleset_name,
-        }
-        request.update(ruleset_spec)
-
-        result = self._api_request(
-            "webapi.py?action=set_ruleset&output_format=python&request_format=python",
-            {
-                "request": pformat(request),
-            },
-            output_format="python",
-        )
-
-        assert result is None
-
-    # TODO: Cleanup remaining API call
-    def set_site(self, site_id, site_config):
-        from cmk.utils.python_printer import pformat  # pylint: disable=import-outside-toplevel
-
-        result = self._api_request(
-            "webapi.py?action=set_site&request_format=python&output_format=python",
-            {"request": pformat({"site_id": site_id, "site_config": site_config})},
-            output_format="python",
-        )
-        assert result is None
-
-    # TODO: Cleanup remaining API call
-    def login_site(self, site_id, user="cmkadmin", password="cmk"):
-        result = self._api_request(
-            "webapi.py?action=login_site",
-            {"request": json.dumps({"site_id": site_id, "username": user, "password": password})},
-        )
-        assert result is None
-
-    # TODO: Cleanup remaining API call
-    def get_all_users(self):
-        return self._api_request("webapi.py?action=get_all_users", {})
-
-    # TODO: Cleanup remaining API call
-    def edit_htpasswd_users(self, users):
-        result = self._api_request(
-            "webapi.py?action=edit_users", {"request": json.dumps({"users": users})}
-        )
-
-        assert result is None
+        for cookie in self.session.cookies:
+            if cookie.name == f"auth_{self.site.id}":
+                return cookie
+        return None

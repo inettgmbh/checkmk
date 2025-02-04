@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name
+
+from argparse import Namespace as Args
+from collections.abc import Sequence
+from typing import Protocol
 
 import pytest
 
-from cmk.special_agents.agent_aws import AWSConfig, RDS, RDSLimits, RDSSummary, ResultDistributor
+from cmk.special_agents.agent_aws import (
+    AWSConfig,
+    NamingConvention,
+    OverallTags,
+    RDS,
+    RDSLimits,
+    RDSSummary,
+    ResultDistributor,
+    TagsImportPatternOption,
+    TagsOption,
+)
 
 from .agent_aws_fake_clients import (
     FakeCloudwatchClient,
@@ -56,7 +69,7 @@ class FakeRDSClient:
         if ResourceName == "DBInstanceArn-2":  # the third table has no tags
             tags = []
         else:
-            tags = RDSListTagsForResourceIB.create_instances(amount=1)
+            tags = RDSListTagsForResourceIB.create_instances(amount=3)
         return {"TagList": tags}
 
     def get_paginator(self, operation_name):
@@ -65,24 +78,47 @@ class FakeRDSClient:
         raise NotImplementedError
 
 
+RDSSectionsOut = tuple[RDSLimits, RDSSummary, RDS]
+
+
+class RDSSections(Protocol):
+    def __call__(
+        self,
+        names: object | None = None,
+        tags: OverallTags = (None, None),
+        tag_import: TagsOption = TagsImportPatternOption.import_all,
+    ) -> RDSSectionsOut: ...
+
+
 @pytest.fixture()
-def get_rds_sections():
-    def _create_rds_sections(names, tags):
+def get_rds_sections() -> RDSSections:
+    def _create_rds_sections(
+        names: object | None = None,
+        tags: OverallTags = (None, None),
+        tag_import: TagsOption = TagsImportPatternOption.import_all,
+    ) -> tuple[RDSLimits, RDSSummary, RDS]:
         region = "region"
-        config = AWSConfig("hostname", [], (None, None))
+        config = AWSConfig(
+            "hostname",
+            Args(),
+            ([], []),
+            NamingConvention.ip_region_instance,
+            tag_import,
+        )
         config.add_single_service_config("rds_names", names)
         config.add_service_tags("rds_tags", tags)
 
         fake_rds_client = FakeRDSClient()
         fake_cloudwatch_client = FakeCloudwatchClient()
 
-        rds_summary_distributor = ResultDistributor()
+        distributor = ResultDistributor()
 
-        rds_limits = RDSLimits(FakeRDSClient(), region, config)
-        rds_summary = RDSSummary(fake_rds_client, region, config, rds_summary_distributor)
-        rds = RDS(fake_cloudwatch_client, region, config)
+        # TODO: FakeRDSClient shoud actually subclass RDSClient, etc.
+        rds_limits = RDSLimits(FakeRDSClient(), region, config)  # type: ignore[arg-type]
+        rds_summary = RDSSummary(fake_rds_client, region, config, distributor)  # type: ignore[arg-type]
+        rds = RDS(fake_cloudwatch_client, region, config)  # type: ignore[arg-type]
 
-        rds_summary_distributor.add(rds)
+        distributor.add(rds_summary.name, rds)
         return rds_limits, rds_summary, rds
 
     return _create_rds_sections
@@ -133,8 +169,11 @@ rds_params = [
 
 
 @pytest.mark.parametrize("names,tags,found_instances", rds_params)
-def test_agent_aws_rds_limits(  # type:ignore[no-untyped-def]
-    get_rds_sections, names, tags, found_instances
+def test_agent_aws_rds_limits(
+    get_rds_sections: RDSSections,
+    names: Sequence[str] | None,
+    tags: OverallTags,
+    found_instances: Sequence[str],
 ) -> None:
     rds_limits, _rds_summary, _rds = get_rds_sections(names, tags)
     rds_limits_results = rds_limits.run().results
@@ -151,8 +190,11 @@ def test_agent_aws_rds_limits(  # type:ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize("names,tags,found_instances", rds_params)
-def test_agent_aws_rds_summary(  # type:ignore[no-untyped-def]
-    get_rds_sections, names, tags, found_instances
+def test_agent_aws_rds_summary(
+    get_rds_sections: RDSSections,
+    names: Sequence[str] | None,
+    tags: OverallTags,
+    found_instances: Sequence[str],
 ) -> None:
     _rds_limits, rds_summary, _rds = get_rds_sections(names, tags)
     rds_summary_results = rds_summary.run().results
@@ -171,11 +213,14 @@ def test_agent_aws_rds_summary(  # type:ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize("names,tags,found_instances", rds_params)
-def test_agent_aws_rds(  # type:ignore[no-untyped-def]
-    get_rds_sections, names, tags, found_instances
+def test_agent_aws_rds(
+    get_rds_sections: RDSSections,
+    names: Sequence[str] | None,
+    tags: OverallTags,
+    found_instances: Sequence[str],
 ) -> None:
     _rds_limits, rds_summary, rds = get_rds_sections(names, tags)
-    _rds_summary_results = rds_summary.run().results
+    rds_summary.run()
     rds_results = rds.run().results
 
     assert rds.cache_interval == 300
@@ -190,3 +235,26 @@ def test_agent_aws_rds(  # type:ignore[no-untyped-def]
         assert len(rds_result.content) == 21 * len(found_instances)
     else:
         assert len(rds_results) == 0
+
+
+@pytest.mark.parametrize(
+    "tag_import, expected_tags",
+    [
+        (TagsImportPatternOption.import_all, ["Key-0", "Key-1", "Key-2"]),
+        (r".*-1$", ["Key-1"]),
+        (TagsImportPatternOption.ignore_all, []),
+    ],
+)
+def test_agent_aws_rds_tags_are_filtered(
+    get_rds_sections: RDSSections,
+    tag_import: TagsOption,
+    expected_tags: list[str],
+) -> None:
+    _rds_limits, rds_summary, rds = get_rds_sections(tag_import=tag_import)
+    rds_summary.run()
+    rds_results = rds.run().results
+
+    assert len(rds_results) == 1
+    # We assume all instances follow the same schema so we don't repeat the test n times
+    row = rds_results[0].content[0]
+    assert list(row["TagsForCmkLabels"].keys()) == expected_tags

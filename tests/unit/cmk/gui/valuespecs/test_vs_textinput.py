@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2022 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -35,7 +35,7 @@ class TestValueSpecTextInput:
         expect_validate_success(vs.TextInput(maxlen=3), "123")
         expect_validate_failure(vs.TextInput(maxlen=3), "1234")
 
-    def test_html_vars(self) -> None:
+    def test_html_vars(self, request_context: None) -> None:
         with request_var(dr="who"):
             assert vs.TextInput().from_html_vars("dr") == "who"
 
@@ -61,3 +61,8 @@ class TestValueSpecTextInput:
         assert vs.TextInput().value_from_json(vs.TextInput().value_to_json("b")) == "b"
         assert vs.TextInput().value_from_json("c") == "c"
         assert vs.TextInput().value_to_json("d") == "d"
+
+    def test_transform_value(self) -> None:
+        valuespec = vs.TextInput()
+        assert valuespec.transform_value("lala") == "lala"
+        assert valuespec.transform_value("AAA") == "AAA"

@@ -1,137 +1,155 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 SHELL := /bin/bash -e
-SCRIPTS := ../scripts
+SCRIPTS := $(realpath ../scripts)
 FIND_PYTHON_FILES := $(SCRIPTS)/find-python-files
-PIPENV := $(SCRIPTS)/run-pipenv
-PYTEST := $(PIPENV) run py.test $(PYTEST_ARGS)
-CYCLES := $(PIPENV) run py_import_cycles
-CYCLES_THRESHOLD := 68
-PYTEST_UNIT_TEST_OPTS = \
-    -T unit \
-    --doctest-modules \
-    ../cmk/base \
-    ../cmk/fields \
-    ../cmk/gui \
-    ../cmk/special_agents \
-    ../cmk/utils \
-    ../agent-receiver \
-    unit
-PYTEST_ADDITIONAL_UNIT_TEST_OPTS = -m "not slow"
-YAPF := $(PIPENV) run yapf
-BLACK  := $(SCRIPTS)/run-black
-THREE_TO_TWO := $(PIPENV) run 3to2
-BANDIT := $(PIPENV) run bandit
+FIND_SHELL_FILES := $(SCRIPTS)/find-shell-files
+UVENV := $(SCRIPTS)/run-uvenv
+PYTEST := $(UVENV) pytest $(PYTEST_ARGS)
+PYTEST_UV := $(UVENV) pytest $(PYTEST_ARGS)
+CYCLES := $(UVENV) py_import_cycles
+PYTEST_OPTS_UNIT_SKIP_SLOW = -m "not slow"
+PYTEST_OPTS_UNIT_SLOW_ONLY = -m "slow"
+THREE_TO_TWO := $(UVENV) 3to2
+BANDIT := $(UVENV) bandit
+SEMGREP := $(realpath semgrep)/run-semgrep
+BAZEL_CMD ?= $(realpath $(SCRIPTS)/run-bazel.sh)
+SHELLCHECK := $(BAZEL_CMD) run --ui_event_filters=-info,-stderr //bazel/tools:shellcheck_bin --
+SHFMT := $(BAZEL_CMD) run --ui_event_filters=-info,-stderr //bazel/tools:shfmt_bin --
+TAPLO := $(BAZEL_CMD) run --ui_event_filters=-info,-stderr //bazel/tools:taplo_bin --
 FIND_INVALID_TEST_FILES := $(SCRIPTS)/find-invalid-autogen-files
 ADDITIONAL_MYPY_ARGS := $(JUNIT_XML)
-# TODO: Remove version duplication, see buildscripts/infrastructure/build-nodes/scripts/install-gnu-toolchain.sh
-GCC_TOOLCHAIN := /opt/gcc-11.2.0
+# Please note: We can currently not include defines.make as it would override
+# the EDITIONS environment variable handed over by some jenkins test jobs.
+# Looks like we need to cleanup the EDITION handling here.
+AGENT_PLUGIN_PYTHON_VERSIONS := $(shell make --no-print-directory --file=../defines.make print-AGENT_PLUGIN_PYTHON_VERSIONS)
+REPO_PATH := $(shell make --no-print-directory --file=../defines.make print-REPO_PATH)
+
+# A random time zone between UTC-11...UTC+14. Note the recursively expanded
+# variable assignment to get a new time zone on every access.
+RANDOM_TZ = $(shell printf "UTC%+d\n" $$(( $$RANDOM / 1261 - 11 )) )
+
+SYSTEM_TESTS := \
+    test-integration \
+    test-integration-redfish \
+    test-composition \
+    test-update-cee \
+    test-update-cce \
+    test-update-cse \
+    test-update-cross-edition-cce \
+    test-update-cross-edition-cme \
+    test-schemathesis-openapi \
+    test-plugins \
+    test-plugins-piggyback \
+    test-gui-crawl \
+    test-xss-crawl \
+    test-gui-e2e \
+    test-gui-e2e-non-free \
+    test-gui-e2e-cee \
+    test-gui-e2e-cce \
+    test-gui-e2e-cme \
+    test-gui-e2e-cse \
+    test-extension-compatibility
+PYTEST_SYSTEM_TEST_ARGS := -p "no:cov" --log-cli-level=INFO
+
+# HINT: the "layering_violation" checker is not production ready and left out on purpose
+PYLINT_CUSTOM_CHECKERS := cmk-module-layer-violation,localization-html-tags-checker,localization-literal-string-checker
 
 # Since the unit tests (that are written for Python 3) are executed with Python
-# 2.6 and 2.7, we need to convert them, just like it is done for the agent
-# plugins (see agents/plugins/Makefile)
+# 2.7, we need to convert them, just like it is done for the agent plugins (see
+# agents/plugins/Makefile)
 AGENT_PLUGIN_UNIT_TEST_FILES := $(wildcard agent-plugin-unit/test_*.py)
 AGENT_PLUGIN_UNIT_TEST_FILES_PY2 := $(subst agent-plugin-unit,agent-plugin-unit/py2,$(AGENT_PLUGIN_UNIT_TEST_FILES))
 
-# evaluate this only if needed, it slows down tab expansion otherwise.
-# asio-asio*, googletest* and __pycache__ are excluded because they are present during CI call
-SHELL_FILES_REL = $(shell cd ..; grep -rl \
-    --exclude-dir="asio-asio*" \
-    --exclude-dir="googletest*" \
-    --exclude-dir="__pycache__" \
-    --exclude-dir="deprecated" \
-    --exclude-dir="node_modules" \
-    --exclude-dir="omd" \
-    --exclude="LIVEPROXYD" \
-    --exclude="install-sh" \
-    --exclude="code_examples.py" \
-    '^\#!/.*sh' [^.]* 2>/dev/null)
-
-# Due to https://github.com/pypa/pypi-support/issues/978, we need to disable Plugin tests for py2.6
-# until we have a feasible solution or we drop the support for 2.6 completly.
-PYTHON_VERSIONS := 2.7 3.3 3.4 3.5 3.6 3.7 3.8 3.9
-
-.PHONY: clean format-shell help prepare-protobuf-files prepare-playwright  bandit.ini \
-	$(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker) \
-	test-bandit test-code-quality test-code-quality-docker test-composition test-composition-docker \
-	test-composition-docker-debug test-docker test-docker-docker test-format-python test-format-python-docker \
-	test-format-shell test-format-js test-format-js-docker test-format-css test-format-css-docker \
-	test-gui-crawl test-gui-crawl-docker test-xss-crawl test-xss-crawl-docker test-gui-e2e test-gui-e2e-docker \
-	test-integration test-integration-docker test-integration-docker-debug \
-	test-mypy test-mypy-raw itest-mypy-docker test-packaging test-pipenv-deps test-pylint test-pylint-docker \
-	test-unit test-unit-docker test-unit-resilience test-unit-resilience-docker test-unit-coverage-html \
-	test-unit-shell test-unit-shell-docker test-shellcheck test-cycles test-cycles-docker \
-	test-tidy-livestatus test-tidy-core test-tidy-docker test-iwyu-livestatus test-iwyu-core test-iwyu-docker \
-	test-unit-livestatus test-unit-core %-livestatus-docker %-core-docker \
-	test-cargo-check test-cargo-check-docker test-cargo-test test-cargo-test-docker \
-	test-cargo-fmt test-cargo-fmt-docker test-cargo-clippy test-cargo-clippy-docker
+.PHONY: clean format-shell help prepare-playwright  bandit.ini \
+	$(foreach VERS,$(AGENT_PLUGIN_PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker) \
+	test-bandit test-code-quality test-code-quality-docker
+	test-docker test-docker-docker \
+	test-integration-agent-plugin test-integration-agent-plugin-docker \
+	test-format-python test-format-python-docker \
+	test-format-shell test-format-shell-docker \
+	format-toml test-format-toml test-format-toml-docker \
+	$(SYSTEM_TESTS) \
+	$(foreach TEST,$(SYSTEM_TESTS),$(TEST)-docker) \
+	container-debug \
+	$(foreach TEST,$(SYSTEM_TESTS),$(TEST)-docker-debug) \
+	test-mypy test-mypy-raw test-mypy-docker test-packaging test-pylint test-pylint-docker test-ruff test-ruff-docker \
+	test-unit test-unit-all test-unit-docker \
+	test-unit-shell test-unit-shell-docker test-shellcheck test-shellcheck-docker test-cycles test-cycles-docker \
+	test-unit-omdlib \
+	test-tidy-core test-tidy-docker test-iwyu-core test-iwyu-docker \
+	test-unit-neb test-unit-core \
+	test-semgrep test-semgrep-docker
 
 clean:
 	$(RM) -r .mypy_cache $(AGENT_PLUGIN_UNIT_TEST_FILES_PY2)
 
 help:
+	@echo "container-debug                     - Run container for manual test debugging"
 	@echo "format-shell                        - Format shell agents"
-	@for i in $(PYTHON_VERSIONS); do \
+	@echo "format-toml                         - Format toml files"
+	@for i in $(AGENT_PLUGIN_PYTHON_VERSIONS); do \
 	    echo "test-agent-plugin-unit-py$${i}-docker - Run Agent plugin tests in container with Python $${i}"; \
 	done
+	@for i in $(SYSTEM_TESTS); do \
+	    echo "$${i}              - Run $${i} locally"; \
+	    echo "$${i}-docker       - Run $${i} in container"; \
+	done
 	@echo "test-bandit                         - Run bandit (security) tests"
+	@echo "test-bandit-docker                  - Run bandit (security) tests in docker"
 	@echo "test-bandit-nosec-markers           - Check if all bandit #nosec markers are annotated properly"
 	@echo "test-code-quality                   - Run code quality tests locally"
 	@echo "test-code-quality-docker            - Run code quality tests in container"
-	@echo "test-composition                    - Run composition tests locally"
-	@echo "test-composition-docker             - Run composition tests in container"
-	@echo "test-composition-docker-debug       - Run test container for manual debugging"
+	@echo "test-cycles                         - Run cycles check"
+	@echo "test-cycles-docker                  - Run cycles check in docker"
 	@echo "test-docker                         - Run docker tests"
 	@echo "test-docker-docker                  - Run docker tests in docker"
+	@echo "test-integration-agent-plugin       - Run agent plugin integration tests"
+	@echo "test-integration-agent-plugin-docker - Run agent plugin integration tests in docker"
+	@echo "test-format-bazel                   - Run the Bazel formatting"
+	@echo "test-format-bazel-docker            - Run the Bazel formatting in docker"
 	@echo "test-format-python                  - Run formatting tests"
 	@echo "test-format-python-docker           - Run formatting tests in docker"
 	@echo "test-format-shell                   - Run the shell formatting"
-	@echo "test-format-js                      - Run the JavaScript formatting"
-	@echo "test-format-js-docker               - Run the JavaScript formatting in docker"
-	@echo "test-format-css                     - Run the CSS formatting"
-	@echo "test-format-css-docker              - Run the CSS formatting in docker"
-	@echo "test-gui-crawl                      - Run GUI crawl locally"
-	@echo "test-gui-crawl-docker               - Run GUI crawl in container"
-	@echo "test-xss-crawl                      - Run XSS crawl locally"
-	@echo "test-xss-crawl-docker               - Run XSS crawl in container"
+	@echo "test-format-toml                    - Run the toml formatting"
+	@echo "test-format-toml-docker             - Run the toml formatting in docker"
 	@echo "test-gui-e2e                        - Run GUI End-to-End locally"
 	@echo "test-gui-e2e-docker                 - Run GUI End-to-End in container"
-	@echo "test-integration                    - Run integration tests locally"
-	@echo "test-integration-docker             - Run integration tests in container"
-	@echo "test-integration-docker-debug       - Run test container for manual debugging"
+	@echo "test-license-headers                - Run license headers tests"
+	@echo "test-license-headers-docker         - Run license headers tests in docker"
+	@echo "test-lint-bazel                     - Run the Bazel linting"
+	@echo "test-lint-bazel-docker              - Run the Bazel linting in docker"
+	@echo "test-lint-groovy                    - Run the Groovy linting"
+	@echo "test-lint-groovy-docker             - Run the Groovy linting in docker"
 	@echo "test-mypy                           - Run mypy"
-	@echo "test-mypy-raw                       - Run mypy with raw edition config"
 	@echo "test-mypy-docker                    - Run mypy in docker"
+	@echo "test-mypy-raw                       - Run mypy with raw edition config"
 	@echo "test-packaging                      - Run packaging tests"
-	@echo "test-pipenv-deps                    - Run pipenv dependency issue test"
+	@echo "test-requirements                   - Run requirements test"
+	@echo "test-requirements-docker            - Run requirements test in docker"
+	@echo "test-ruff                           - Run ruff based tests"
+	@echo "test-ruff-docker                    - Run ruff based tests in docker"
 	@echo "test-pylint                         - Run pylint based tests"
+	@echo "test-pylint-docker                  - Run pylint based tests in docker"
 	@echo "test-shellcheck                     - Run shellcheck tests"
+	@echo "test-shellcheck-docker              - Run shellcheck tests in docker"
+	@echo "test-typescript-types               - Run TypeScript types check"
+	@echo "test-typescript-types-docker        - Run TypeScript types check in docker"
 	@echo "test-unit                           - Run unit tests"
+	@echo "test-unit-all                       - Run unit tests (including those marked as slow)"
+	@echo "test-unit-cmc                       - Run unit tests for cmc"
 	@echo "test-unit-docker                    - Run unit tests in docker"
-	@echo "test-unit-resilience                - Run unit tests multiple times and in random order"
-	@echo "test-unit-resilience                - Run unit tests multiple times and in random order in docker"
-	@echo "test-unit-coverage-html             - Create HTML coverage report for unit tests"
+	@echo "test-unit-neb                       - Run unit tests for neb"
 	@echo "test-unit-shell                     - Run shell unit tests"
 	@echo "test-unit-shell-docker              - Run shell unit tests in docker"
-	@echo "test-tidy-livestatus                - Run clang tidy for livestatus"
-	@echo "test-tidy-core                      - Run clang tidy for core"
-	@echo "test-tidy-docker                    - Run clang tidy for core and livestatus in docker"
-	@echo "test-iwyu-livestatus                - Run the iwyu tool for livestatus"
-	@echo "test-iwyu-core                      - Run the iwyu tool for the core"
-	@echo "test-iwyu-docker                    - Run the iwyu tool for both in docker"
-	@echo "test-unit-livestatus                - Run unit tests for livestatus"
-	@echo "test-unit-core                      - Run unit tests for core"
-	@echo "*-livestatus-docker                 - Run any of the livestatus tests in docker"
-	@echo "test-cargo-check                    - Run 'cargo check' for all cargo projects"
-	@echo "test-cargo-check-docker             - Run 'cargo check' for all cargo projects in docker"
-	@echo "test-cargo-test                     - Run test cases of all cargo projects"
-	@echo "test-cargo-test-docker              - Run test cases of all cargo projects in docker"
-	@echo "test-cargo-fmt                      - Run rustfmt --check in all cargo projects"
-	@echo "test-cargo-fmt-docker               - Run rustfmt --check in all cargo projects in docker"
-	@echo "test-cargo-clippy                   - Run clippy in all cargo projects"
-	@echo "test-cargo-clippy-docker            - Run clippy in all cargo projects in docker"
+	@echo "test-unit-testlib                   - Run doctests present in testlib-modules"
+	@echo "test-unit-testlib-docker            - Run doctests present in testlib-modules within docker container."
+	@echo "test-werks                          - Run Werks tests"
+	@echo "test-werks-docker                   - Run Werks tests in docker"
+	@echo "test-semgrep                        - Run semgrep code quality tests"
+	@echo "test-semgrep-docker                 - Run semgrep code quality tests in docker"
 
 bandit.ini:
 	( echo -n -e "[bandit]\ntargets: "; \
@@ -140,16 +158,21 @@ bandit.ini:
 	( echo exclude: /tests >> bandit.ini )
 
 format-shell:
-	docker run --rm -v "$(realpath ..):/sh" -w /sh peterdavehello/shfmt shfmt -w -i 4 -ci $(SHELL_FILES_REL)
+	$(SHFMT) -w -i 4 -ci $(FIND_SHELL_FILES)
 
 agent-plugin-unit/py2/test_%.py: agent-plugin-unit/test_%.py
 	mkdir -p "$(dir $@)"
-	cat "$<" | gawk -v text="# Do not test generated 2.x files\n# yapf: disable\n# type: ignore" '!/^#/ && !p {print text; p=1} 1' > "$@"
-	$(THREE_TO_TWO) --nofix=str --nobackups --write "$@" >/dev/null
+	cat "$<" | gawk -v text="# Do not test generated 2.x files\n# fmt: off\n# type: ignore" '!/^#/ && !p {print text; p=1} 1' > "$@"
+	$(THREE_TO_TWO) --nofix=str --nofix=next --nobackups --write "$@" >/dev/null
 
-$(foreach VERS,$(filter 2.%,$(PYTHON_VERSIONS)),test-agent-plugin-unit-py$(VERS)-docker): $(AGENT_PLUGIN_UNIT_TEST_FILES_PY2)
+$(foreach VERS,$(filter 2.%,$(AGENT_PLUGIN_PYTHON_VERSIONS)),test-agent-plugin-unit-py$(VERS)-docker): $(AGENT_PLUGIN_UNIT_TEST_FILES_PY2)
 
-$(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker):
+$(foreach VERS,$(AGENT_PLUGIN_PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker):
+	@if [ -z ${DOCKER_REGISTRY_NO_HTTPS} ]; then \
+  	   echo "DOCKER_REGISTRY_NO_HTTPS is not set, please export this environment variable during make target call."; \
+  	   echo "Hint: export DOCKER_REGISTRY_NO_HTTPS=artifacts.lan.tribe29.com:4000"; \
+  	   exit 1; \
+  	fi; \
 	# Clean up auto-generated files, which do not have a corresponding source file anymore
 	flock ./agent-plugin-unit $(FIND_INVALID_TEST_FILES)
 	# Recursive Makefiles suck big time...
@@ -160,8 +183,9 @@ $(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker):
 	    *) SUFFIX="" ;; \
 	esac ; \
 	TEST_PATH="$(realpath agent-plugin-unit)$$SUFFIX" ; \
-	IMAGE_HASH="$$(docker build --build-arg PYTHON_VERSION="$$PYTHON_VERSION" -q "$(realpath agent-plugin-unit)")" && \
+	IMAGE_HASH="$$(docker build --build-arg DOCKER_REGISTRY="${DOCKER_REGISTRY_NO_HTTPS}" --build-arg PYTHON_VERSION_MAJ_MIN="$$PYTHON_VERSION" -q "$(realpath agent-plugin-unit)")" && \
 	echo "Docker image: $$IMAGE_HASH" && \
+	if [ ! -d "$$TEST_PATH/datasets" ]; then mkdir "$$TEST_PATH/datasets"; fi && \
 	docker run \
 	    --rm \
 	    $(DOCKER_ADDOPTS) \
@@ -174,227 +198,328 @@ $(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker):
 	    $$IMAGE_HASH \
 	    python$$PYTHON_VERSION -m pytest --ignore=tests/py2/ "/tests"
 
+test-semgrep:
+	$(SEMGREP) scan \
+	    $(SEMGREP_OUTPUT_ARGS) \
+	    --config "$(realpath semgrep/rules)" \
+	    --quiet \
+	    --oss-only \
+	    --use-git-ignore \
+	    --exclude=$(realpath ..)/packages \
+	    --disable-version-check \
+	    --error \
+	    $(realpath ..)
+
+test-semgrep-docker:
+	../scripts/run-in-docker.sh make test-semgrep
+
 test-bandit: bandit.ini
 # Currently only care about high severity reported issues. Once this is reached,
 # go and enable the medium/low checks.
-	$(BANDIT) -c ../bandit.yaml -r -lll --ini bandit.ini $(BANDIT_OUTPUT_ARGS)
+	$(BANDIT) -c ../bandit.yaml -r -ll --ini bandit.ini $(BANDIT_OUTPUT_ARGS)
+
+test-bandit-docker:
+	../scripts/run-in-docker.sh make test-bandit
 
 test-bandit-nosec-markers:
-	$(PIPENV) run python bandit-nosec-markers/nosec_reason.py --doc bandit-nosec-markers/bandit-exclusions.md check $(realpath ..)
-
-prepare-protobuf-files:
-	$(MAKE) -C .. protobuf-files
+	$(UVENV) python bandit-nosec-markers/nosec_reason.py --doc bandit-nosec-markers/bandit-exclusions.md check $(realpath ..)
 
 prepare-playwright:
-	../scripts/run-pipenv run playwright install-deps chromium
-	../scripts/run-pipenv run playwright install chromium
-
-test-integration-docker-debug test-composition-docker-debug:
-	$(PIPENV) run scripts/run-dockerized.py debug
-
-test-build-js:
-	../scripts/check-webpack-build
-
-test-composition-docker:
-	$(PIPENV) run scripts/run-dockerized.py "test-composition"
-
-test-composition:
-	$(PYTEST) -p no:cov -T composition $(realpath composition)
+	../scripts/run-uvenv playwright install-deps "chromium";
+	../scripts/run-uvenv playwright install "chromium";
 
 test-docker-docker:
-	DOCKER_RUN_ADDOPTS="-v $$HOME/.docker/config.json:$$HOME/.docker/config.json -v $$HOME/.cmk-credentials:$$HOME/.cmk-credentials --network=host -e HOME -e WORKSPACE -e VERSION -e EDITION" \
+	DOCKER_RUN_ADDOPTS="-v $$HOME/.docker/config.json:$$HOME/.docker/config.json -v $$HOME/.cmk-credentials:$$HOME/.cmk-credentials --network=host -e BRANCH -e HOME -e WORKSPACE -e VERSION -e EDITION" \
 	    ../scripts/run-in-docker.sh make --quiet test-docker
 
 test-docker:
-	$(MAKE) -C ../docker test-lint-dockerfile test-lint-entrypoint
-	$(PYTEST) -x -T docker --log-cli-level=INFO docker
+	docker run --rm -i $$(../buildscripts/docker_image_aliases/resolve.py IMAGE_HADOLINT) < ../docker_image/Dockerfile
+	$(SHELLCHECK) -x $(SHELLCHECK_OUTPUT_ARGS) ../docker_image/docker-entrypoint.sh
+	$(PYTEST) -x -T docker $(realpath docker) $(PYTEST_SYSTEM_TEST_ARGS)
 
-test-format-python: test-format-python-isort test-format-python-black
+test-integration-agent-plugin-docker:
+	DOCKER_RUN_ADDOPTS="-v $$HOME/.docker/config.json:$$HOME/.docker/config.json -v $$HOME/.cmk-credentials:$$HOME/.cmk-credentials --network=host -e BRANCH -e HOME -e WORKSPACE -e VERSION -e EDITION" \
+	    ../scripts/run-in-docker.sh make --quiet test-integration-agent-plugin
 
-test-format-python-yapf: ../.style.yapf
-# Explicitly specify --style [FILE] to prevent costly searching in parent directories
-# for each file specified via command line
-#
-# There are some mixed up lines on stdout caused by the --parallel option.
-# Nevertheless, we keep that option to get a big performance boost. GitHub issue
-# opened for this problem: https://github.com/google/yapf/issues/644.
-	@if test -z "$${PYTHON_FILES}" && test ! -z "$${PYTHON_FILES+X}"; then exit 0; fi; \
+test-integration-agent-plugin:
+	$(PYTEST) -x -T agent_plugin_integration $(realpath agent_plugin_integration) \
+	$(PYTEST_SYSTEM_TEST_ARGS) --session-timeout 3600
+
+test-format-python: test-format-python-sort test-format-python-format
+
+test-format-python-sort: ../pyproject.toml
 	if test -z "$$PYTHON_FILES"; then $(FIND_PYTHON_FILES); else echo "$$PYTHON_FILES"; fi | \
-	xargs -n 1500 $(YAPF) --parallel --style ../.style.yapf --verbose --diff | \
-	grep '^+++ .*(reformatted)$$' | \
-	sed -e 's/^+++ //' -e 's/[[:blank:]]*(reformatted)$$/:1:1: error: file needs formatting/' ; \
+	xargs -n 1500 ../scripts/run-uvenv ruff check --select I --diff | tee -a ../ruff_check_and_format.txt;\
 	exit $${PIPESTATUS[1]}
 
-test-format-python-isort: ../pyproject.toml
+test-format-python-format: ../pyproject.toml
 	if test -z "$$PYTHON_FILES"; then $(FIND_PYTHON_FILES); else echo "$$PYTHON_FILES"; fi | \
-	xargs -n 1500 $(PIPENV) run isort --settings-path ../pyproject.toml --check-only --diff \
-	exit $${PIPESTATUS[1]}
-
-test-format-python-black: ../pyproject.toml
-	if test -z "$$PYTHON_FILES"; then $(FIND_PYTHON_FILES); else echo "$$PYTHON_FILES"; fi | \
-	xargs -n 1500 $(BLACK) --check --diff ;\
+	xargs -n 1500 ../scripts/run-uvenv ruff format --check --diff | tee -a ../ruff_check_and_format.txt;\
 	exit $${PIPESTATUS[1]}
 
 test-format-python-docker:
 	../scripts/run-in-docker.sh make --quiet test-format-python
 
 test-format-shell:
-	docker run --rm -v "$(realpath ..):/sh" -w /sh peterdavehello/shfmt shfmt -d -i 4 -ci $(SHELL_FILES_REL)
+	$(SHFMT) -d -i 4 -ci $(FIND_SHELL_FILES)
 
-test-format-js:
-	cd ..; scripts/run-prettier --check --no-color --loglevel warn "{enterprise/web,web}/htdocs/js/**/*.{j,t}s"
+test-format-shell-docker:
+	../scripts/run-in-docker.sh make --quiet test-format-shell
 
-test-type-js:
-	cd ..; npm run check-types
+format-toml:
+	$(TAPLO) format ../pyproject.toml
 
-test-lint-js:
-	cd ..; npm run lint
+test-format-toml:
+	$(TAPLO) format --check --diff ../pyproject.toml
 
-test-lint-js-docker:
-	../scripts/run-in-docker.sh make --quiet test-lint-js
+test-format-toml-docker:
+	../scripts/run-in-docker.sh make --quiet test-format-toml
 
-test-format-js-docker:
-	../scripts/run-in-docker.sh make --quiet test-format-js
+test-lint-bazel:
+	../scripts/run-buildifier --lint=warn --mode=check
 
-test-format-css:
-	cd ..; scripts/run-prettier --check --no-color --loglevel warn "web/htdocs/themes/**/*.scss"
+test-lint-bazel-docker:
+	../scripts/run-in-docker.sh make --quiet test-lint-bazel
 
-test-format-css-docker:
-	../scripts/run-in-docker.sh make --quiet test-format-css
+test-format-bazel:
+	../scripts/run-buildifier --mode=check
+
+test-format-bazel-docker:
+	../scripts/run-in-docker.sh make --quiet test-format-bazel
+
+test-lint-groovy:
+	cd ..; scripts/run-groovy-lint --loglevel warning --failon error $(GROOVYLINT_OUTPUT_ARGS)
+
+test-lint-groovy-docker:
+	../scripts/run-in-docker.sh make --quiet test-lint-groovy
 
 test-gui-crawl: prepare-playwright
-	$(PYTEST) -T gui_crawl --log-cli-level=INFO $(realpath gui_crawl/test_gui_crawl.py)
-
-test-gui-crawl-docker:
-	$(PIPENV) run scripts/run-dockerized.py "test-gui-crawl"
+	$(PYTEST) -T gui_crawl $(PYTEST_SYSTEM_TEST_ARGS) $(realpath gui_crawl/test_gui_crawl.py)
 
 test-xss-crawl: prepare-playwright
-	XSS_CRAWL=1 $(PYTEST) -T gui_crawl --log-cli-level=INFO $(realpath gui_crawl/test_gui_crawl.py)
+	XSS_CRAWL=1 $(PYTEST) -T gui_crawl $(PYTEST_SYSTEM_TEST_ARGS) $(realpath gui_crawl/test_gui_crawl.py) --numprocesses=1
 
-test-xss-crawl-docker:
-	$(PIPENV) run scripts/run-dockerized.py "test-xss-crawl"
+test-gui-e2e test-gui-e2e-cee: prepare-playwright # full e2e test is done for cee
+	EDITION=cee $(PYTEST) -T gui_e2e --screenshot=only-on-failure --output="$$RESULT_PATH/" \
+	$(PYTEST_SYSTEM_TEST_ARGS) $(realpath gui_e2e/)  --numprocesses=1
+
+test-gui-e2e-non-free: prepare-playwright # limited e2e test for non-free editions (cee or higher)
+	$(PYTEST) -T gui_e2e --screenshot=only-on-failure --output="$$RESULT_PATH/" \
+	$(PYTEST_SYSTEM_TEST_ARGS) $(realpath gui_e2e/cee)  --numprocesses=1
+
+test-gui-e2e-cce:
+	EDITION=cce $(MAKE) test-gui-e2e-non-free
+
+test-gui-e2e-cme:
+	EDITION=cme $(MAKE) test-gui-e2e-non-free
+
+test-gui-e2e-cse:
+	EDITION=cse $(MAKE) test-gui-e2e-non-free
 
 test-integration:
-	CI=true $(PIPENV) run scripts/run-integration-test.py $(realpath integration)
+	$(PYTEST) -T integration $(PYTEST_SYSTEM_TEST_ARGS) $(realpath integration) \
+	--session-timeout 5400
 
-test-gui-e2e: prepare-playwright
-	$(PYTEST) -T gui_e2e --screenshot=only-on-failure --output="$$RESULT_PATH/" --log-cli-level=INFO $(realpath gui_e2e/)
+test-integration-redfish:
+	$(PYTEST) -T integration_redfish $(PYTEST_SYSTEM_TEST_ARGS) \
+	$(realpath integration_redfish) --session-timeout 1800
 
-test-gui-e2e-docker:
-	$(PIPENV) run scripts/run-dockerized.py "test-gui-e2e"
+test-composition:
+	OTEL_RESOURCE_ATTRIBUTES=service.name=pytest \
+	    $(PYTEST) -T composition --export-traces $(PYTEST_SYSTEM_TEST_ARGS) \
+	    $(realpath composition) --session-timeout 5400
 
-test-integration-docker:
-	$(PIPENV) run scripts/run-dockerized.py "test-integration"
+test-extension-compatibility:
+	$(PYTEST) -vv -T extension_compatibility $(PYTEST_SYSTEM_TEST_ARGS) $(realpath extension_compatibility)
+
+test-update-cee:
+	EDITION=cee $(PYTEST) -T update $(realpath update/cee) $(PYTEST_SYSTEM_TEST_ARGS) -m cee \
+	--session-timeout 5400
+
+test-update-cce:
+	EDITION=cce $(PYTEST) -T update $(realpath update/cee) $(PYTEST_SYSTEM_TEST_ARGS) -m cce \
+	--session-timeout 5400
+
+test-update-cse:
+	EDITION=cse $(PYTEST) -T update $(realpath update/cee) $(PYTEST_SYSTEM_TEST_ARGS) -m cse --disable-interactive-mode \
+	--session-timeout 5400
+
+test-update-cross-edition-cce: # from CEE to CCE
+	EDITION=cee $(PYTEST) -T update $(realpath update/cee) $(PYTEST_SYSTEM_TEST_ARGS) $(realpath update/cee/test_update.py) -m cee \
+	--latest-base-version --target-edition=CCE --disable-interactive-mode --session-timeout 5400
+
+test-update-cross-edition-cme: # from CEE to CME
+	EDITION=cee $(PYTEST) -T update $(realpath update/cee) $(PYTEST_SYSTEM_TEST_ARGS) $(realpath update/cee/test_update.py) -m cee \
+	--latest-base-version --target-edition=CME --disable-interactive-mode --session-timeout 5400
+
+test-schemathesis-openapi:
+	$(PYTEST) -T schemathesis_openapi $(PYTEST_SYSTEM_TEST_ARGS) $(realpath schemathesis_openapi) -p schemathesis
+
+test-plugins:
+	$(PYTEST) -T plugins_integration $(PYTEST_SYSTEM_TEST_ARGS) $(realpath plugins_integration) \
+	--ignore=plugins_integration/test_plugin_piggyback.py --session-timeout 7200
+
+test-plugins-piggyback:
+	$(PYTEST) -T plugins_integration $(PYTEST_SYSTEM_TEST_ARGS) $(realpath plugins_integration) \
+	plugins_integration/test_plugin_piggyback.py --session-timeout 3600
+
+test-plugins-siteless:
+	$(PYTEST) -T plugins_siteless --log-cli-level=INFO $(realpath plugins_siteless) \
+	plugins_siteless/test_plugins.py --session-timeout 1800
+
+test-plugins-siteless-docker:
+	../scripts/run-in-docker.sh 'make test-plugins-siteless'
+
+$(foreach TEST,$(SYSTEM_TESTS),$(TEST)-docker):
+	$(UVENV) scripts/run-dockerized.py "$(subst -docker,,$@)"
+
+container-debug $(foreach TEST,$(SYSTEM_TESTS),$(TEST)-docker-debug):
+	$(UVENV) scripts/run-dockerized.py debug
 
 test-license-headers:
 	if test -z "$$PYTHON_FILES"; then $(FIND_PYTHON_FILES); else echo "$$PYTHON_FILES"; fi | \
-	xargs -n 1500 --no-run-if-empty $(PYTEST) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_license_headers.py) \
+	xargs -n 1500 --no-run-if-empty $(PYTEST_UV) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_license_headers.py) \
 	--python-files;
 
 test-license-headers-docker:
 	../scripts/run-in-docker.sh make --quiet test-license-headers
 
-test-pipfile:
-	$(PYTEST) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_pipfile.py);
+test-requirements:
+	$(PYTEST) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_requirements.py);
 
-test-pipfile-docker:
-	../scripts/run-in-docker.sh make --quiet test-pipfile
+test-requirements-docker:
+	../scripts/run-in-docker.sh make --quiet test-requirements
 
 test-file-content:
-	if test -n "$$CHANGED_FILES"; then echo "--changed-files $$CHANGED_FILES"; else echo "--test-all-files"; fi | \
-	xargs -n 1500 --no-run-if-empty $(PYTEST) -T code_quality --log-cli-level=INFO $(realpath code_quality/file_content);
+	if test -z "$$CHANGED_FILES_REL_FILE"; then \
+	    $(PYTEST_UV) -T code_quality --log-cli-level=INFO $(realpath code_quality/file_content) --test-all-files ; \
+	else \
+	    cat "$$CHANGED_FILES_REL_FILE" | xargs -n 1500 --no-run-if-empty $(PYTEST_UV) -T code_quality --log-cli-level=INFO $(realpath code_quality/file_content) --changed-files ; \
+	fi \
 
 test-file-content-docker:
 	../scripts/run-in-docker.sh make --quiet test-file-content
 
 test-werks:
-	$(PYTEST) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_werks.py);
+	$(PYTEST_UV) -T code_quality --log-cli-level=INFO $(realpath code_quality/test_werks.py);
 
 test-werks-docker:
 	../scripts/run-in-docker.sh make --quiet test-werks
 
-test-code-quality: test-license-headers test-pipfile test-file-content test-werks
+test-code-quality: test-license-headers test-requirements test-file-content test-werks
 
 test-code-quality-docker:
 	../scripts/run-in-docker.sh make --quiet test-code-quality
 
-test-mypy: prepare-protobuf-files
-	PYTHON_FILES=$$($(FIND_PYTHON_FILES) | \
-	`: filter out plugins, they are not real modules` \
-	grep -v $$(realpath '../checks') | \
-	`: files are only needed for pylint to understand the module hierarchy` \
-	grep -v $$(realpath -m '../enterprise/cmk/__init__.py') | \
-	grep -v $$(realpath -m '../enterprise/cmk/base/__init__.py') | \
-	grep -v $$(realpath -m '../plus/cmk/__init__.py') | \
-	grep -v $$(realpath -m '../plus/cmk/base/__init__.py') \
-	) ; \
-	cd .. ; scripts/run-mypy $(MYPY_ADDOPTS) $(ADDITIONAL_MYPY_ARGS) $$PYTHON_FILES
+test-mypy:
+	cd .. && $(UVENV) mypy \
+	    $(MYPY_ADDOPTS) \
+	    $(ADDITIONAL_MYPY_ARGS) \
+	    --config-file="$(REPO_PATH)/pyproject.toml" \
+	    -- $$($(FIND_PYTHON_FILES))
 
 test-mypy-raw:
 	$(MAKE) test-mypy ADDITIONAL_MYPY_ARGS="--config-file=$(realpath ../mypy-raw.ini)"
 
 test-mypy-docker:
-	../scripts/run-in-docker.sh make --quiet test-mypy
+	../scripts/run-in-docker.sh make test-mypy
 
 test-packaging:
 	$(PYTEST) -T packaging packaging
 
-test-pipenv-deps:
-	$(PIPENV) check
-
-test-pylint: prepare-protobuf-files
-	$(PYTEST) -T pylint pylint
+test-pylint:
+	cd ..; $(UVENV) pylint --disable=all --enable=$(PYLINT_CUSTOM_CHECKERS) --jobs=6 $(PYLINT_ARGS) $$($(FIND_PYTHON_FILES))
+	cd .. && $(PYTEST_UV) \
+	    -T unit \
+	    --config-file=pyproject.toml \
+	    --override-ini="pythonpath=." \
+	    --random-order-bucket=global \
+	    --numprocesses=4 \
+	    --dist=loadfile \
+	    -- \
+	    tests/unit/test_pylint_checker_cmk_module_layers.py \
+	    tests/unit/test_pylint_checker_localization.py
 
 test-pylint-docker:
 	../scripts/run-in-docker.sh make --quiet test-pylint
 
+test-ruff:
+	cd ..; echo $$($(FIND_PYTHON_FILES)) | xargs -n 1500 $(UVENV) ruff check $(RUFF_ARGS)
+
+test-ruff-docker:
+	../scripts/run-in-docker.sh make --quiet test-ruff
+
 test-shellcheck:
-	cd .. && shellcheck $(SHELLCHECK_OUTPUT_ARGS) $(SHELL_FILES_REL)
+	cd .. && $(SHELLCHECK) -x $(SHELLCHECK_OUTPUT_ARGS) $(FIND_SHELL_FILES)
+
+test-shellcheck-docker:
+	../scripts/run-in-docker.sh make --quiet test-shellcheck
 
 test-cycles:
 	$(CYCLES) \
-		--folders cmk enterprise managed plus \
-		--graph no \
-		--map enterprise:cee managed:cme plus:cpe \
-		--project-path $$(realpath -L ..) \
-		--strategy dfs \
-		--verbose 2>&1 | tee .py-import-cycles.txt || true
-	(cat .py-import-cycles.txt && rm .py-import-cycles.txt) \
-	| perl -ne '/Found (\d+)/ && exit ($$1 > $(CYCLES_THRESHOLD))'
+		--packages \
+		    $$($(UVENV) scripts/find_cmk_namespace_package_paths.py) \
+		    $$(realpath -L ..)/omd/packages/omd/omdlib \
+		--strategy johnson \
+		--threshold 116 \
+		--verbose
 
 test-cycles-docker:
 	../scripts/run-in-docker.sh make --quiet test-cycles
 
-test-unit: prepare-protobuf-files
-	$(PYTEST) \
-		$(PYTEST_ADDITIONAL_UNIT_TEST_OPTS) \
-		$(PYTEST_UNIT_TEST_OPTS)
+test-unit-omdlib:
+	cd .. && TZ=$(RANDOM_TZ) $(PYTEST_UV) \
+		-T unit \
+		--config-file=pyproject.toml \
+		--doctest-modules \
+		--override-ini="pythonpath=. omd/packages/omd/" \
+		$(PYTEST_OPTS_UNIT_SKIP_SLOW) \
+		-- \
+		omd/packages/omd/ \
+		tests/unit/omdlib/
+
+test-unit:
+	cd .. && \
+	    $(BAZEL_CMD) test //cmk:doctest
+	cd .. && \
+	    $(BAZEL_CMD) test --test_verbose_timeout_warnings //tests/unit:all \
+	    --test_env=TZ=$(RANDOM_TZ) \
+	    --test_arg="-m" --test_arg="not slow" \
+	    --test_arg="--numprocesses=4"
 
 test-unit-docker:
-	../scripts/run-in-docker.sh make --quiet test-unit
+	../scripts/run-in-docker.sh '\
+	    make --quiet test-unit ;\
+	    x=$$? ;\
+	    cp -Lr ../bazel-testlogs/tests/ ../results/testlogs ;\
+	    exit $$x'
 
-test-unit-resilience: prepare-protobuf-files
-	$(PYTEST) \
-		--count=2 \
-		--random-order-bucket=global \
-	        -m "not non_resilient" \
-		$(PYTEST_ADDITIONAL_UNIT_TEST_OPTS) \
-		$(PYTEST_UNIT_TEST_OPTS)
+test-unit-all:
+	cd .. && \
+	    $(BAZEL_CMD) test --test_verbose_timeout_warnings //tests/unit:all \
+	    --test_env=TZ=$(RANDOM_TZ) \
+	    --test_arg="--numprocesses=4"
 
-test-unit-resilience-docker:
-	../scripts/run-in-docker.sh make test-unit-resilience
+test-unit-all-docker:
+	../scripts/run-in-docker.sh make --quiet test-unit-all
+
+test-unit-testlib:
+	find -name '__pycache__' -exec rm -rf {} \; 2> /dev/null || true
+	cd .. && TZ=$(RANDOM_TZ) $(PYTEST_UV) \
+		-T testlib \
+		--config-file=pyproject.toml \
+		--doctest-modules \
+		--override-ini="pythonpath=." \
+		--override-ini="consider_namespace_packages=true" \
+		$(PYTEST_OPTS_UNIT_SKIP_SLOW) \
+		-- \
+		tests/testlib/
+
+test-unit-testlib-docker:
+	../scripts/run-in-docker.sh make test-unit-testlib
 
 test-agent-plugin-docker:
-	../scripts/run-in-docker.sh make $(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker)
-
-test-unit-coverage-html: prepare-protobuf-files
-	$(PYTEST) \
-		--cov=cmk \
-		--cov-report=html \
-		--cov-config=.coveragerc_unit \
-		--no-cov-on-fail \
-		$(PYTEST_ADDITIONAL_UNIT_TEST_OPTS) \
-		$(PYTEST_UNIT_TEST_OPTS)
+	../scripts/run-in-docker.sh make $(foreach VERS,$(AGENT_PLUGIN_PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker)
 
 test-unit-shell:
 	./unit-shell/runner.sh
@@ -402,59 +527,15 @@ test-unit-shell:
 test-unit-shell-docker:
 	../scripts/run-in-docker.sh make test-unit-shell
 
-%-livestatus-docker:
-	../scripts/run-in-docker.sh make RESULTS=$(RESULTS) GERRIT_PATCHSET_REVISION=$(GERRIT_PATCHSET_REVISION) IWYU_EXTRA_ARGS="--gcc-toolchain=$(GCC_TOOLCHAIN)" CLANG_TIDY_EXTRA_ARGS="-extra-arg-before=--gcc-toolchain=$(GCC_TOOLCHAIN)" $*-livestatus
+test-unit-neb:
+	cd ../packages/neb/test && ./.f12
 
-%-core-docker:
-	../scripts/run-in-docker.sh make RESULTS=$(RESULTS) GERRIT_PATCHSET_REVISION=$(GERRIT_PATCHSET_REVISION) IWYU_EXTRA_ARGS="--gcc-toolchain=$(GCC_TOOLCHAIN)" CLANG_TIDY_EXTRA_ARGS="-extra-arg-before=--gcc-toolchain=$(GCC_TOOLCHAIN)" $*-core
+test-unit-cmc:
+	cd ../packages/cmc/test && ./.f12
 
-test-tidy-livestatus:
-	cd ../livestatus/src && ../../scripts/run-cxx-linter tidy $(GERRIT_PATCHSET_REVISION)
+test-find-modified-lock-files:
+	scripts/find_modified_lock_files
 
-test-tidy-core:
-	cd ../enterprise/core/src && ../../../scripts/run-cxx-linter tidy $(GERRIT_PATCHSET_REVISION)
-
-test-tidy-docker:
-	../scripts/run-in-docker.sh make -C .. tidy CLANG_TIDY_EXTRA_ARGS="-extra-arg-before=--gcc-toolchain=$(GCC_TOOLCHAIN)"
-
-test-iwyu-livestatus:
-	cd ../livestatus/src && ../../scripts/run-cxx-linter iwyu $(GERRIT_PATCHSET_REVISION)
-
-test-iwyu-core:
-	cd ../enterprise/core/src && ../../../scripts/run-cxx-linter iwyu $(GERRIT_PATCHSET_REVISION)
-
-test-iwyu-docker:
-	../scripts/run-in-docker.sh make -C .. iwyu IWYU_EXTRA_ARGS="--gcc-toolchain=$(GCC_TOOLCHAIN)"
-
-test-unit-livestatus:
-	cd ../livestatus/src && ./.f12
-
-test-unit-core:
-	cd ../enterprise/core/src && ./.f12
-
-test-cargo-check:
-	$(SCRIPTS)/run-cargo-command-in-projects check --all-targets
-
-test-cargo-check-docker:
-	$(SCRIPTS)/run-in-docker.sh make test-cargo-check
-
-test-cargo-test:
-	$(SCRIPTS)/run-cargo-command-in-projects test --all-targets
-
-test-cargo-test-docker:
-	$(SCRIPTS)/run-in-docker.sh make test-cargo-test
-
-test-cargo-fmt:
-	$(SCRIPTS)/run-cargo-command-in-projects fmt -- --check
-
-test-cargo-fmt-docker:
-	$(SCRIPTS)/run-in-docker.sh make test-cargo-fmt
-
-test-cargo-clippy:
-	$(SCRIPTS)/run-cargo-command-in-projects clippy --all-targets -- -D warnings
-
-test-cargo-clippy-docker:
-	$(SCRIPTS)/run-in-docker.sh make test-cargo-clippy
 
 # Run `validate_changes` in live-mode i.e. not creating a JSON file
 # containing build steps to be executed by Jenkins but directly running
@@ -463,7 +544,7 @@ what-gerrit-makes:
 	WORKSPACE="$$(git rev-parse --show-toplevel)" ; \
 	cd "$$WORKSPACE" ; \
 	mkdir -p "$$WORKSPACE/results" ; \
-	scripts/run-pipenv run buildscripts/scripts/validate_changes.py \
+	scripts/run-uvenv buildscripts/scripts/validate_changes.py \
 	    -e BASE_COMMIT_ID=origin/master \
 	    -e WORKSPACE="$$WORKSPACE" \
 	    -e RESULTS="$$WORKSPACE/results"

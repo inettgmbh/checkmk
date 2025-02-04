@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from cmk.notification_plugins.cisco_webex_teams import cisco_webex_teams_msg
+from cmk.notification_plugins.cisco_webex_teams import _cisco_webex_teams_msg
 
 
 @pytest.mark.parametrize(
@@ -30,8 +30,8 @@ from cmk.notification_plugins.cisco_webex_teams import cisco_webex_teams_msg
             },
             {
                 "markdown": "#### Service PROBLEM notification"
-                "  \nHost: <http://localhost/testsite/view?key=val|site1> (IP: 127.0.0.1)"
-                "  \nService: <http://localhost/testsite/view?key=val2|first>"
+                "  \nHost: [site1](http://localhost/testsite/view?key=val) (IP: 127.0.0.1)"
+                "  \nService: [first](http://localhost/testsite/view?key=val2)"
                 "  \nState: CRITICAL"
                 "  \n#### Additional Info"
                 "  \nService Down"
@@ -56,7 +56,7 @@ from cmk.notification_plugins.cisco_webex_teams import cisco_webex_teams_msg
             },
             {
                 "markdown": "#### Host PROBLEM notification"
-                "  \nHost: <https://localhost/testsite/view?key=val|site1> (IP: 127.0.0.1)"
+                "  \nHost: [site1](https://localhost/testsite/view?key=val) (IP: 127.0.0.1)"
                 "  \nState: DOWN  \n#### Additional Info"
                 "  \nManually set to Down by cmkadmin"
                 "  \nPlease take a look: @John"
@@ -65,6 +65,6 @@ from cmk.notification_plugins.cisco_webex_teams import cisco_webex_teams_msg
         ),
     ],
 )
-def test_cisco_webex_teams_message(context, result) -> None:  # type:ignore[no-untyped-def]
-    msg = cisco_webex_teams_msg(context)
+def test_cisco_webex_teams_message(context: dict[str, str], result: dict[str, str]) -> None:
+    msg = _cisco_webex_teams_msg(context)
     assert msg == result

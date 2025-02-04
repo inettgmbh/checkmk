@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -67,7 +67,7 @@ def _valuespec_brocade_fcport_inventory():
                     label=_("use port name"),
                     default_value=True,
                     help=_(
-                        "This option lets Check_MK use the port name as item instead of the "
+                        "This option lets Checkmk use the port name as item instead of the "
                         "port number. If no description is available then the port number is "
                         "used anyway."
                     ),
@@ -76,11 +76,11 @@ def _valuespec_brocade_fcport_inventory():
             (
                 "show_isl",
                 Checkbox(
-                    title=_('add "ISL" to service description for interswitch links'),
+                    title=_('add "ISL" to service name for interswitch links'),
                     label=_("add ISL"),
                     default_value=True,
                     help=_(
-                        'This option lets Check_MK add the string "ISL" to the service '
+                        'This option lets Checkmk add the string "ISL" to the service '
                         "description for interswitch links."
                     ),
                 ),
@@ -199,10 +199,8 @@ def _parameter_valuespec_brocade_fcport():
                 Tuple(
                     title=_("CRC errors rate"),
                     elements=[
-                        Percentage(title=_("Warning at"), unit=_("percent"), display_format="%.2f"),
-                        Percentage(
-                            title=_("Critical at"), unit=_("percent"), display_format="%.2f"
-                        ),
+                        Percentage(title=_("Warning at"), unit=_("percent")),
+                        Percentage(title=_("Critical at"), unit=_("percent")),
                     ],
                 ),
             ),

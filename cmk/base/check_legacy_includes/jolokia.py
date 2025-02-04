@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-
 import json
-from typing import (
-    Any,
-    Dict,
-    Iterable,
-    Mapping,
-    MutableMapping,
-    MutableSequence,
-    Optional,
-    Sequence,
-    Tuple,
-)
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, MutableSequence, Sequence
+from typing import Any
 
 #   .--Parse---------------------------------------------------------------.
 #   |                      ____                                            |
@@ -27,7 +17,7 @@ from typing import (
 #   '----------------------------------------------------------------------'
 
 
-def parse_jolokia_json_output(info: Sequence[Sequence[str]]) -> Iterable[Tuple[str, str, Any]]:
+def parse_jolokia_json_output(info: Sequence[Sequence[str]]) -> Iterable[tuple[str, str, Any]]:
     for line in info:
         try:
             instance, mbean, raw_json_data = line
@@ -60,7 +50,7 @@ def jolokia_basic_split(line: MutableSequence[str], expected_length: int) -> Mut
     return tokens
 
 
-def jolokoia_extract_opt(instance_raw: str) -> Tuple[str, MutableMapping[str, str], Sequence[str]]:
+def jolokoia_extract_opt(instance_raw: str) -> tuple[str, MutableMapping[str, str], Sequence[str]]:
     if "," not in instance_raw:
         return instance_raw, {}, []
 
@@ -91,7 +81,7 @@ def jolokoia_extract_opt(instance_raw: str) -> Tuple[str, MutableMapping[str, st
 
 
 def jolokia_metrics_parse(info: Sequence[MutableSequence[str]]) -> Mapping[str, Mapping[str, Any]]:
-    parsed: Dict[str, Dict[str, Any]] = {}
+    parsed: dict[str, dict[str, Any]] = {}
     for line in info:
         if len(line) > 1 and line[1] == "ERROR":
             continue
@@ -117,18 +107,17 @@ def jolokia_metrics_parse(info: Sequence[MutableSequence[str]]) -> Mapping[str, 
             bean = parsed[inst].setdefault(bean_type, {}).setdefault(bean_name, {})
             bean[var] = value
             bean.update(attributes)
-        else:
-            if positional:
-                app = positional[0]
-                app_dict = parsed[inst].setdefault("apps", {}).setdefault(app, {})
-                if len(positional) > 1:
-                    servlet = positional[1]
-                    app_dict.setdefault("servlets", {}).setdefault(servlet, {})
-                    app_dict["servlets"][servlet][var] = value
-                else:
-                    app_dict[var] = value
+        elif positional:
+            app = positional[0]
+            app_dict = parsed[inst].setdefault("apps", {}).setdefault(app, {})
+            if len(positional) > 1:
+                servlet = positional[1]
+                app_dict.setdefault("servlets", {}).setdefault(servlet, {})
+                app_dict["servlets"][servlet][var] = value
             else:
-                parsed[inst][var] = value
+                app_dict[var] = value
+        else:
+            parsed[inst][var] = value
     return parsed
 
 
@@ -155,58 +144,39 @@ def jolokia_metrics_parse(info: Sequence[MutableSequence[str]]) -> Mapping[str, 
 #   '----------------------------------------------------------------------'
 
 
-def inventory_jolokia_metrics_apps(  # pylint: disable=too-many-branches
-    info: Any,
+def get_inventory_jolokia_metrics_apps(
     what: str,
-) -> Sequence[Tuple[str, Optional[str]]]:
-    inv = []
-    parsed = jolokia_metrics_parse(info)
+    *,
+    needed_keys: set[str],
+) -> Callable[[list[list[str]]], Sequence[tuple[str, Mapping[str, object]]]]:
+    def inventory_function(info: list[list[str]]) -> Sequence[tuple[str, Mapping[str, object]]]:
+        inv: list[tuple[str, Mapping[str, object]]] = []
+        parsed = jolokia_metrics_parse(info)
 
-    if what == "app_sess":
-        levels: Optional[str] = "jolokia_metrics_app_sess_default_levels"
-        needed_key = ["Sessions", "activeSessions"]
-    elif what == "bea_app_sess":
-        levels = "jolokia_metrics_app_sess_default_levels"
-        needed_key = ["OpenSessionsCurrentCount"]
-    elif what == "queue":
-        needed_key = ["QueueLength"]
-        levels = "jolokia_metrics_queue_default_levels"
-    # Only works on BEA
-    elif what == "bea_requests":
-        needed_key = ["CompletedRequestCount"]
-        levels = None
-    elif what == "requests":
-        needed_key = ["requestCount"]
-        levels = None
-    elif what == "threads":
-        needed_key = ["StandbyThreadCount"]
-        levels = None
-    else:
-        needed_key = ["Running", "stateName"]
-        levels = None
+        # this handles information from BEA, they stack one level
+        # higher than the rest.
+        if what == "bea_app_sess":
+            for inst, vals in parsed.items():
+                if vals is None:
+                    continue  # no data from agent
 
-    # this handles information from BEA, they stack one level
-    # higher than the rest.
-    if what == "bea_app_sess":
+                for app, appstate in vals.get("apps", {}).items():
+                    if "servlets" in appstate:
+                        for nk in needed_keys:
+                            for servlet in appstate["servlets"]:
+                                if nk in appstate["servlets"][servlet]:
+                                    inv.append((f"{inst} {app} {servlet}", {}))
+                                    continue
+        # This does the same for tomcat
         for inst, vals in parsed.items():
             if vals is None:
                 continue  # no data from agent
 
             for app, appstate in vals.get("apps", {}).items():
-                if "servlets" in appstate:
-                    for nk in needed_key:
-                        for servlet in appstate["servlets"]:
-                            if nk in appstate["servlets"][servlet]:
-                                inv.append(("%s %s %s" % (inst, app, servlet), levels))
-                                continue
-    # This does the same for tomcat
-    for inst, vals in parsed.items():
-        if vals is None:
-            continue  # no data from agent
+                for nk in needed_keys:
+                    if nk in appstate:
+                        inv.append((f"{inst} {app}", {}))
+                        continue
+        return inv
 
-        for app, appstate in vals.get("apps", {}).items():
-            for nk in needed_key:
-                if nk in appstate:
-                    inv.append(("%s %s" % (inst, app), levels))
-                    continue
-    return inv
+    return inventory_function

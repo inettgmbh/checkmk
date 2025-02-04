@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import http.client
-from typing import Optional
 
 from werkzeug.http import HTTP_STATUS_CODES
 
-from cmk.utils.exceptions import MKException, MKGeneralException, MKTimeout
+from cmk.ccc.exceptions import MKException, MKTimeout
 
 
 class RequestTimeout(MKTimeout):
@@ -16,7 +15,7 @@ class RequestTimeout(MKTimeout):
 
 
 class MKHTTPException(MKException):
-    status = 400
+    status: int = http.HTTPStatus.BAD_REQUEST
 
 
 class FinalizeRequest(MKException):
@@ -31,7 +30,7 @@ class HTTPRedirect(FinalizeRequest):
     """Is used to end the HTTP request processing from deeper code levels
     and making the client request another page after receiving the response."""
 
-    status = 302
+    status = http.HTTPStatus.FOUND
 
     def __init__(self, url: str, code: int = http.client.FOUND) -> None:
         super().__init__(code)
@@ -39,25 +38,25 @@ class HTTPRedirect(FinalizeRequest):
 
 
 class MKAuthException(MKHTTPException):
-    status = 401
+    status = http.HTTPStatus.UNAUTHORIZED
 
 
-class MKUnauthenticatedException(MKGeneralException):
+class MKUnauthenticatedException(MKAuthException):
     pass
 
 
 class MKConfigError(MKHTTPException):
-    status = 400
+    status = http.HTTPStatus.BAD_REQUEST
 
 
 class MKUserError(MKHTTPException):
     def __init__(
         self,
-        varname: Optional[str],
+        varname: str | None,
         message: str,
-        status: int = 400,
+        status: int = http.HTTPStatus.BAD_REQUEST,
     ) -> None:
-        self.varname: Optional[str] = varname
+        self.varname: str | None = varname
         self.message: str = message
         self.status: int = status
         super().__init__(varname, message)
@@ -67,8 +66,12 @@ class MKUserError(MKHTTPException):
 
 
 class MKInternalError(MKHTTPException):
-    status = 400
+    status = http.HTTPStatus.BAD_REQUEST
 
 
 class MKMissingDataError(MKHTTPException):
-    status = 400
+    status = http.HTTPStatus.BAD_REQUEST
+
+
+class MKNotFound(MKHTTPException):
+    status = http.HTTPStatus.NOT_FOUND

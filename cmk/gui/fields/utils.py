@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import collections
 import functools
 import typing
-from typing import (
-    Any,
-    Callable,
-    cast,
-    List,
-    Literal,
-    NamedTuple,
-    Optional,
-    Type,
-    TypedDict,
-    TypeVar,
-)
+from collections.abc import Callable, Mapping
+from typing import Any, Literal, NamedTuple, TypedDict, TypeVar
 
 from marshmallow import ValidationError
 
@@ -34,14 +24,11 @@ from cmk.utils.livestatus_helpers.expressions import (
     QueryExpression,
     UnaryExpression,
 )
-from cmk.utils.tags import BuiltinTagConfig, TagGroup
+from cmk.utils.livestatus_helpers.types import Table
+from cmk.utils.tags import BuiltinTagConfig, TagGroup, TagID
 
-# There is an implicit dependency introduced by the collect_attributes call which is evaluated
-# at import time. To make it work as expected we need to import
-import cmk.gui.plugins.wato.builtin_attributes  # pylint: disable=unused-import
-import cmk.gui.watolib.groups  # pylint: disable=unused-import
 from cmk.gui import site_config
-from cmk.gui.fields.base import BaseSchema
+from cmk.gui.fields.base import BaseSchema as BaseSchema
 from cmk.gui.utils.escaping import strip_tags
 from cmk.gui.watolib.host_attributes import (
     get_sorted_host_attribute_topics,
@@ -57,8 +44,9 @@ class Attr(NamedTuple):
     mandatory: bool
     section: str
     description: str
-    enum: Optional[List[Optional[str]]] = None
-    field: Optional[fields.Field] = None
+    enum: list[TagID | None] | None = None
+    field: fields.Field | None = None
+    allow_none: bool = False
 
 
 ObjectType = Literal["host", "folder", "cluster"]
@@ -68,57 +56,21 @@ ObjectContext = Literal["create", "update", "view"]
 def collect_attributes(
     object_type: ObjectType,
     context: ObjectContext,
-) -> List[Attr]:
-    """Collect all attributes for a specific use case
+) -> list[Attr]:
+    """Collect all host attributes for a specific object type
 
     Use cases can be host or folder creation or updating.
-
-    Args:
-        object_type:
-            Either 'host', 'folder' or 'cluster'
-
-        context:
-            Either 'create' or 'update'
-
-    Returns:
-        A list of attribute describing named-tuples.
-
-    Examples:
-
-        >>> attrs = collect_attributes('host', 'create')
-        >>> assert len(attrs) > 10, len(attrs)
-
-        >>> attrs = collect_attributes('host', 'update')
-        >>> assert len(attrs) > 10, len(attrs)
-
-        >>> attrs = collect_attributes('cluster', 'create')
-        >>> assert len(attrs) > 10, len(attrs)
-
-        >>> attrs = collect_attributes('cluster', 'update')
-        >>> assert len(attrs) > 10, len(attrs)
-
-        >>> attrs = collect_attributes('folder', 'create')
-        >>> assert len(attrs) > 10, len(attrs)
-
-        >>> attrs = collect_attributes('folder', 'update')
-        >>> assert len(attrs) > 10
-
-    To check the content of the list, uncomment this one.
-
-        # >>> import pprint
-        # >>> pprint.pprint(attrs)
-
     """
     something = TypeVar("something")
 
-    def _ensure(optional: Optional[something]) -> something:
+    def _ensure(optional: something | None) -> something:
         if optional is None:
             raise ValueError
         return optional
 
     T = typing.TypeVar("T")
 
-    def maybe_call(func: Optional[Callable[[], T]]) -> Optional[T]:
+    def maybe_call(func: Callable[[], T] | None) -> T | None:
         if func is None:
             return None
         return func()
@@ -146,17 +98,54 @@ def collect_attributes(
             )
             result.append(attr_entry)
 
+    # This function is called during import time by the host_attributes_field factory. But to make
+    # this work as expected the registration of all host attributes have to be done prior to that
+    # call. This is ensured by using the right import order. However, this is some kind of an
+    # implicit dependency and broke multiple times now. So we add this check here to get additional
+    # help. The hope is that this points us faster to the source of a future issue that would
+    # otherwise be uncovered by a unit test case with a hard to understand error message later.
+    #
+    # We can not check the full collection of expected attributes here, so the easiest is to apply
+    # some critical level of attributes we expect to have as first line of defense.
+    if len(result) < 9:
+        raise RuntimeError(
+            "Are we missing some host attributes? "
+            f"Found the following: {[r.name for r in result]!r}"
+        )
+
     tag_config = load_tag_config()
     tag_config += BuiltinTagConfig()
 
-    def _format(tag_id: Optional[str]) -> str:
+    def _format(tag_id: str | None) -> str:
         if tag_id is None:
             return "`null`"
         return f'`"{tag_id}"`'
 
     tag_group: TagGroup
     for tag_group in tag_config.tag_groups:
-        description: List[str] = []
+        tag_name = _ensure(f"tag_{tag_group.id}")
+        section = tag_group.topic or "No topic"
+        mandatory = False
+        field = None
+
+        allowed_ids = [tag.id for tag in tag_group.tags]
+        if tag_group.is_checkbox_tag_group:
+            allowed_ids.insert(0, None)
+
+        if context == "view":
+            result.append(
+                Attr(
+                    name=tag_name,
+                    section=section,
+                    mandatory=mandatory,
+                    description="" if tag_group.help is None else tag_group.help,
+                    allow_none=None in allowed_ids,
+                    field=field,
+                )
+            )
+            continue
+
+        description: list[str] = []
         if tag_group.help:
             description.append(tag_group.help)
 
@@ -165,21 +154,17 @@ def collect_attributes(
             for tag in tag_group.tags:
                 description.append(f" * {_format(tag.id)}: {tag.title}")
 
-        allowed_ids = [tag.id for tag in tag_group.tags]
-        if tag_group.is_checkbox_tag_group:
-            allowed_ids.insert(0, None)
-
         result.append(
             Attr(
-                name=_ensure(f"tag_{tag_group.id}"),
-                section=tag_group.topic or "No topic",
-                mandatory=False,
+                name=tag_name,
+                section=section,
+                mandatory=mandatory,
                 description="\n\n".join(description),
                 enum=allowed_ids,
-                field=None,
+                allow_none=None in allowed_ids,
+                field=field,
             )
         )
-
     return result
 
 
@@ -238,7 +223,7 @@ def _field_from_attr(attr):
     class FieldParams(TypedDict, total=False):
         description: str
         required: bool
-        enum: List[Optional[str]]
+        enum: list[str | None]
         validate: Callable[[Any], Any]
         allow_none: bool
 
@@ -249,8 +234,9 @@ def _field_from_attr(attr):
     # If we assigned None to enum, this would lead to a broken OpenApi specification!
     if attr.enum is not None:
         kwargs["enum"] = attr.enum
-        if None in attr.enum:
-            kwargs["allow_none"] = True
+
+    if attr.allow_none is True:
+        kwargs["allow_none"] = True
 
     if attr.name in validators:
         kwargs["validate"] = validators[attr.name]
@@ -258,60 +244,14 @@ def _field_from_attr(attr):
     return fields.String(**kwargs)
 
 
-def _schema_from_dict(name, schema_dict) -> Type[BaseSchema]:  # type:ignore[no-untyped-def]
-    dict_ = schema_dict.copy()
+def _schema_from_dict(name: str, schema_dict: Mapping[str, Any]) -> type[BaseSchema]:
+    dict_ = {**schema_dict}
     dict_["cast_to_dict"] = True
     return type(name, (BaseSchema,), dict_)
 
 
 @functools.lru_cache
-def attr_openapi_schema(
-    object_type: ObjectType,
-    context: ObjectContext,
-) -> Type[BaseSchema]:
-    """
-
-    Examples:
-
-        Known attributes are allowed through:
-
-            >>> schema_class = attr_openapi_schema("host", "create")
-            >>> schema_obj = schema_class()
-            >>> schema_obj.load({'tag_address_family': 'ip-v4-only'})
-            {'tag_address_family': 'ip-v4-only'}
-
-            >>> schema_class = attr_openapi_schema("folder", "update")
-            >>> schema_obj = schema_class()
-            >>> schema_obj.load({'tag_address_family': 'ip-v4-only'})
-            {'tag_address_family': 'ip-v4-only'}
-
-            >>> schema_class = attr_openapi_schema("cluster", "create")
-            >>> schema_obj = schema_class()
-            >>> schema_obj.load({'tag_address_family': 'ip-v4-only'})
-            {'tag_address_family': 'ip-v4-only'}
-
-        Unknown attributes lead to an error:
-
-            >>> import pytest
-            >>> with pytest.raises(ValidationError):
-            ...     schema_obj.load({'foo': 'bar'})
-
-        Wrong values on tag groups also lead to an error:
-
-            >>> with pytest.raises(ValidationError):
-            ...     schema_obj.load({'tag_address_family': 'ip-v5-only'})
-
-    Args:
-        object_type:
-            Either "host", "folder" or "cluster".
-
-        context:
-            Either "create" or "update"
-
-    Returns:
-        A marshmallow schema with the attributes as fields.
-
-    """
+def attr_openapi_schema(object_type: ObjectType, context: ObjectContext) -> type[BaseSchema]:
     schema = collections.OrderedDict()
     for attr in collect_attributes(object_type, context):
         schema[attr.name] = _field_from_attr(attr)
@@ -320,7 +260,7 @@ def attr_openapi_schema(
     return _schema_from_dict(class_name, schema)
 
 
-def tree_to_expr(filter_dict, table: Any = None) -> QueryExpression:  # type:ignore[no-untyped-def]
+def tree_to_expr(filter_dict: QueryExpression, table: Any = None) -> QueryExpression:
     """Turn a filter-dict into a QueryExpression.
 
     Examples:
@@ -336,7 +276,7 @@ def tree_to_expr(filter_dict, table: Any = None) -> QueryExpression:  # type:ign
 
         >>> tree_to_expr({'op': 'and', \
                           'expr': [{'op': '=', 'left': 'hosts.name', 'right': 'example.com'}, \
-                          {'op': '=', 'left': 'hosts.state', 'right': 0}]})
+                          {'op': '=', 'left': 'hosts.state', 'right': '0'}]})
         And(Filter(name = example.com), Filter(state = 0))
 
         >>> tree_to_expr({'op': 'or', \
@@ -389,7 +329,7 @@ def tree_to_expr(filter_dict, table: Any = None) -> QueryExpression:  # type:ign
         #       <class 'cmk.utils.livestatus_helpers.expressions.BinaryExpression'>
         #   While these classes are actually the same, Python treats them distinct, so we can't
         #   just say `isinstance(filter_dict, BinaryExpression)` (or their super-type) here.
-        return cast(QueryExpression, filter_dict)
+        return filter_dict
     op = filter_dict["op"]
     if op in LIVESTATUS_OPERATORS:
         left = filter_dict["left"]
@@ -422,7 +362,7 @@ def tree_to_expr(filter_dict, table: Any = None) -> QueryExpression:  # type:ign
     raise ValueError(f"Unknown operator: {op}")
 
 
-def _lookup_column(table_name, column_name) -> UnaryExpression:  # type:ignore[no-untyped-def]
+def _lookup_column(table_name: str | type[Table], column_name: str) -> UnaryExpression:
     if isinstance(table_name, str):
         table_class = getattr(tables, table_name.title())
     else:
@@ -436,7 +376,7 @@ def _lookup_column(table_name, column_name) -> UnaryExpression:  # type:ignore[n
     return column.expr
 
 
-def _table_name(table) -> str:  # type:ignore[no-untyped-def]
+def _table_name(table: type[Table]) -> str:
     if isinstance(table, str):
         return table
 

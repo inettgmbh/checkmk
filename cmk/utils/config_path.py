@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Fetcher config path manipulation."""
+
 from __future__ import annotations
 
 import abc
 import os
 import shutil
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Final, Iterator
+from typing import Any, Final
+
+from cmk.ccc import store
 
 import cmk.utils.paths
-import cmk.utils.store as store
 
 __all__ = ["ConfigPath", "VersionedConfigPath", "LATEST_CONFIG"]
 
@@ -21,6 +24,8 @@ __all__ = ["ConfigPath", "VersionedConfigPath", "LATEST_CONFIG"]
 class ConfigPath(abc.ABC):
     __slots__ = ()
 
+    # Note - Security: This must remain hard-coded to a path not writable by others.
+    #                  See BNS:c3c5e9.
     ROOT: Final = cmk.utils.paths.core_helper_config_dir
 
     @property
@@ -32,9 +37,7 @@ class ConfigPath(abc.ABC):
         return self._path_elem
 
     def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, os.PathLike):
-            return False
-        return Path(self) == Path(other)
+        return Path(self) == Path(other) if isinstance(other, os.PathLike) else False
 
     def __hash__(self) -> int:
         return hash(type(self)) ^ hash(self._path_elem)
@@ -92,6 +95,7 @@ class VersionedConfigPath(ConfigPath, Iterator):
         yield
         # TODO(ml) We should probably remove the files that were created
         #          previously and not update `serial.mk` on error.
+        # TODO: Should this be in a "finally" or not? Unclear...
         self._link_latest()
 
     def _cleanup(self) -> None:

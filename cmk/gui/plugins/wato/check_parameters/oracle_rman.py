@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -18,7 +18,7 @@ def _parameter_valuespec_oracle_rman():
             (
                 "levels",
                 Tuple(
-                    title=_("Maximum Age for RMAN backups"),
+                    title=_("Maximum age for RMAN backups"),
                     elements=[
                         Age(title=_("warning if older than"), default_value=1800),
                         Age(title=_("critical if older than"), default_value=3600),
@@ -36,6 +36,6 @@ rulespec_registry.register(
         item_spec=lambda: TextInput(title=_("Database SID"), size=12, allow_empty=False),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_oracle_rman,
-        title=lambda: _("Oracle RMAN Backups"),
+        title=lambda: _("Oracle RMAN backups"),
     )
 )

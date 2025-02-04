@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# ruff: noqa: A005
 
 import functools
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
+from types import ModuleType
 
 
 # TODO: Cleanup this dirty hack. Creating a custom subclass of the JSONEncoder and implement the
 # needed features there would be more straight forward. But that would need all call sites to use
 # that encoder instead of the default methods.
 @contextmanager
-def patch_json(json_module) -> Iterator[None]:  # type:ignore[no-untyped-def]
+def patch_json(json_module: ModuleType) -> Iterator[None]:
     # Monkey patch in order to make the HTML class below json-serializable without changing the
     # default json calls.
     def _default(self: json.JSONEncoder, obj: object) -> str:

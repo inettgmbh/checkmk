@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=no-else-return
-
 import time
-from typing import Callable, List, Optional, Tuple, Union
+from collections.abc import Callable
 
-from cmk.base.check_api import (
+from cmk.agent_based.v2 import (
     get_average,
-    get_bytes_human_readable,
-    get_percent_human_readable,
     get_rate,
-    MKCounterWrapped,
-    RAISE,
+    get_value_store,
+    IgnoreResultsError,
+    render,
 )
 
 # ==================================================================================================
 # THESE FUNCTIONS DEFINED HERE ARE IN THE PROCESS OF OR HAVE ALREADY BEEN MIGRATED TO
 # THE NEW CHECK API. PLEASE DO NOT MODIFY THESE FUNCTIONS ANYMORE. INSTEAD, MODIFY THE MIGRATED CODE
 # RESIDING IN
-# cmk/base/plugins/agent_based/utils/size_trend.py
+# cmk.plugins.lib/size_trend.py
 # ==================================================================================================
 
-Levels = Tuple[float, float]
+Levels = tuple[float, float]
 
 
 def _check_shrinking(
-    trend: float, levels: Optional[Levels], range_hours: float, renderer: Callable[..., str]
-) -> Tuple[int, str]:
+    trend: float, levels: Levels | None, range_hours: float, renderer: Callable[..., str]
+) -> tuple[int, str]:
     """test for negative trend
     >>> _check_shrinking(5, (1, 2), 7, lambda _: "foo")
     (0, '')
@@ -44,11 +41,7 @@ def _check_shrinking(
 
     wa, cr = levels
     if trend <= -wa:
-        problem = "shrinking too fast (warn/crit at %s/%s per %.1f h)(!" % (
-            renderer(wa),
-            renderer(cr),
-            range_hours,
-        )
+        problem = f"shrinking too fast (warn/crit at {renderer(wa)}/{renderer(cr)} per {range_hours:.1f} h)(!"
         state = 1
         if trend <= -cr:
             state = 2
@@ -57,15 +50,15 @@ def _check_shrinking(
     return state, problem
 
 
-def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branches
-    check,
-    item,
-    resource,
-    levels,
-    used_mb,
+def size_trend(
+    check: str,
+    item: str,
+    resource: str,
+    levels: dict,
+    used_mb: float,
     size_mb: float,
-    timestamp=None,
-):  # pylint: disable=function-redefined
+    timestamp: float | None = None,
+) -> tuple[int, str, list]:
     """Trend computation for size related checks of disks, ram, etc.
     Trends are computed in two steps. In the first step the delta to
     the last check is computed, using a normal check_mk counter.
@@ -101,12 +94,13 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
       present for the trend computation) the tuple (0, '', []) is
       returned.
     """
+    value_store = get_value_store()
 
-    perfdata: List[
-        Union[  #
-            Tuple[str, float],  #
-            Tuple[str, float, Optional[float], Optional[float], Optional[float], Optional[float]],
-        ]
+    perfdata: list[
+        (  #
+            tuple[str, float]
+            | tuple[str, float, float | None, float | None, float | None, float | None]  #
+        )
     ]
     state, infotext, perfdata, problems = 0, "", [], []
 
@@ -121,9 +115,12 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
     # compute current rate in MB/s by computing delta since last check
     try:
         rate = get_rate(
-            "%s.%s.delta" % (check, item), timestamp, used_mb, allow_negative=True, onwrap=RAISE
+            get_value_store(),
+            f"{check}.{item}.delta",
+            timestamp,
+            used_mb,
         )
-    except MKCounterWrapped:
+    except IgnoreResultsError:
         # need more data for computing a trend
         return 0, "", []
 
@@ -131,19 +128,15 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
         perfdata.append(("growth", rate * H24))
 
     # average trend in MB/s, initialized with zero (by default)
-    rate_avg = get_average("%s.%s.trend" % (check, item), timestamp, rate, range_sec / 60.0)
+    rate_avg = get_average(value_store, f"{check}.{item}.trend", timestamp, rate, range_sec / 60.0)
 
     trend = rate_avg * range_sec
     sign = "+" if trend > 0 else ""
-    infotext += ", trend: %s%s / %g hours" % (
-        sign,
-        get_bytes_human_readable(trend * MB),
-        range_hours,
-    )
+    infotext += f", trend: {sign}{render.bytes(trend * MB)} / {range_hours:g} hours"
 
     # levels for performance data
-    warn_perf: Optional[float] = None
-    crit_perf: Optional[float] = None
+    warn_perf: float | None = None
+    crit_perf: float | None = None
 
     # apply levels for absolute growth / interval
     trend_bytes = levels.get("trend_bytes")
@@ -154,8 +147,8 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
             problems.append(
                 "growing too fast (warn/crit at %s/%s per %.1f h)(!"
                 % (
-                    get_bytes_human_readable(wa),
-                    get_bytes_human_readable(cr),
+                    render.bytes(wa),
+                    render.bytes(cr),
                     range_hours,
                 )
             )
@@ -169,14 +162,14 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
         trend * MB,
         levels.get("trend_shrinking_bytes"),
         range_hours,
-        get_bytes_human_readable,
+        render.bytes,
     )
     if tmp_state > 0:
         state = max(state, tmp_state)
         problems.append(tmp_problem)
 
     # apply levels for growth relative to filesystem size
-    trend_perc: Optional[Tuple[float, float]] = levels.get("trend_perc")
+    trend_perc: tuple[float, float] | None = levels.get("trend_perc")
     if trend_perc:
         wa_perc, cr_perc = trend_perc
         wa = wa_perc / 100.0 * size_mb
@@ -191,8 +184,8 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
             problems.append(
                 "growing too fast (warn/crit at %s/%s per %.1f h)(!"
                 % (
-                    get_percent_human_readable(wa_perc),
-                    get_percent_human_readable(cr_perc),
+                    render.percent(wa_perc),
+                    render.percent(cr_perc),
                     range_hours,
                 )
             )
@@ -206,7 +199,7 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
         100 * trend / size_mb,
         levels.get("trend_shrinking_perc"),
         range_hours,
-        get_percent_human_readable,
+        render.percent,
     )
     if tmp_state > 0:
         state = max(state, tmp_state)
@@ -232,7 +225,8 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
                 return "%0.1f days" % (hours / 24)  # fixed: true-division
             return "%d hours" % hours
 
-        hours_left = (size_mb - used_mb) / trend * range_hours
+        # CMK-13217: size_mb - used_mb < 0: the device reported nonsense
+        hours_left = max((size_mb - used_mb) / trend * range_hours, 0)
         hours_txt = format_hours(hours_left)
 
         timeleft = levels.get("trend_timeleft")
@@ -240,14 +234,14 @@ def size_trend(  # type:ignore[no-untyped-def] # pylint: disable=too-many-branch
             wa, cr = timeleft
             if hours_left <= cr:
                 state = 2
-                problems.append("only %s until %s full(!!)" % (hours_txt, resource))
+                problems.append(f"only {hours_txt} until {resource} full(!!)")
             elif hours_left <= wa:
                 state = max(state, 1)
-                problems.append("only %s until %s full(!)" % (hours_txt, resource))
+                problems.append(f"only {hours_txt} until {resource} full(!)")
             elif hours_left <= wa * 2 or levels.get("trend_showtimeleft"):
-                problems.append("time left until %s full: %s" % (resource, hours_txt))
+                problems.append(f"time left until {resource} full: {hours_txt}")
         elif levels.get("trend_showtimeleft"):
-            problems.append("time left until %s full: %s" % (resource, hours_txt))
+            problems.append(f"time left until {resource} full: {hours_txt}")
 
     if levels.get("trend_perfdata"):
         perfdata.append(

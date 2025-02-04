@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import logging
-from typing import Any, Dict, List, Optional
 
 import pytest
 
+from cmk.utils.hostaddress import HostAddress, HostName
 from cmk.utils.livestatus_helpers.testing import MockLiveStatusConnection
-from cmk.utils.type_defs import HostName
 
-from cmk.ec.host_config import HostConfig, HostInfo
+from cmk.ec.core_queries import HostInfo
+from cmk.ec.host_config import HostConfig
 
 
 @pytest.fixture(name="host_config")
@@ -19,7 +19,7 @@ def fixture_host_config() -> HostConfig:
     return HostConfig(logging.getLogger("cmk.mkeventd.EventServer"))
 
 
-def _heute_config() -> Dict[str, Any]:
+def _heute_config() -> dict[str, object]:
     return {
         "name": "heute",
         "alias": "heute alias",
@@ -33,10 +33,11 @@ def _heute_config() -> Dict[str, Any]:
         },
         "contacts": [],
         "contact_groups": ["all"],
+        "groups": ["custom-group"],
     }
 
 
-def _example_com_config() -> Dict[str, Any]:
+def _example_com_config() -> dict[str, object]:
     return {
         "name": "example.com",
         "alias": "example.com alias",
@@ -50,10 +51,11 @@ def _example_com_config() -> Dict[str, Any]:
         },
         "contacts": [],
         "contact_groups": ["all"],
+        "groups": [],
     }
 
 
-def _test_table() -> List[Dict[str, Any]]:
+def _test_table() -> list[dict[str, object]]:
     return [
         _heute_config(),
         _example_com_config(),
@@ -61,7 +63,9 @@ def _test_table() -> List[Dict[str, Any]]:
 
 
 @pytest.fixture(name="live")
-def fixture_livestatus(mock_livestatus: MockLiveStatusConnection) -> MockLiveStatusConnection:
+def fixture_livestatus(
+    patch_omd_site: None, mock_livestatus: MockLiveStatusConnection
+) -> MockLiveStatusConnection:
     mock_livestatus.set_sites(["local"])
     mock_livestatus.add_table("hosts", _test_table())
     return mock_livestatus
@@ -75,7 +79,7 @@ def fixture_livestatus(mock_livestatus: MockLiveStatusConnection) -> MockLiveSta
             HostInfo(
                 name=HostName("heute"),
                 alias="heute alias",
-                address="127.0.0.1",
+                address=HostAddress("127.0.0.1"),
                 custom_variables={
                     "FILENAME": "/wato/hosts.mk",
                     "ADDRESS_FAMILY": "4",
@@ -84,7 +88,8 @@ def fixture_livestatus(mock_livestatus: MockLiveStatusConnection) -> MockLiveSta
                     "TAGS": "/wato/ auto-piggyback cmk-agent ip-v4 ip-v4-only lan no-snmp prod site:heute tcp",
                 },
                 contacts=set(),
-                contact_groups=set(["all"]),
+                contact_groups={"all"},
+                host_groups={"custom-group"},
             ),
         ),
         ("HEUTE", None),
@@ -95,7 +100,7 @@ def test_host_config(
     host_config: HostConfig,
     live: MockLiveStatusConnection,
     hostname_str: str,
-    result: Optional[HostInfo],
+    result: HostInfo | None,
 ) -> None:
     hostname = HostName(hostname_str)
     with live(expect_status_query=False):
@@ -103,7 +108,7 @@ def test_host_config(
         live.expect_query(
             [
                 "GET hosts",
-                "Columns: name alias address custom_variables contacts contact_groups",
+                "Columns: name alias address custom_variables contacts contact_groups groups",
                 "ColumnHeaders: on",
             ]
         )
@@ -129,14 +134,14 @@ def test_host_config_get_canonical_name(
     host_config: HostConfig,
     live: MockLiveStatusConnection,
     search_term: str,
-    result: Optional[HostName],
+    result: HostName | None,
 ) -> None:
     with live(expect_status_query=False):
         live.expect_query(["GET status", "Columns: program_start", "ColumnHeaders: off"])
         live.expect_query(
             [
                 "GET hosts",
-                "Columns: name alias address custom_variables contacts contact_groups",
+                "Columns: name alias address custom_variables contacts contact_groups groups",
                 "ColumnHeaders: on",
             ]
         )
@@ -154,7 +159,7 @@ def test_host_config_get_canonical_name_is_cached_updated(
         live.expect_query(
             [
                 "GET hosts",
-                "Columns: name alias address custom_variables contacts contact_groups",
+                "Columns: name alias address custom_variables contacts contact_groups groups",
                 "ColumnHeaders: on",
             ]
         )
@@ -171,7 +176,7 @@ def test_host_config_get_canonical_name_is_cached_updated(
         live.expect_query(
             [
                 "GET hosts",
-                "Columns: name alias address custom_variables contacts contact_groups",
+                "Columns: name alias address custom_variables contacts contact_groups groups",
                 "ColumnHeaders: on",
             ]
         )

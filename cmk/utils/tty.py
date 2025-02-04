@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+# ruff: noqa: A005
+
 """This module contains constants and functions for neat output formating
 on ttys while being compatible when the command is not attached to a TTY"""
 
@@ -12,7 +14,7 @@ import itertools
 import struct
 import sys
 import termios
-from typing import Dict, Iterable, List, Tuple
+from collections.abc import Iterable
 
 # TODO: Implementing the colors below as simple global variables is a bad idea,
 # because their actual values depend on sys.stdout at *import* time! sys.stdout
@@ -45,7 +47,7 @@ normal = ""
 ok = ""
 warn = ""
 error = ""
-states: Dict[int, str] = {}
+states: dict[int, str] = {}
 
 
 def reinit() -> None:
@@ -96,7 +98,7 @@ def reinit() -> None:
 
 reinit()
 
-TableRow = List[str]
+TableRow = list[str]
 TableColors = TableRow
 
 
@@ -112,7 +114,7 @@ def colorset(fg: int = -1, bg: int = -1, attr: int = -1) -> str:
     return normal
 
 
-def get_size() -> Tuple[int, int]:
+def get_size() -> tuple[int, int]:
     try:
         ws = struct.pack("HHHH", 0, 0, 0, 0)
         # TODO: Use the following instead?
@@ -123,15 +125,14 @@ def get_size() -> Tuple[int, int]:
             return lines, columns
     except io.UnsupportedOperation:
         pass  # When sys.stdout is StringIO() or similar, then .fileno() is not available
-    except IOError as e:
-        if e.errno == errno.ENOTTY:
-            # Inappropriate ioctl for device: Occurs when redirecting output
-            pass
-        elif e.errno == errno.EINVAL:
-            # Invalid argument: Occurs e.g. when executing from cron
-            pass
-        else:
-            raise
+    except OSError as e:
+        match e.errno:
+            case errno.ENOTTY:  # Inappropriate ioctl for device: Occurs when redirecting output
+                pass
+            case errno.EINVAL:  # Invalid argument: Occurs e.g. when executing from cron
+                pass
+            case _:
+                raise
 
     return (24, 80)
 
@@ -140,22 +141,22 @@ def print_table(
     headers: TableRow, colors: TableColors, rows: Iterable[TableRow], indent: str = ""
 ) -> None:
     num_columns = len(headers)
-    lengths = _column_lengths(headers, rows, num_columns)
+    lengths = _column_lengths(headers, rows)
     dashes = ["-" * l for l in lengths]
     fmt = _row_template(lengths, colors, indent)
     for row in itertools.chain([headers, dashes], rows):
         sys.stdout.write(fmt % tuple(row[:num_columns]))
 
 
-def _column_lengths(headers: TableRow, rows: Iterable[TableRow], num_columns: int) -> List[int]:
-    lengths = [len(h) for h in headers]
-    for row in rows:
-        for index, column in enumerate(row[:num_columns]):
-            lengths[index] = max(len(column), lengths[index])
-    return lengths
+def _column_lengths(headers: TableRow, rows: Iterable[TableRow]) -> list[int]:
+    """
+    >>> _column_lengths(['h1', 'h2'], [['r11', 'r12__', 'r13'], ['r22_', 'r23']])
+    [4, 5]
+    """
+    return [max(len(i) for i in e) for e in zip(headers, *rows)]
 
 
-def _row_template(lengths: List[int], colors: TableColors, indent: str) -> str:
+def _row_template(lengths: list[int], colors: TableColors, indent: str) -> str:
     fmt = indent
     sep = ""
     for l, c in zip(lengths, colors):
@@ -163,3 +164,9 @@ def _row_template(lengths: List[int], colors: TableColors, indent: str) -> str:
         sep = " "
     fmt += "\n"
     return fmt
+
+
+def format_warning(text: str) -> str:
+    stripped = text.lstrip()
+    indent = text[: len(text) - len(stripped)]
+    return f"{indent}{bold}{yellow}WARNING:{normal} {stripped}"

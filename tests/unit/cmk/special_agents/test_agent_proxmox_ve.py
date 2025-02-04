@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
+from collections.abc import Mapping
 from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 
-from cmk.special_agents.agent_proxmox_ve import BackupTask, collect_vm_backup_info
+from cmk.special_agents.agent_proxmox_ve import BackupInfo, BackupTask, collect_vm_backup_info
 
 
 @pytest.mark.parametrize(
@@ -432,9 +433,39 @@ from cmk.special_agents.agent_proxmox_ve import BackupTask, collect_vm_backup_in
             },
             None,
         ),
+        (
+            "proxmox_ve-backup-2023-09-23.log",
+            {
+                "255": {
+                    "archive_name": "/mnt/pve/backup/dump/vzdump-qemu-255-2023_09_23-04_35_29.vma.zst",
+                    "archive_size": 2000,
+                    "started_time": "2023-09-23 04:35:29",
+                    "total_duration": 0.0,
+                    "transfer_size": 131072,
+                    "transfer_time": 1,
+                }
+            },
+            None,
+        ),
+        (
+            "proxmox_ve-backup-2023-10-01.log",
+            {
+                "9001": {
+                    "archive_name": "/mnt/pve/backup/dump/vzdump-qemu-9001-2023_10_01-07_00_01.vma.zst",
+                    "archive_size": 1050000000,
+                    "started_time": "2023-10-01 07:00:01",
+                    "total_duration": 46.0,
+                },
+            },
+            None,
+        ),
     ),
 )
-def test_parse_backup_logs(logfile, expected_results, expected_exception) -> None:
+def test_parse_backup_logs(
+    logfile: str,
+    expected_results: Mapping[str, BackupInfo],
+    expected_exception: None | type[BackupTask.LogParseWarning],
+) -> None:
     file_path = Path(os.path.dirname(__file__)) / "proxmox_ve-files" / logfile
     log = ({"n": i, "t": line} for i, line in enumerate(file_path.open().readlines()))
     with ExitStack() as exit_stack:
@@ -446,15 +477,54 @@ def test_parse_backup_logs(logfile, expected_results, expected_exception) -> Non
         assert results == expected_results
 
 
+@pytest.mark.parametrize(
+    "log, expected_backup_amount, expected_backup_total, expected_backup_time",
+    [
+        pytest.param(
+            "INFO: root.pxar: had to backup 962.93 MiB of 5.444 GiB (compressed 200.638 MiB) in 37.10s",
+            1009705288,
+            5845450490,
+            37.1,
+            id="old log format",
+        ),
+        pytest.param(
+            "INFO: root.pxar: had to backup 1004.756 MiB of 5.434 GiB (compressed 221.297 MiB) in 58.86 s (average 17.07 MiB/s)",
+            1053563027,
+            5834713072,
+            58.86,
+            id="new log format",
+        ),
+    ],
+)
+def test_parsing_backuped_log_formats(
+    log: str, expected_backup_amount: int, expected_backup_total: int, expected_backup_time: int
+) -> None:
+    backup_task = BackupTask(
+        {},
+        [
+            {"n": 1, "t": "INFO: Starting Backup of VM 1"},
+            {"n": 2, "t": "INFO: Backup started at 2024-07-02 01:00:00"},
+            {"n": 3, "t": log},
+            {"n": 4, "t": "INFO: Finished Backup of VM 1 (01:05:00)"},
+        ],
+        strict=True,
+        dump_erroneous_logs=False,
+    )
+
+    assert backup_task.backup_data["1"]["backup_amount"] == expected_backup_amount
+    assert backup_task.backup_data["1"]["backup_total"] == expected_backup_total
+    assert backup_task.backup_data["1"]["backup_time"] == expected_backup_time
+
+
 if __name__ == "__main__":
     # Please keep these lines - they make TDD easy and have no effect on normal test runs.
     # Just run this file from your IDE and dive into the code.
-    from tests.testlib.utils import cmk_path
+    from tests.testlib.repo import repo_path
 
     assert not pytest.main(
         [
             "--doctest-modules",
-            os.path.join(cmk_path(), "cmk/special_agents/agent_proxmox_ve.py"),
+            os.path.join(repo_path(), "cmk/special_agents/agent_proxmox_ve.py"),
         ]
     )
     pytest.main(["-T=unit", "-vvsx", __file__])

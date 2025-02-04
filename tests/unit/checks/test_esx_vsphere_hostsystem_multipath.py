@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from tests.testlib import Check
+from cmk.checkengine.checking import CheckPluginName
 
-from cmk.base.plugins.agent_based.utils.esx_vsphere import Section
+from cmk.base.api.agent_based.register import AgentBasedPlugins
 
-pytestmark = pytest.mark.checks
+from cmk.agent_based.v1 import Result, State
+from cmk.agent_based.v1.type_defs import CheckResult
+from cmk.plugins.lib.esx_vsphere import Section
 
 
 @pytest.mark.parametrize(
@@ -47,8 +49,11 @@ pytestmark = pytest.mark.checks
             ),
             "bla2:A0:B2:C21",
             [
-                0,
-                "0 active, 0 dead, 0 disabled, 0 standby, 0 unknown\nIncluded Paths:\nactive",
+                Result(
+                    state=State.OK,
+                    summary="0 active, 0 dead, 0 disabled, 0 standby, 0 unknown",
+                    details="0 active, 0 dead, 0 disabled, 0 standby, 0 unknown\nIncluded Paths:\nactive",
+                ),
             ],
         ),
         (
@@ -65,8 +70,11 @@ pytestmark = pytest.mark.checks
         ),
     ],
 )
-def test_check_esx_vsphere_hostsystem_multipath(  # type:ignore[no-untyped-def]
-    section, item, check_results
+def test_check_esx_vsphere_hostsystem_multipath(
+    agent_based_plugins: AgentBasedPlugins, section: Section, item: str, check_results: CheckResult
 ) -> None:
-    check = Check("esx_vsphere_hostsystem.multipath")
-    assert list(check.run_check(item, {}, section) or ()) == check_results
+    check = agent_based_plugins.check_plugins[CheckPluginName("esx_vsphere_hostsystem_multipath")]
+    assert (
+        list(check.check_function(item=item, params={"levels_map": {}}, section=section))
+        == check_results
+    )

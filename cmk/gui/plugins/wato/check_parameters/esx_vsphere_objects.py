@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+from collections.abc import Mapping
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.utils import (
@@ -9,7 +11,7 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
-from cmk.gui.valuespec import Dictionary, MonitoringState, TextInput
+from cmk.gui.valuespec import Dictionary, Migrate, MonitoringState, TextInput
 
 
 def _item_spec_esx_vsphere_objects():
@@ -25,6 +27,12 @@ def _item_spec_esx_vsphere_objects():
     )
 
 
+def _migrate_add_stand_by(params: object) -> Mapping[str, object]:
+    if isinstance(params, dict):
+        return {"standBy": 1, **params}
+    raise ValueError(params)
+
+
 def _parameter_valuespec_esx_vsphere_objects():
     return Dictionary(
         help=_(
@@ -35,45 +43,56 @@ def _parameter_valuespec_esx_vsphere_objects():
         elements=[
             (
                 "states",
-                Dictionary(
-                    title=_("Target states"),
-                    optional_keys=False,
-                    elements=[
-                        (
-                            "poweredOn",
-                            MonitoringState(
-                                title=_("Powered ON"),
-                                help=_("Check result if the host or VM is powered on"),
-                                default_value=0,
-                            ),
-                        ),
-                        (
-                            "poweredOff",
-                            MonitoringState(
-                                title=_("Powered OFF"),
-                                help=_("Check result if the host or VM is powered off"),
-                                default_value=1,
-                            ),
-                        ),
-                        (
-                            "suspended",
-                            MonitoringState(
-                                title=_("Suspended"),
-                                help=_("Check result if the host or VM is suspended"),
-                                default_value=1,
-                            ),
-                        ),
-                        (
-                            "unknown",
-                            MonitoringState(
-                                title=_("Unknown"),
-                                help=_(
-                                    "Check result if the host or VM state is reported as <i>unknown</i>"
+                Migrate(
+                    migrate=_migrate_add_stand_by,
+                    valuespec=Dictionary(
+                        title=_("Target states"),
+                        optional_keys=False,
+                        elements=[
+                            (
+                                "standBy",
+                                MonitoringState(
+                                    title=_("Stand by"),
+                                    help=_("Check result if the host or VM is in stand by"),
+                                    default_value=1,
                                 ),
-                                default_value=3,
                             ),
-                        ),
-                    ],
+                            (
+                                "poweredOn",
+                                MonitoringState(
+                                    title=_("Powered ON"),
+                                    help=_("Check result if the host or VM is powered on"),
+                                    default_value=0,
+                                ),
+                            ),
+                            (
+                                "poweredOff",
+                                MonitoringState(
+                                    title=_("Powered OFF"),
+                                    help=_("Check result if the host or VM is powered off"),
+                                    default_value=1,
+                                ),
+                            ),
+                            (
+                                "suspended",
+                                MonitoringState(
+                                    title=_("Suspended"),
+                                    help=_("Check result if the host or VM is suspended"),
+                                    default_value=1,
+                                ),
+                            ),
+                            (
+                                "unknown",
+                                MonitoringState(
+                                    title=_("Unknown"),
+                                    help=_(
+                                        "Check result if the host or VM state is reported as <i>unknown</i>"
+                                    ),
+                                    default_value=3,
+                                ),
+                            ),
+                        ],
+                    ),
                 ),
             ),
         ],

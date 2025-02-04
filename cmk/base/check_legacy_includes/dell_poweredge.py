@@ -1,13 +1,38 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import re
 
-from cmk.base.check_api import savefloat, saveint
-
 from .temperature import check_temperature
+
+
+def savefloat(f: str) -> float:
+    """Tries to cast a string to an float and return it. In case this fails,
+    it returns 0.0.
+
+    Advice: Please don't use this function in new code. It is understood as
+    bad style these days, because in case you get 0.0 back from this function,
+    you can not know whether it is really 0.0 or something went wrong."""
+    try:
+        return float(f)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def saveint(i: str) -> int:
+    """Tries to cast a string to an integer and return it. In case this
+    fails, it returns 0.
+
+    Advice: Please don't use this function in new code. It is understood as
+    bad style these days, because in case you get 0 back from this function,
+    you can not know whether it is really 0 or something went wrong."""
+    try:
+        return int(i)
+    except (TypeError, ValueError):
+        return 0
+
 
 #   .--CPU-----------------------------------------------------------------.
 #   |                           ____ ____  _   _                           |
@@ -17,12 +42,6 @@ from .temperature import check_temperature
 #   |                          \____|_|    \___/                           |
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-
-
-def inventory_dell_poweredge_cpu(info):
-    for _chassisIndex, _Index, StateSettings, _Status, LocationName in info[0]:
-        if LocationName != "" and StateSettings != "1":
-            yield LocationName, None
 
 
 def check_dell_poweredge_cpu(item, _no_params, info):
@@ -61,19 +80,9 @@ def check_dell_poweredge_cpu(item, _no_params, info):
 #   '----------------------------------------------------------------------'
 
 
-def inventory_dell_poweredge_mem(info):
-    inventory = []
-    for line in info:
-        location = line[1]
-        if location != "":
-            inventory.append((location, None))
-    return inventory
-
-
 def check_dell_poweredge_mem(item, _no_params, info):
     di = {}
     for status, location, size, di["Speed"], di["MFR"], di["P/N"], di["S/N"] in info:
-
         di["Size"] = str(int((saveint(size) / 1024.0) / 1024.0)) + "GB"
         if item == location:
             state_table = {
@@ -86,7 +95,7 @@ def check_dell_poweredge_mem(item, _no_params, info):
             }
             infotext, state = state_table.get(status, ("unknown state", 2))
             for parameter, value in di.items():
-                infotext += ", %s: %s" % (parameter, value)
+                infotext += f", {parameter}: {value}"
 
             infotext = re.sub("^, ", "", infotext)
 
@@ -104,14 +113,6 @@ def check_dell_poweredge_mem(item, _no_params, info):
 #   |                  |_| |_|\___|\__\__,_|\___| \_/                      |
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-
-
-def inventory_dell_poweredge_netdev(info):
-    inventory = []
-    for line in info:
-        if line[1] != "2" and line[4] != "":
-            inventory.append((line[4], None))
-    return inventory
 
 
 def check_dell_poweredge_netdev(item, _no_params, info):
@@ -140,9 +141,9 @@ def check_dell_poweredge_netdev(item, _no_params, info):
             dev_state_txt, dev_state = state_table.get(status, ("unknown device status,", 2))
             conn_state_txt, conn_state = connection_table.get(connection_status, ("", 0))
             state = max(dev_state, conn_state)
-            infotext = "%s %s" % (dev_state_txt, conn_state_txt)
+            infotext = f"{dev_state_txt} {conn_state_txt}"
             for parameter, value in di.items():
-                infotext += "%s: %s, " % (parameter, value)
+                infotext += f"{parameter}: {value}, "
             infotext = re.sub(", $", "", infotext)
 
             return state, infotext
@@ -161,19 +162,9 @@ def check_dell_poweredge_netdev(item, _no_params, info):
 #   '----------------------------------------------------------------------'
 
 
-def inventory_dell_poweredge_pci(info):
-    inventory = []
-    for line in info:
-        fqdd = line[4]
-        if fqdd != "":
-            inventory.append((fqdd, None))
-    return inventory
-
-
 def check_dell_poweredge_pci(item, _no_params, info):
     di = {}
     for status, di["BusWidth"], di["MFR"], di["Desc."], fqdd in info:
-
         if item == fqdd:
             state_table = {
                 "1": ("other", 1),
@@ -185,7 +176,7 @@ def check_dell_poweredge_pci(item, _no_params, info):
             }
             infotext, state = state_table.get(status, ("unknown state", 2))
             for parameter, value in di.items():
-                infotext += ", %s: %s" % (parameter, value)
+                infotext += f", {parameter}: {value}"
 
             infotext = re.sub("^, ", "", infotext)
 
@@ -203,12 +194,6 @@ def check_dell_poweredge_pci(item, _no_params, info):
 #   |                    |___/\__\__,_|\__|\__,_|___/                      |
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
-
-
-def inventory_dell_poweredge_status(info):
-    if info:
-        return [(None, None)]
-    return []
 
 
 def check_dell_poweredge_status(item, _no_params, info):
@@ -231,9 +216,9 @@ def check_dell_poweredge_status(item, _no_params, info):
         "5": ("Critical, ", 2),
         "6": ("NonRecoverable, ", 2),
     }
-    infotext, state = state_table.get(status, "2")  # type: ignore[misc]
+    infotext, state = state_table.get(status, ("unknown state, ", 2))
     for parameter, value in di.items():
-        infotext += "%s: %s, " % (parameter, value)
+        infotext += f"{parameter}: {value}, "
     infotext = re.sub(", $", "", infotext)
 
     return state, infotext
@@ -250,22 +235,6 @@ def check_dell_poweredge_status(item, _no_params, info):
 #   '----------------------------------------------------------------------'
 
 
-def inventory_dell_poweredge_amperage_power(info):
-    inventory = []
-    for line in info:
-        if line[6] != "" and line[5] in ("24", "26"):
-            inventory.append((line[6], None))
-    return inventory
-
-
-def inventory_dell_poweredge_amperage_current(info):
-    inventory = []
-    for line in info:
-        if line[6] != "" and line[5] in ("23", "25"):
-            inventory.append((line[6], None))
-    return inventory
-
-
 def check_dell_poweredge_amperage(item, _no_params, info):
     for (
         _chassisIndex,
@@ -278,7 +247,6 @@ def check_dell_poweredge_amperage(item, _no_params, info):
         UpperCritical,
         UpperNonCritical,
     ) in info:
-
         if item == LocationName:
             if StateSettings == "1":  # unknown
                 return 3, "Object's state is unknown"
@@ -297,7 +265,7 @@ def check_dell_poweredge_amperage(item, _no_params, info):
             state_txt, state = state_table.get(Status, "2")  # type: ignore[misc]
 
             if UpperNonCritical and UpperCritical:
-                limittext = " (upper limits %s/%s)" % (UpperNonCritical, UpperCritical)
+                limittext = f" (upper limits {UpperNonCritical}/{UpperCritical})"
                 maxi = savefloat(UpperCritical) * 1.1
             else:
                 limittext = ""
@@ -305,10 +273,10 @@ def check_dell_poweredge_amperage(item, _no_params, info):
 
             if ProbeType in ("23", "25"):  # Amps
                 current = str(int(Reading) / 10.0)
-                infotext = "%s Ampere %s" % (current, state_txt)
+                infotext = f"{current} Ampere {state_txt}"
                 perfdata = [("current", current + "A", UpperNonCritical, UpperCritical, "", maxi)]
             elif ProbeType in ("24", "26"):  # Watts
-                infotext = "%s Watt %s" % (Reading, state_txt)
+                infotext = f"{Reading} Watt {state_txt}"
                 perfdata = [("power", Reading + "W", UpperNonCritical, UpperCritical, "", maxi)]
             else:
                 infotext = "Unknown Probe Type %s" % ProbeType
@@ -338,13 +306,6 @@ def dell_poweredge_temp_makeitem(chassisIndex, Index, LocationName):
     if item.endswith(" Temp"):
         item = item[:-5]
     return item
-
-
-def inventory_dell_poweredge_temp(info):
-    for line in info:
-        if line[2] != "1":  # StateSettings not 'unknown'
-            item = dell_poweredge_temp_makeitem(line[0], line[1], line[5])
-            yield item, {}
 
 
 def check_dell_poweredge_temp(item, params, info):

@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import os
 import pprint
 from datetime import datetime
+from typing import TypedDict
 
-from cmk.utils import store
+from cmk.ccc import store
 
 from cmk.gui import userdb
 from cmk.gui.config import load_config
-from cmk.gui.plugins.watolib.utils import wato_fileheader
-from cmk.gui.watolib.host_attributes import transform_pre_16_host_topics
-from cmk.gui.watolib.hosts_and_folders import Folder
+from cmk.gui.type_defs import CustomHostAttrSpec, CustomUserAttrSpec
+from cmk.gui.watolib.config_domain_name import wato_fileheader
+from cmk.gui.watolib.hosts_and_folders import folder_tree
 from cmk.gui.watolib.utils import multisite_dir
 
 
-def update_user_custom_attrs(now: datetime):
-    userdb.update_config_based_user_attributes()
+class CustomAttrSpecs(TypedDict):
+    user: list[CustomUserAttrSpec]
+    host: list[CustomHostAttrSpec]
+
+
+def update_user_custom_attrs(now: datetime) -> None:
     userdb.rewrite_users(now)
 
 
 def update_host_custom_attrs():
     load_config()
-    Folder.invalidate_caches()
-    Folder.root_folder().rewrite_hosts_files()
+    tree = folder_tree()
+    tree.invalidate_caches()
+    tree.root_folder().recursively_save_hosts()
 
 
-def load_custom_attrs_from_mk_file(lock):
+def load_custom_attrs_from_mk_file(lock: bool) -> CustomAttrSpecs:
     filename = os.path.join(multisite_dir(), "custom_attrs.mk")
     vars_ = store.load_mk_file(
         filename,
@@ -38,21 +44,25 @@ def load_custom_attrs_from_mk_file(lock):
         lock=lock,
     )
 
-    attrs = {}
-    for what in ["user", "host"]:
-        attributes = vars_.get("wato_%s_attrs" % what, [])
-        if what == "host":
-            attributes = transform_pre_16_host_topics(attributes)
-        attrs[what] = attributes
-    return attrs
+    return CustomAttrSpecs(
+        {
+            # Next step: Parse data to get rid of the annotations
+            "user": vars_.get("wato_user_attrs", []),  # type: ignore[typeddict-item]
+            "host": vars_.get("wato_host_attrs", []),  # type: ignore[typeddict-item]
+        }
+    )
 
 
-def save_custom_attrs_to_mk_file(attrs):
+def save_custom_attrs_to_mk_file(attrs: CustomAttrSpecs) -> None:
     output = wato_fileheader()
-    for what in ["user", "host"]:
-        if what in attrs and len(attrs[what]) > 0:
-            output += "if type(wato_%s_attrs) != list:\n    wato_%s_attrs = []\n" % (what, what)
-            output += "wato_%s_attrs += %s\n\n" % (what, pprint.pformat(attrs[what]))
 
-    store.mkdir(multisite_dir())
+    if attrs["user"]:
+        output += "if type(wato_user_attrs) != list:\n    wato_user_attrs = []\n"
+        output += f"wato_user_attrs += {pprint.pformat(attrs['user'])}\n\n"
+
+    if attrs["host"]:
+        output += "if type(wato_host_attrs) != list:\n    wato_host_attrs = []\n"
+        output += f"wato_host_attrs += {pprint.pformat(attrs['host'])}\n\n"
+
+    store.makedirs(multisite_dir())
     store.save_text_to_file(multisite_dir() + "custom_attrs.mk", output)

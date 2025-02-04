@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
+from werkzeug.test import create_environ
 
+from cmk.gui.http import Request
 from cmk.gui.logged_in import user
-from cmk.gui.utils.urls import doc_reference_url, DocReference, urlencode, urlencode_vars
+from cmk.gui.type_defs import HTTPVariables
+from cmk.gui.utils.urls import (
+    doc_reference_url,
+    DocReference,
+    makeuri_contextless,
+    urlencode,
+    urlencode_vars,
+)
 
 
 @pytest.mark.parametrize(
@@ -25,7 +34,7 @@ from cmk.gui.utils.urls import doc_reference_url, DocReference, urlencode, urlen
         ([("a", None)], "a="),
     ],
 )
-def test_urlencode_vars(inp, out) -> None:  # type:ignore[no-untyped-def]
+def test_urlencode_vars(inp: HTTPVariables, out: str) -> None:
     assert urlencode_vars(inp) == out
 
 
@@ -43,13 +52,32 @@ def test_urlencode_vars(inp, out) -> None:  # type:ignore[no-untyped-def]
         ("/", "%2F"),
     ],
 )
-def test_urlencode(inp, out) -> None:  # type:ignore[no-untyped-def]
+def test_urlencode(inp: str | None, out: str) -> None:
     assert urlencode(inp) == out
 
 
-def test_empty_doc_reference() -> None:
-    assert doc_reference_url() == user.get_docs_base_url()
+def test_empty_doc_reference(request_context: None) -> None:
+    doc_reference_url_without_origin = doc_reference_url().replace("?origin=checkmk", "")
+    assert doc_reference_url_without_origin == user.get_docs_base_url()
 
 
-def test_doc_references() -> None:
+def test_doc_references(request_context: None) -> None:
     assert [doc_reference_url(r) for r in DocReference]
+
+
+def test_makeuri_contextless() -> None:
+    request = Request(create_environ())
+
+    value = makeuri_contextless(request, [("foo", "val"), ("bar", "val")], "wato.py")
+    expected = "wato.py?bar=val&foo=val"  # query params are sorted
+
+    assert value == expected
+
+
+def test_makeuri_contextless_no_variables() -> None:
+    request = Request(create_environ())
+
+    value = makeuri_contextless(request, [], "wato.py")
+    expected = "wato.py"
+
+    assert value == expected

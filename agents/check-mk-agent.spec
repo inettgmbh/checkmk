@@ -1,4 +1,4 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,7 @@ Release:   1
 License:   GPL
 Group:     System/Monitoring
 URL:       https://checkmk.com/
-Vendor:    tribe29 GmbH
+Vendor:    Checkmk GmbH
 Source:    check-mk-agent-%{_version}.tar.gz
 BuildRoot: %{_topdir}/buildroot
 AutoReq:   off
@@ -41,12 +41,14 @@ define __spec_install_pre %{___build_pre} &&\
 %config(noreplace) /etc/check_mk/xinetd-service-template.cfg
 /usr/bin/check_mk_agent
 /usr/bin/check_mk_caching_agent
-/usr/bin/cmk-agent-ctl
 /usr/bin/mk-job
 /usr/bin/waitmax
 /usr/lib/check_mk_agent
 /var/lib/check_mk_agent
-/var/lib/cmk-agent/scripts/cmk-agent-useradd.sh
+/var/lib/cmk-agent/cmk-agent-ctl.gz
+/var/lib/cmk-agent/scripts/manage-agent-user.sh
+/var/lib/cmk-agent/scripts/manage-binaries.sh
+/var/lib/cmk-agent/scripts/migrate.sh
 /var/lib/cmk-agent/scripts/super-server/0_systemd/check-mk-agent-async.service
 /var/lib/cmk-agent/scripts/super-server/0_systemd/check-mk-agent.socket
 /var/lib/cmk-agent/scripts/super-server/0_systemd/check-mk-agent.socket.fallback
@@ -58,31 +60,30 @@ define __spec_install_pre %{___build_pre} &&\
 
 %pre
 
-# In case of an upgrade, we must cleanup here.
-# 'preun' runs after the new scripts have been deployed
-# (too late cleanup files only deployed by the old package).
-if [ -x /var/lib/cmk-agent/scripts/super-server/setup ]; then
-    /var/lib/cmk-agent/scripts/super-server/setup cleanup
+if [ -r /var/lib/cmk-agent/cmk-agent/scripts/super-server/setup ]; then
+    /bin/sh /var/lib/cmk-agent/var/lib/cmk-agent/scripts/super-server/setup cleanup
+    /bin/sh /var/lib/cmk-agent/var/lib/cmk-agent/scripts/super-server/setup trigger
 fi
 
-%post
+%posttrans
 
-/var/lib/cmk-agent/scripts/super-server/setup cleanup
-/var/lib/cmk-agent/scripts/super-server/setup deploy
+# Migration is currently only used for migrating runtime files from muliple directory deployment
+# to single directory deployment, but may be augmented by further migration actions in the future.
+# This should run as the first action after files have been placed
+# by the package manager, in order to provide a clean structure for all further scripts.
+/bin/sh /var/lib/cmk-agent/scripts/migrate.sh
 
-# Only create our dedicated user, if the controller is in place (and working)
-# Otherwise we can do without the user.
-if cmk-agent-ctl --version >/dev/null 2>&1; then
-    /var/lib/cmk-agent/scripts/cmk-agent-useradd.sh
-fi
+/bin/sh /var/lib/cmk-agent/scripts/super-server/setup cleanup
+BIN_DIR="/usr/bin" /bin/sh /var/lib/cmk-agent/scripts/super-server/setup deploy
 
-/var/lib/cmk-agent/scripts/super-server/setup trigger
+BIN_DIR="/usr/bin" /bin/sh /var/lib/cmk-agent/scripts/manage-agent-user.sh
+
+/bin/sh /var/lib/cmk-agent/scripts/super-server/setup trigger
+
+/bin/sh /var/lib/cmk-agent/scripts/manage-binaries.sh install
 
 %preun
 
-case "$1" in
-    0 | remove | purge)
-        /var/lib/cmk-agent/scripts/super-server/setup cleanup
-        /var/lib/cmk-agent/scripts/super-server/setup trigger
-        ;;
-esac
+/bin/sh /var/lib/cmk-agent/scripts/manage-binaries.sh remove
+/bin/sh /var/lib/cmk-agent/scripts/super-server/setup cleanup
+/bin/sh /var/lib/cmk-agent/scripts/super-server/setup trigger

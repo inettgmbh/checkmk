@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Union
 
 from cmk.gui.i18n import _
 from cmk.gui.plugins.wato.utils import (
@@ -11,7 +10,7 @@ from cmk.gui.plugins.wato.utils import (
     RulespecGroupCheckParametersApplications,
 )
 from cmk.gui.plugins.wato.utils.simple_levels import SimpleLevels
-from cmk.gui.valuespec import Dictionary, Filesize, TextInput, Transform
+from cmk.gui.valuespec import Dictionary, Filesize, Migrate, TextInput
 
 
 def _item_spec_mysql_db_size():
@@ -21,7 +20,7 @@ def _item_spec_mysql_db_size():
     )
 
 
-def _transform(params: Union[dict, tuple[float, float]]) -> dict[str, tuple[float, float]]:
+def _migrate(params: dict | tuple[float, float]) -> dict[str, tuple[float, float]]:
     if isinstance(params, dict):
         if "levels" not in params:
             params["levels"] = None
@@ -30,7 +29,7 @@ def _transform(params: Union[dict, tuple[float, float]]) -> dict[str, tuple[floa
 
 
 def _parameter_valuespec_mysql_db_size():
-    return Transform(
+    return Migrate(
         valuespec=Dictionary(
             elements=[
                 (
@@ -47,7 +46,7 @@ def _parameter_valuespec_mysql_db_size():
             ],
             optional_keys=False,
         ),
-        forth=_transform,
+        migrate=_migrate,
     )
 
 

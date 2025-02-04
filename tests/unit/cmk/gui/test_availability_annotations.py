@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest
 
-from tests.testlib import on_time
+import datetime
+from collections.abc import Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+import pytest
+import time_machine
+from pytest import MonkeyPatch
 
 import cmk.utils.render
 
-import cmk.gui.availability as availability
+from cmk.gui import availability
 
 
 @pytest.mark.parametrize(
@@ -196,8 +201,11 @@ import cmk.gui.availability as availability
         )
     ],
 )
-def test_reclassify_by_annotations(  # type:ignore[no-untyped-def]
-    monkeypatch, av_rawdata, annotations, result
+def test_reclassify_by_annotations(
+    monkeypatch: MonkeyPatch,
+    av_rawdata: availability.AVRawData,
+    annotations: availability.AVAnnotations,
+    result: availability.AVRawData,
 ) -> None:
     monkeypatch.setattr(availability, "load_annotations", lambda: annotations)
     assert availability.reclassify_by_annotations("service", av_rawdata) == result
@@ -216,10 +224,10 @@ def test_reclassify_by_annotations(  # type:ignore[no-untyped-def]
         (61, 70, False),
     ],
 )
-def test_relevant_annotation_times(  # type:ignore[no-untyped-def]
-    annotation_from, annotation_until, result
+def test_relevant_annotation_times(
+    annotation_from: int, annotation_until: int, result: bool
 ) -> None:
-    with on_time(1572253746, "CET"):
+    with time_machine.travel(datetime.datetime.fromtimestamp(1572253746, tz=ZoneInfo("CET"))):
         assert (
             availability._annotation_affects_time_range(annotation_from, annotation_until, 30, 60)
             == result
@@ -247,13 +255,13 @@ def test_relevant_annotation_times(  # type:ignore[no-untyped-def]
         ([(1543446000 + 82800, 1543446000 + 172800)], cmk.utils.render.date_and_time),
     ],
 )
-def test_get_annotation_date_render_function(  # type:ignore[no-untyped-def]
-    annotation_times, result
+def test_get_annotation_date_render_function(
+    annotation_times: Sequence[tuple[int, int]], result: str
 ) -> None:
     annotations = [((None, None, None), {"from": s, "until": e}) for s, e in annotation_times]
-    with on_time(1572253746, "CET"):
+    with time_machine.travel(datetime.datetime.fromtimestamp(1572253746, tz=ZoneInfo("CET"))):
         assert (
-            availability.get_annotation_date_render_function(  # pylint:disable=comparison-with-callable
+            availability.get_annotation_date_render_function(
                 annotations, {"range": ((1543446000, 1543446000 + 86399), "bla")}
             )
             == result
@@ -431,8 +439,11 @@ def test_get_annotation_date_render_function(  # type:ignore[no-untyped-def]
         )
     ],
 )
-def test_get_relevant_annotations(  # type:ignore[no-untyped-def]
-    annotations, by_host, avoptions, result
+def test_get_relevant_annotations(
+    annotations: Mapping[tuple[str, str, None | str], Sequence[object]],
+    by_host: availability.AVRawData,
+    avoptions: Mapping[str, object],
+    result: Sequence[tuple[object, object]],
 ) -> None:
     assert (
         availability.get_relevant_annotations(annotations, by_host, "service", avoptions) == result

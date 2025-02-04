@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Iterator
+from collections.abc import Iterator
+
+import cmk.ccc.version as cmk_version
+
+from cmk.utils import paths
 
 from cmk.gui.i18n import _
 from cmk.gui.logged_in import user
 from cmk.gui.page_menu import make_simple_link, PageMenuDropdown, PageMenuEntry, PageMenuTopic
-from cmk.gui.watolib.global_settings import rulebased_notifications_enabled
 
 
 def page_menu_dropdown_user_related(
@@ -29,7 +32,9 @@ def page_menu_dropdown_user_related(
 def _page_menu_entries_related(
     page_name: str, show_shortcuts: bool = True
 ) -> Iterator[PageMenuEntry]:
-    if page_name != "user_change_pw":
+    is_cse_edition = cmk_version.edition(paths.omd_root) == cmk_version.Edition.CSE
+
+    if page_name != "user_change_pw" and not is_cse_edition:
         yield PageMenuEntry(
             title=_("Change password"),
             icon_name="topic_change_password",
@@ -37,7 +42,11 @@ def _page_menu_entries_related(
             is_shortcut=show_shortcuts,
         )
 
-    if page_name != "user_two_factor_overview" and user.may("general.manage_2fa"):
+    if (
+        page_name != "user_two_factor_overview"
+        and user.may("general.manage_2fa")
+        and not is_cse_edition
+    ):
         yield PageMenuEntry(
             title=_("Edit two-factor authentication"),
             icon_name="topic_2fa",
@@ -53,11 +62,7 @@ def _page_menu_entries_related(
             is_shortcut=show_shortcuts,
         )
 
-    if (
-        page_name != "user_notifications_p"
-        and rulebased_notifications_enabled()
-        and user.may("general.edit_notifications")
-    ):
+    if page_name != "user_notifications_p" and user.may("general.edit_notifications"):
         yield PageMenuEntry(
             title=_("Notification rules"),
             icon_name="topic_events",

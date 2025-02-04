@@ -1,42 +1,24 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
-#
-#       U  ___ u  __  __   ____
-#        \/"_ \/U|' \/ '|u|  _"\
-#        | | | |\| |\/| |/| | | |
-#    .-,_| |_| | | |  | |U| |_| |\
-#     \_)-\___/  |_|  |_| |____/ u
-#          \\   <<,-,,-.   |||_
-#         (__)   (./  \.) (__)_)
-#
-# This file is part of OMD - The Open Monitoring Distribution.
-# The official homepage is at <http://omdistro.org>.
-#
-# OMD  is  free software;  you  can  redistribute it  and/or modify it
-# under the  terms of the  GNU General Public License  as published by
-# the  Free Software  Foundation  in  version 2.  OMD  is  distributed
-# in the hope that it will be useful, but WITHOUT ANY WARRANTY;  with-
-# out even the implied warranty of  MERCHANTABILITY  or  FITNESS FOR A
-# PARTICULAR PURPOSE. See the  GNU General Public License for more de-
-# ails.  You should have  received  a copy of the  GNU  General Public
-# License along with GNU Make; see the file  COPYING.  If  not,  write
-# to the Free Software Foundation, Inc., 51 Franklin St,  Fifth Floor,
-# Boston, MA 02110-1301 USA.
+# Copyright (C) 2023 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
 
 import grp
 import os
 import pwd
+import shlex
 import subprocess
-from typing import List, Optional, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
-import psutil  # type: ignore[import]
+import psutil
 
 if TYPE_CHECKING:
     from omdlib.contexts import SiteContext
     from omdlib.version_info import VersionInfo
 
-import cmk.utils.tty as tty
-from cmk.utils.exceptions import MKTerminate
+from cmk.ccc.exceptions import MKTerminate
+
+from cmk.utils import tty
 
 # .
 #   .--Users/Groups--------------------------------------------------------.
@@ -51,7 +33,7 @@ from cmk.utils.exceptions import MKTerminate
 #   '----------------------------------------------------------------------'
 
 
-def find_processes_of_user(username: str) -> List[str]:
+def find_processes_of_user(username: str) -> list[str]:
     try:
         completed_process = subprocess.run(
             ["pgrep", "-u", username],
@@ -78,13 +60,11 @@ def groupdel(groupname: str) -> None:
             check=False,
         )
     except OSError as e:
-        raise MKTerminate("\n" + tty.error + ": Failed to delete group '%s': %s" % (groupname, e))
+        raise MKTerminate("\n" + tty.error + f": Failed to delete group '{groupname}': {e}")
 
     if completed_process.returncode:
         raise MKTerminate(
-            "\n"
-            + tty.error
-            + ": Failed to delete group '%s': %s" % (groupname, completed_process.stderr)
+            "\n" + tty.error + f": Failed to delete group '{groupname}': {completed_process.stderr}"
         )
 
 
@@ -92,21 +72,17 @@ def groupdel(groupname: str) -> None:
 def useradd(
     version_info: "VersionInfo",
     site: "SiteContext",
-    uid: Optional[str] = None,
-    gid: Optional[str] = None,
+    uid: str | None = None,
+    gid: str | None = None,
 ) -> None:
     # Create user for running site 'name'
     _groupadd(site.name, gid)
     useradd_options = version_info.USERADD_OPTIONS
     if uid is not None:
         useradd_options += " -u %d" % int(uid)
-    if (
-        os.system(  # nosec
-            "useradd %s -r -d '%s' -c 'OMD site %s' -g %s -G omd %s -s /bin/bash"
-            % (useradd_options, site.dir, site.name, site.name, site.name)
-        )
-        != 0
-    ):
+
+    cmd = f"useradd {useradd_options} -r -d '{site.dir}' -c 'OMD site {site.name}' -g {site.name} -G omd {site.name} -s /bin/bash"
+    if subprocess.call(shlex.split(cmd)) != 0:
         groupdel(site.name)
         raise MKTerminate("Error creating site user.")
 
@@ -121,7 +97,7 @@ def useradd(
 
 
 # TODO: refactor gid to int
-def _groupadd(groupname: str, gid: Optional[str] = None) -> None:
+def _groupadd(groupname: str, gid: str | None = None) -> None:
     cmd = ["groupadd"]
     if gid is not None:
         cmd += ["-g", "%d" % int(gid)]
@@ -132,7 +108,7 @@ def _groupadd(groupname: str, gid: Optional[str] = None) -> None:
 
 def _add_user_to_group(version_info: "VersionInfo", user: str, group: str) -> bool:
     cmd = version_info.ADD_USER_TO_GROUP % {"user": user, "group": group}
-    return os.system(cmd + " >/dev/null") == 0  # nosec
+    return subprocess.call(shlex.split(cmd), stdout=subprocess.DEVNULL) == 0
 
 
 def userdel(name: str) -> None:
@@ -148,13 +124,11 @@ def userdel(name: str) -> None:
                 check=False,
             )
         except OSError as e:
-            raise MKTerminate("\n" + tty.error + ": Failed to delete user '%s': %s" % (name, e))
+            raise MKTerminate("\n" + tty.error + f": Failed to delete user '{name}': {e}")
 
         if completed_process.returncode:
             raise MKTerminate(
-                "\n"
-                + tty.error
-                + ": Failed to delete user '%s': %s" % (name, completed_process.stderr)
+                "\n" + tty.error + f": Failed to delete user '{name}': {completed_process.stderr}"
             )
 
     # On some OSes (e.g. debian) the group is automatically removed if
@@ -163,7 +137,7 @@ def userdel(name: str) -> None:
         groupdel(name)
 
 
-def user_id(name: str) -> Union[bool, int]:
+def user_id(name: str) -> bool | int:
     try:
         return pwd.getpwnam(name).pw_uid
     except Exception:
@@ -205,24 +179,22 @@ def user_verify(
 
     user = _user_by_id(user_id(name))
     if user.pw_dir != site.dir:
-        raise MKTerminate(
-            tty.error + ": Wrong home directory for user %s, must be %s" % (name, site.dir)
-        )
+        raise MKTerminate(tty.error + f": Wrong home directory for user {name}, must be {site.dir}")
 
     if not os.path.exists(site.dir):
         raise MKTerminate(
-            tty.error + ": home directory for user %s (%s) does not exist" % (name, site.dir)
+            tty.error + f": home directory for user {name} ({site.dir}) does not exist"
         )
 
     if not allow_populated and os.path.exists(site.dir + "/version"):
         raise MKTerminate(
-            tty.error + ": home directory for user %s (%s) must be empty" % (name, site.dir)
+            tty.error + f": home directory for user {name} ({site.dir}) must be empty"
         )
 
     if not _file_owner_verify(site.dir, user.pw_uid, user.pw_gid):
         raise MKTerminate(
             tty.error
-            + ": home directory (%s) is not owned by user %s and group %s" % (site.dir, name, name)
+            + f": home directory ({site.dir}) is not owned by user {name} and group {name}"
         )
 
     group = _group_by_id(user.pw_gid)
@@ -231,8 +203,7 @@ def user_verify(
 
     if not _user_has_group(version_info.APACHE_USER, name):
         raise MKTerminate(
-            tty.error
-            + ": apache user %s must be member of group %s" % (version_info.APACHE_USER, name)
+            tty.error + f": apache user {version_info.APACHE_USER} must be member of group {name}"
         )
 
     if not _user_has_group(name, "omd"):
@@ -288,9 +259,10 @@ def switch_to_site_user(site: "SiteContext") -> None:
     # course), then please tell mk -> mk@mathias-kettner.de.
     os.setgroups(_groups_of(site.name))
     os.setuid(uid)
+    os.umask(0o077)
 
 
-def _groups_of(username: str) -> List[int]:
+def _groups_of(username: str) -> list[int]:
     # Note: Do NOT use grp.getgrall to fetch all availabile groups
     # Certain setups might have ldap group authorization and may start excessive queries
     return list(map(int, subprocess.check_output(["id", "-G", username]).split()))

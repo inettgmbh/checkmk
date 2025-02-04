@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -23,15 +23,15 @@ def _valuespec_mssql_transactionlogs_discovery():
             (
                 "summarize_datafiles",
                 Checkbox(
-                    title=_("Display only a summary of all Datafiles"),
-                    label=_("Summarize Datafiles"),
+                    title=_("Display only a summary of all datafiles"),
+                    label=_("Summarize datafiles"),
                 ),
             ),
             (
                 "summarize_transactionlogs",
                 Checkbox(
-                    title=_("Display only a summary of all Transactionlogs"),
-                    label=_("Summarize Transactionlogs"),
+                    title=_("Display only a summary of all transactionlogs"),
+                    label=_("Summarize transaction logs"),
                 ),
             ),
         ],
@@ -50,7 +50,7 @@ rulespec_registry.register(
 
 def _parameter_valuespec_mssql_transactionlogs():
     return Dictionary(
-        title=_("File Size Levels"),
+        title=_("File size levels"),
         help=_(
             "Specify levels for transactionlogs of a database. Please note that relative "
             "levels will only work if there is a max_size set for the file on the database "

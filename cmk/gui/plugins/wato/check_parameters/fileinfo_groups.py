@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
+from cmk.gui.plugins.wato.check_parameters.fileinfo_utils import (
+    get_fileinfo_negative_age_tolerance_element,
+)
 from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     HostRulespec,
@@ -21,21 +24,8 @@ from cmk.gui.valuespec import (
     ListOf,
     MonitoringState,
     TextInput,
-    Transform,
     Tuple,
 )
-
-
-def _transform_fileinfo_groups(params):
-    if isinstance(params, list):
-        return (
-            {
-                "group_patterns": params,
-            }
-            if params
-            else {}
-        )
-    return params
 
 
 def _get_fileinfo_groups_help():
@@ -96,46 +86,38 @@ def _transform_level_names(conjunctions):
     ]
 
 
-def _valuespec_fileinfo_groups():
-    return Transform(
-        valuespec=Dictionary(
-            title=_("Group patterns"),
-            elements=[
-                (
-                    "group_patterns",
-                    ListOf(
-                        valuespec=Tuple(
-                            help=_("This defines one file grouping pattern."),
-                            show_titles=True,
-                            orientation="horizontal",
-                            elements=[
-                                TextInput(
-                                    title=_("Name of group"),
-                                    size=20,
-                                ),
-                                Transform(
-                                    valuespec=Tuple(
-                                        show_titles=True,
-                                        orientation="vertical",
-                                        elements=[
-                                            TextInput(title=_("Include Pattern"), size=40),
-                                            TextInput(title=_("Exclude Pattern"), size=40),
-                                        ],
-                                    ),
-                                    forth=lambda params: isinstance(params, str)
-                                    and (params, "")
-                                    or params,
-                                ),
-                            ],
-                        ),
-                        title=_("File Grouping Patterns"),
-                        help=_get_fileinfo_groups_help(),
-                        add_label=_("Add pattern group"),
+def _valuespec_fileinfo_groups() -> Dictionary:
+    return Dictionary(
+        title=_("File grouping patterns"),
+        elements=[
+            (
+                "group_patterns",
+                ListOf(
+                    valuespec=Tuple(
+                        help=_("This defines one file grouping pattern."),
+                        show_titles=True,
+                        orientation="horizontal",
+                        elements=[
+                            TextInput(
+                                title=_("Name of group"),
+                                size=37,
+                            ),
+                            Tuple(
+                                show_titles=True,
+                                orientation="vertical",
+                                elements=[
+                                    TextInput(title=_("Include Pattern"), size=61),
+                                    TextInput(title=_("Exclude Pattern"), size=61),
+                                ],
+                            ),
+                        ],
                     ),
+                    title=_("Group patterns"),
+                    help=_get_fileinfo_groups_help(),
+                    add_label=_("Add pattern group"),
                 ),
-            ],
-        ),
-        forth=_transform_fileinfo_groups,
+            ),
+        ],
     )
 
 
@@ -328,6 +310,7 @@ def get_fileinfo_groups_param_elements():
                 ),
             ),
         ),
+        get_fileinfo_negative_age_tolerance_element(),
     ]
 
 
@@ -342,7 +325,7 @@ def _parameter_valuespec_fileinfo_groups() -> Dictionary:
 
 rulespec_registry.register(
     CheckParameterRulespecWithItem(
-        check_group_name="fileinfo-groups",
+        check_group_name="fileinfo_groups_checking",
         group=RulespecGroupCheckParametersStorage,
         item_spec=_item_spec_fileinfo_groups,
         match_type="dict",
@@ -352,45 +335,35 @@ rulespec_registry.register(
 )
 
 
-def _transform_manual_fileinfo_groups_params(params):
-    if not "group_patterns" in params:
-        params["group_patterns"] = []
-
-    return params
-
-
-def _manual_parameter_valuespec_fileinfo_groups():
-    return Transform(
-        valuespec=Dictionary(
-            required_keys=["group_patterns"],
-            elements=[
-                (
-                    "group_patterns",
-                    ListOf(
-                        valuespec=Tuple(
-                            help=_("This defines one file grouping pattern."),
-                            show_titles=True,
-                            orientation="vertical",
-                            elements=[
-                                TextInput(title=_("Include Pattern"), size=40),
-                                TextInput(title=_("Exclude Pattern"), size=40),
-                            ],
-                        ),
-                        title=_("Group patterns"),
-                        help=_get_fileinfo_groups_help(),
-                        add_label=_("Add pattern group"),
+def _manual_parameter_valuespec_fileinfo_groups() -> Dictionary:
+    return Dictionary(
+        required_keys=["group_patterns"],
+        elements=[
+            (
+                "group_patterns",
+                ListOf(
+                    valuespec=Tuple(
+                        help=_("This defines one file grouping pattern."),
+                        show_titles=True,
+                        orientation="vertical",
+                        elements=[
+                            TextInput(title=_("Include Pattern"), size=40),
+                            TextInput(title=_("Exclude Pattern"), size=40),
+                        ],
                     ),
+                    title=_("Group patterns"),
+                    help=_get_fileinfo_groups_help(),
+                    add_label=_("Add pattern group"),
                 ),
-            ]
-            + get_fileinfo_groups_param_elements(),
-        ),
-        forth=_transform_manual_fileinfo_groups_params,
+            ),
+        ]
+        + get_fileinfo_groups_param_elements(),
     )
 
 
 rulespec_registry.register(
     ManualCheckParameterRulespec(
-        check_group_name="fileinfo-groups",
+        check_group_name="fileinfo_groups_checking",
         group=RulespecGroupEnforcedServicesStorage,
         item_spec=_item_spec_fileinfo_groups,
         parameter_valuespec=_manual_parameter_valuespec_fileinfo_groups,

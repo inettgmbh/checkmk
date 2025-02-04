@@ -1,4 +1,4 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -15,27 +15,24 @@ include $(BUILD_BASE_DIR)/build-helper-files.make
 # number of packages to just "omd" - to speed up your tests.
 # PACKAGES="omd"
 #
+# Alternatively,
+# ```
+# cd omd
+# PACKAGE=check-cert; make $PWD/build/stamps/$PACKAGE-build
+# ```
+#
 # You can also create a file named .config and override the
 # PACKAGES variable there to customzie the list of packages.
 
 PACKAGES := \
-    openssl \
+    erlang \
     redis \
     libgsf \
     cpp-libs \
-    perl-modules \
-    Python \
-    freetds \
-    re2 \
-    protobuf \
-    python3-modules \
-    rrdtool \
+    lcab \
     msitools \
-    net-snmp \
     apache-omd \
-    lasso \
     xinetd \
-    mod_auth_mellon \
     mod_fcgid \
     mod_wsgi \
     check_mk \
@@ -43,34 +40,46 @@ PACKAGES := \
     stunnel \
     nagios \
     monitoring-plugins \
-    nagvis \
+    check-cert \
     nrpe \
     omd \
-    openhardwaremonitor \
     navicli \
     pnp4nagios \
     maintenance \
     patch \
     heirloom-mailx \
     snap7 \
-    heirloom-pkgtools
+    heirloom-pkgtools \
+    livestatus \
+    unixcat \
+    neb \
+    robotmk \
+    xmlsec1 \
+    rabbitmq
 
 ifeq ($(EDITION),enterprise)
 PACKAGES += enterprise
 endif
-ifeq ($(EDITION),free)
-PACKAGES += enterprise
-endif
 ifeq ($(EDITION),managed)
 PACKAGES += enterprise
+PACKAGES += cloud
 PACKAGES += managed
+PACKAGES += otel-collector
 endif
-ifeq ($(EDITION),plus)
+ifeq ($(EDITION),cloud)
 PACKAGES += enterprise
-PACKAGES += plus
+PACKAGES += cloud
+PACKAGES += otel-collector
+endif
+ifeq ($(EDITION),saas)
+PACKAGES += enterprise
+PACKAGES += cloud
+PACKAGES += saas
+else
+PACKAGES += jaeger
+PACKAGES += nagvis
 endif
 
-PIPENV := ../scripts/run-pipenv
 BUILD_TARGET_VARS := $(call package_target_prefix,$(PACKAGES))
 INSTALL_TARGETS := $(foreach package,$(addsuffix _INSTALL,$(BUILD_TARGET_VARS)),$($(package)))
 INSTALL_LOG_TARGETS := $(foreach package,$(INSTALL_TARGETS),$(addsuffix -log,$(package)))
@@ -90,10 +99,7 @@ $(BUILD_BASE_DIR)/build-helper-files.make:
 	$(MKDIR) $(BUILD_BASE_DIR)
 	$(RM) $@
 	for P in $(PACKAGES); do \
-	  inc_path=$(PACKAGE_DIR)/$$P/$$P.make; \
-	  if [[ $$P == 'enterprise' || $$P == 'free' || $$P == 'managed' || $$P == 'plus' ]] ; then \
-	    inc_path=$(REPO_PATH)/$$P/$$P.make; \
-	  fi ; \
+	  inc_path=$$(test -f "$(NON_FREE_PACKAGE_DIR)/$$P/$$P.make" && echo "$(NON_FREE_PACKAGE_DIR)/$$P/$$P.make" || echo "$(PACKAGE_DIR)/$$P/$$P.make"); \
 	  P_VAR=$$(echo $${P^^} | tr '-' '_' ); \
 	  egrep -h "^$$P_VAR\s+:=\s+" $$inc_path >> $@ ; \
 	  egrep -h "^$${P_VAR}_VERS\s+:=\s+" $$inc_path >> $@ ; \
@@ -116,16 +122,19 @@ RPM_BUILDROOT := $(BUILD_BASE_DIR)/rpm/buildroot
 
 SKEL := $(DESTDIR)$(OMD_ROOT)/skel
 SKEL_PERMISSIONS := $(DESTDIR)$(OMD_ROOT)/share/omd/skel.permissions
-CMA_PKG_VERSION_TXT := $(shell if [ "$(DISTRO_CODE)" = "buster" ]; then echo "-3" ; elif [ "$(DISTRO_CODE)" = "stretch" ]; then echo "-2"; fi )
+CMA_PKG_VERSION_TXT := $(shell if [ "$(DISTRO_CODE)" = "bookworm" ]; then echo "-4" ; elif [ "$(DISTRO_CODE)" = "buster" ]; then echo "-3"; fi )
 ARCH := $(shell uname -m)
 CMA_PACKAGE:= $(REPO_PATH)/check-mk-$(EDITION)-$(PKG_VERSION)$(CMA_PKG_VERSION_TXT)-$(ARCH).cma
 BOM := bill-of-materials.json
 
-.PHONY: install cma rpm deb clean setversion install-clean
+.PHONY: install cma rpm deb clean install-clean venv
 
 # Called while building the .rpm/.deb packages
-install: $(INSTALL_GLOBAL)
-	$(PIPENV) run ./strip_binaries --exclude cmk-agent-ctl --exclude cmc --exclude waitmax --exclude agent_modbus $(DESTDIR)$(OMD_ROOT)/
+install: $(INSTALL_GLOBAL) $(DEPS_INSTALL_BAZEL)
+	$(BAZEL_CMD) run :venv
+	source .venv/bin/activate \
+	&& python3 ./strip_binaries --exclude cmk-agent-ctl --exclude mk-sql --exclude cmc --exclude waitmax --exclude agent_modbus $(DESTDIR)$(OMD_ROOT)/ \
+	&& deactivate
 
 # Called by our release system to build appliance packages
 cma: $(CMA_PACKAGE)
@@ -168,15 +177,22 @@ $(INSTALL): $(INSTALL_LOG_TARGETS)
 $(SKEL_PERMISSIONS): $(INSTALL)
 # Create permissions file for skel
 	mkdir -p $(DESTDIR)$(OMD_ROOT)/share/omd
-	set -e ; cd packages ; for p in $(PACKAGES) ; do \
+	set -e ; \
+	OUTPUT=""; \
+	cd packages ; for p in $(PACKAGES) rrdtool; do \
 	    if [ -d $$p ] && [ -e $$p/skel.permissions ] ; then \
-	        echo "# $$p" ; \
-	        cat $$p/skel.permissions ; \
+	        OUTPUT="$${OUTPUT}# $$p\n$$(cat $$p/skel.permissions)\n"; \
 	    fi ; \
-	done > $(SKEL_PERMISSIONS)
+	done ; \
+	cd ../../non-free/packages ; for p in $(PACKAGES) ; do \
+	    if [ -d $$p ] && [ -e $$p/skel.permissions ] ; then \
+	        OUTPUT="$${OUTPUT}# $$p\n$$(cat $$p/skel.permissions)\n"; \
+	    fi ; \
+	done ; \
+	bazel build //omd:skel_permissions_$(EDITION_SHORT) ; \
+	OUTPUT="$${OUTPUT}# Bazel\n$$(cat $(REPO_PATH)/bazel-bin/omd/skel.permissions_$(EDITION_SHORT))\n" ; \
+	echo -e "$$OUTPUT" > $(SKEL_PERMISSIONS)
 
-# Create installations files that do not lie beyond /omd/versions/$(OMD_VERSION)
-# and files not owned by a specific package.
 $(INSTALL_GLOBAL): $(SKEL_PERMISSIONS) $(BOM)
 	# Create link to default version
 	ln -sf $(OMD_VERSION) $(DESTDIR)$(OMD_BASE)/versions/default
@@ -209,9 +225,12 @@ $(INSTALL_GLOBAL): $(SKEL_PERMISSIONS) $(BOM)
 	install -m 644 License_texts.pdf $(DESTDIR)$(OMD_ROOT)/share/doc/License_texts.pdf
 	install -m 644 $(BOM) $(DESTDIR)$(OMD_ROOT)/share/doc/$(BOM)
 
-	if [ -f COMMIT ]; then \
-	    install -m 644 COMMIT $(DESTDIR)$(OMD_ROOT)/share/doc ; \
-	fi
+	chmod 755 $(DESTDIR)$(OMD_ROOT)/share
+	chmod 755 $(DESTDIR)$(OMD_ROOT)/share/man
+	chmod 755 $(DESTDIR)$(OMD_ROOT)/share/man/man1
+
+	git rev-parse HEAD > $(DESTDIR)$(OMD_ROOT)/share/doc/COMMIT
+	chmod 644 $(DESTDIR)$(OMD_ROOT)/share/doc/COMMIT
 
 # This file is normally generated by our CI chain. In case it is not there, just
 # create an empty one instead of failing the build.
@@ -294,10 +313,13 @@ deb: debian/changelog debian/control
 	fi && \
 	    debuild \
 	    --preserve-envvar="NEXUS_*" \
+	    --preserve-envvar="BAZEL_*" \
 	    --preserve-envvar="MAKE" \
-	    --preserve-envvar="PYTHON_ENABLE_OPTIMIZATIONS" \
+	    --preserve-envvar="CI" \
+	    --preserve-envvar="RUSTUP_HOME" \
 	    --prepend-path $$HOME/.cargo/bin \
 	    --prepend-path=/usr/local/bin \
+	    --prepend-path=`dirname $$(which python3)` \
 	    --set-envvar EDITION=$(EDITION) \
 	    --no-lintian \
 	    -i\.git -I\.git \
@@ -305,33 +327,21 @@ deb: debian/changelog debian/control
 	    -rfakeroot \
 	    $$TARGET
 
-setversion:
-# NEW_VERSION should be set on the command line.  Replace all '/' since sed
-# tries to interpret them '/' might occur in custom branches filenames and sed
-# arguments should not contain '/'
-	NEW_OMD_VERSION=$(subst /,-,$(NEW_VERSION)).$(EDITION_SHORT) ; \
-
 # Please note: APPLIANCE_*_CMA are defined in omd/packages/appliance/appliance.make
 $(APPLIANCE_INSTALL_CMA): $(PRE_INSTALL)
 
 # Please note: APPLIANCE_*_CMA are defined in omd/packages/appliance/appliance.make
 $(CMA_PACKAGE): $(APPLIANCE_INSTALL_CMA) install
 	# Create info file to mark minimal cma firmware version requirement
-	@if [ "$(DISTRO_CODE)" = "buster" ]; then \
+	@if [ "$(DISTRO_CODE)" = "bookworm" ]; then \
+	    MIN_VERSION=1.7.0 ; \
+	elif [ "$(DISTRO_CODE)" = "buster" ]; then \
 	    MIN_VERSION=1.5.0 ; \
-	elif [ "$(DISTRO_CODE)" = "stretch" ]; then \
-	    MIN_VERSION=1.4.17 ; \
 	else \
 	    echo "ERROR: Unsupported CMA platform ($(DISTRO_CODE))" ; \
 	    exit 1 ; \
 	fi ; \
 	echo -e "MIN_VERSION=$$MIN_VERSION\n" > $(DESTDIR)/opt/omd/versions/$(OMD_VERSION)/cma.info
-
-	# Mark demo builds in cma.info file
-
-	@if [ "$(EDITION)" = "free" ]; then \
-	    echo -e "DEMO=1\n" >> $(DESTDIR)/opt/omd/versions/$(OMD_VERSION)/cma.info ; \
-	fi
 
 	tar czf $@ \
 	    --owner=root \
@@ -343,7 +353,3 @@ clean: install-clean
 	$(RM) -r $(BUILD_HELPER_DIR)
 	$(RM) -r $(BUILD_BASE_DIR)
 	$(RM) -r $(PACKAGE_BUILD_DIR)
-
-setup:
-	@echo "Please run the build in a docker container."
-	@echo "Dockerfiles for all Distros can be found under 'buildscripts/infrastructure/build-nodes/'."

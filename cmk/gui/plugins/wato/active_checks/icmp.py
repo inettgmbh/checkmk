@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 
+from cmk.utils.rulesets.definition import RuleGroup
+
+from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.plugins.wato.active_checks.common import RulespecGroupActiveChecks
 from cmk.gui.plugins.wato.utils import check_icmp_params, HostRulespec, rulespec_registry
 from cmk.gui.valuespec import (
     CascadingDropdown,
+    Checkbox,
     Dictionary,
     DictionaryEntry,
     Hostname,
@@ -16,6 +19,13 @@ from cmk.gui.valuespec import (
     TextInput,
     ValueSpec,
 )
+from cmk.gui.wato import RulespecGroupActiveChecks
+
+
+def _validate_ip_index(value: int, varprefix: str) -> None:
+    if value >= 1:
+        return
+    raise MKUserError(varprefix, _("The index must be greater or equal to 1."))
 
 
 def _valuespec_active_checks_icmp() -> ValueSpec:
@@ -23,7 +33,7 @@ def _valuespec_active_checks_icmp() -> ValueSpec:
         (
             "description",
             TextInput(
-                title=_("Service Description"),
+                title=_("Service description"),
                 allow_empty=False,
                 default_value="PING",
             ),
@@ -56,15 +66,23 @@ def _valuespec_active_checks_icmp() -> ValueSpec:
                     ("additional_ipv6addresses", _("Ping additional IPv6 addresses")),
                     (
                         "indexed_ipv4address",
-                        _("Ping IPv4 address identified by its index"),
-                        Integer(default_value=1),
+                        _("Ping IPv4 address identified by its index (starting at 1)"),
+                        Integer(default_value=1, validate=_validate_ip_index),
                     ),
                     (
                         "indexed_ipv6address",
-                        _("Ping IPv6 address identified by its index"),
-                        Integer(default_value=1),
+                        _("Ping IPv6 address identified by its index (starting at 1)"),
+                        Integer(default_value=1, validate=_validate_ip_index),
                     ),
                 ],
+            ),
+        ),
+        (
+            "multiple_services",
+            Checkbox(
+                title=_("Multiple services"),
+                label=_("Create a service for every pinged IP address"),
+                default_value=False,
             ),
         ),
         (
@@ -89,9 +107,9 @@ def _valuespec_active_checks_icmp() -> ValueSpec:
         title=_("Check hosts with PING (ICMP Echo Request)"),
         help=_(
             "This ruleset allows you to configure explicit PING monitoring of hosts. "
-            "Usually a PING is being used as a host check, so this is not neccessary. "
+            "Usually a PING is being used as a host check, so this is not necessary. "
             "There are some situations, however, where this can be useful. One of them "
-            "is when using the Check_MK Micro Core with SMART Ping and you want to "
+            "is when using the Checkmk Micro Core with SMART Ping and you want to "
             "track performance data of the PING to some hosts, nevertheless."
         ),
         elements=elements + check_icmp_params(),
@@ -102,7 +120,7 @@ rulespec_registry.register(
     HostRulespec(
         group=RulespecGroupActiveChecks,
         match_type="all",
-        name="active_checks:icmp",
+        name=RuleGroup.ActiveChecks("icmp"),
         valuespec=_valuespec_active_checks_icmp,
     )
 )

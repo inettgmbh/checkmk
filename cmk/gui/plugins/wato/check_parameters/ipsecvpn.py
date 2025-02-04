@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,28 +9,25 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersNetworking,
 )
-from cmk.gui.valuespec import Dictionary, Integer, ListOfStrings, Transform, Tuple
+from cmk.gui.valuespec import Dictionary, Integer, ListOfStrings, Tuple
 
 
-def _parameter_valuespec_ipsecvpn():
-    return Transform(
-        valuespec=Dictionary(
-            elements=[
-                (
-                    "levels",
-                    Tuple(
-                        title=_("Levels for number of down channels"),
-                        elements=[
-                            Integer(title=_("Warning at"), default_value=1),
-                            Integer(title=_("Critical at"), default_value=2),
-                        ],
-                    ),
+def _parameter_valuespec_ipsecvpn() -> Dictionary:
+    return Dictionary(
+        elements=[
+            (
+                "levels",
+                Tuple(
+                    title=_("Levels for number of down channels"),
+                    elements=[
+                        Integer(title=_("Warning at"), default_value=1),
+                        Integer(title=_("Critical at"), default_value=2),
+                    ],
                 ),
-                ("tunnels_ignore_levels", ListOfStrings(title=_("Tunnels which ignore levels"))),
-            ],
-            optional_keys=[],
-        ),
-        forth=lambda params: isinstance(params, dict) and params or {"levels": params},
+            ),
+            ("tunnels_ignore_levels", ListOfStrings(title=_("Tunnels which ignore levels"))),
+        ],
+        optional_keys=[],
     )
 
 

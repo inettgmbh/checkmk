@@ -1,36 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
 from datetime import timedelta
 
-from cmk.base.check_api import check_levels
-
-
-################################################################################################
-#  NOTE: This function has already been migrated to cmk.base.plugins.agent_based.snmp_uptime   #
-#         Plugins that use this function should probably just subscribe to the snmp_uptime     #
-#         section!                                                                             #
-################################################################################################
-def parse_snmp_uptime(ticks):
-    if len(ticks) < 3:
-        return 0
-
-    try:
-        return int(ticks[:-2])
-    except Exception:
-        pass
-
-    try:
-        days, h, m, s = ticks.split(":")
-        return (int(days) * 86400) + (int(h) * 3600) + (int(m) * 60) + int(float(s))
-    except Exception:
-        pass
-
-    return 0
-
+from cmk.agent_based.legacy.v0_unstable import check_levels
 
 # Example for params:
 # {
@@ -40,10 +16,9 @@ def parse_snmp_uptime(ticks):
 
 
 ################################################################################################
-#  NOTE: This function has already been migrated to cmk.base.plugins.agent_based.snmp_uptime   #
+#  NOTE: This function has already been migrated to cmk.plugins.collection.agent_based.snmp_uptime   #
 ################################################################################################
 def check_uptime_seconds(params, uptime_sec):
-
     if params is None:  # legacy: support older versions of parameters
         params = {}
 

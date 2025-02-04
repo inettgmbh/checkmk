@@ -2,34 +2,50 @@
 
 #include "providers/internal.h"
 
+#include <time.h>
+
 #include <chrono>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <tuple>
 
-#include "cfg.h"
 #include "common/mailslot_transport.h"
+#include "wnx/cfg.h"
 
 using namespace std::chrono_literals;
 
 namespace cma::provider {
 
 namespace {
+tm GetTimeAsTm(std::chrono::system_clock::time_point time_point) {
+    const auto in_time_t = std::chrono::system_clock::to_time_t(time_point);
+    tm buf;
+    const auto *_ = localtime_s(&in_time_t, &buf);
+    return buf;
+}
+
+std::string TimeToString(std::chrono::system_clock::time_point time_point) {
+    std::stringstream sss;
+    const auto time_value = GetTimeAsTm(time_point);
+    sss << std::put_time(&time_value, "%Y-%m-%d %T") << std::ends;
+    return sss.str();
+}
+
 // Confirmed values with AB from LA(3600s)
-const std::unordered_map<std::string_view, std::chrono::seconds>
-    &GetDelaysOnFail() {
+const std::unordered_map<std::string_view, std::chrono::seconds> &
+GetDelaysOnFail() {
     const static std::unordered_map<std::string_view, std::chrono::seconds>
         delays_on_fail = {
-            {kDotNetClrMemory, cma::cfg::G_DefaultDelayOnFail},  //
-            {kWmiWebservices, cma::cfg::G_DefaultDelayOnFail},   //
-            {kWmiCpuLoad, cma::cfg::G_DefaultDelayOnFail},       //
-            {kMsExch, cma::cfg::G_DefaultDelayOnFail},           //
-            {kOhm, cma::cfg::G_DefaultDelayOnFail},
+            {kDotNetClrMemory, 0s},                        //
+            {kWmiWebservices, cfg::G_DefaultDelayOnFail},  //
+            {kWmiCpuLoad, 0s},                             //
+            {kMsExch, cfg::G_DefaultDelayOnFail},          //
+            {kOhm, cfg::G_DefaultDelayOnFail},
 
             // end of the real sections
-            {kBadWmi, cma::cfg::G_DefaultDelayOnFail},  // used to testing
-            {"OhmBad", 1500s},                          // used to testing
+            {kBadWmi, cfg::G_DefaultDelayOnFail},  // used to testing
+            {"OhmBad", 1500s},                     // used to testing
         };
     return delays_on_fail;
 }
@@ -77,16 +93,14 @@ std::tuple<uint64_t, std::string, std::string> ParseCommandLine(
     return {marker, std::string(section::kUseEmbeddedName), ""};
 }
 
-void Basic::registerOwner(cma::srv::ServiceProcessor *sp) noexcept {
-    host_sp_ = sp;
-}
+void Basic::registerOwner(srv::ServiceProcessor *sp) noexcept { host_sp_ = sp; }
 
 std::string Basic::generateContent(std::string_view section_name,
                                    bool force_generation) {
     auto real_name =
         section_name == section::kUseEmbeddedName ? uniq_name_ : section_name;
 
-    if (!force_generation && !cfg::groups::global.allowedSection(real_name)) {
+    if (!force_generation && !cfg::groups::g_global.allowedSection(real_name)) {
         XLOG::t("The section \"{}\" is disabled in config", real_name);
         return {};
     }
@@ -109,7 +123,7 @@ std::string Basic::generateContent(std::string_view section_name,
 }
 
 bool Basic::isAllowedByCurrentConfig() const {
-    return cfg::groups::global.allowedSection(getUniqName());
+    return cfg::groups::g_global.allowedSection(getUniqName());
 }
 
 bool Basic::isAllowedByTime() const noexcept {
@@ -131,7 +145,8 @@ void Basic::setupDelayOnFail() noexcept {
         const auto &delay_in_seconds = GetDelaysOnFail().at(uniq_name_);
         delay_on_fail_ = delay_in_seconds;
     } catch (const std::out_of_range &) {
-        // do nothing here
+        XLOG::l.crit("Unsupported section name {}", uniq_name_);
+        delay_on_fail_ = std::chrono::seconds(0);
     }
 }
 
@@ -148,7 +163,7 @@ void Basic::disableSectionTemporary() {
     // report using _system_ clock
     const auto sys_clock = std::chrono::system_clock::now() + delay_on_fail_;
     XLOG::d.w("Resetting time for earliest start of the section '{}' at '{}'",
-              getUniqName(), tools::TimeToString(sys_clock));
+              getUniqName(), TimeToString(sys_clock));
 }
 
 /// true when data exist.
@@ -228,7 +243,7 @@ void Asynchronous::threadProc(
             }
             std::unique_lock l(lock_stopper_);
             const auto stop = stop_thread_.wait_until(
-                l, tm + period, [this]() { return stop_requested_; });
+                l, tm + period, [this] { return stop_requested_; });
             if (stop) {
                 break;
             }

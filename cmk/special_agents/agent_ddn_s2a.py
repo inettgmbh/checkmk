@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -14,7 +14,7 @@ from cmk.utils.password_store import replace_passwords
 
 
 def commandstring(command_txt, username_txt, password_txt):
-    return "%s@%s@%s@0@0@$" % (command_txt, username_txt, password_txt)
+    return f"{command_txt}@{username_txt}@{password_txt}@0@0@$"
 
 
 def query(s, command_txt):
@@ -34,7 +34,7 @@ def main(sys_argv=None):
         sys_argv = sys.argv[1:]
 
     parser = argparse.ArgumentParser(
-        description="A datasource program for Data Direct" "Networks Silicon Storage Appliances"
+        description="A datasource program for Data DirectNetworks Silicon Storage Appliances"
     )
 
     parser.add_argument("ip_address")
@@ -60,8 +60,8 @@ def main(sys_argv=None):
     ]
 
     for command, section in sections:
-        print("<<<%s>>>" % section)
+        sys.stdout.write("<<<%s>>>\n" % section)
         sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
         sock.connect((ip_address, port))
-        print(query(sock, commandstring(command, username, password)))
+        sys.stdout.write(query(sock, commandstring(command, username, password)) + "\n")
         sock.close()

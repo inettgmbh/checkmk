@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Sequence
+
 import pytest
 
-from tests.testlib import Check
+from cmk.agent_based.v1.type_defs import StringTable
 
-from .checktestlib import BasicCheckResult
+from .checktestlib import BasicCheckResult, Check
 
 pytestmark = pytest.mark.checks
 
@@ -59,14 +61,14 @@ RA32E_SWITCH = "ra32e_switch"
         )
     ],
 )
-def test_ra32e_switch_discovery(info, result) -> None:
+def test_ra32e_switch_discovery(info: StringTable, result: Sequence[tuple[str, None]]) -> None:
     check = Check(RA32E_SWITCH)
     assert list(check.run_discovery(info)) == result
 
 
 def test_ra32e_switch_check_closed_no_rule() -> None:
     check = Check(RA32E_SWITCH)
-    result = BasicCheckResult(*check.run_check("Sensor 01", None, [["1"]]))
+    result = BasicCheckResult(*check.run_check("Sensor 01", {"state": "ignore"}, [["1"]]))
 
     assert result.status == 0
     assert result.infotext.startswith("closed")
@@ -77,7 +79,7 @@ def test_ra32e_switch_check_open_expected_close() -> None:
     result = BasicCheckResult(
         *check.run_check(
             "Sensor 03",
-            "closed",
+            {"state": "closed"},
             [["1", "1", "0", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1"]],
         )
     )
@@ -89,6 +91,6 @@ def test_ra32e_switch_check_open_expected_close() -> None:
 
 def test_ra32e_switch_check_no_input() -> None:
     check = Check(RA32E_SWITCH)
-    result = BasicCheckResult(*check.run_check("Sensor 01", "ignore", [[""]]))
+    result = BasicCheckResult(*check.run_check("Sensor 01", {"state": "ignore"}, [[""]]))
 
     assert result.status == 3

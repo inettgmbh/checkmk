@@ -1,70 +1,55 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
-#
-#       U  ___ u  __  __   ____
-#        \/"_ \/U|' \/ '|u|  _"\
-#        | | | |\| |\/| |/| | | |
-#    .-,_| |_| | | |  | |U| |_| |\
-#     \_)-\___/  |_|  |_| |____/ u
-#          \\   <<,-,,-.   |||_
-#         (__)   (./  \.) (__)_)
-#
-# This file is part of OMD - The Open Monitoring Distribution.
-# The official homepage is at <http://omdistro.org>.
-#
-# OMD  is  free software;  you  can  redistribute it  and/or modify it
-# under the  terms of the  GNU General Public License  as published by
-# the  Free Software  Foundation  in  version 2.  OMD  is  distributed
-# in the hope that it will be useful, but WITHOUT ANY WARRANTY;  with-
-# out even the implied warranty of  MERCHANTABILITY  or  FITNESS FOR A
-# PARTICULAR PURPOSE. See the  GNU General Public License for more de-
-# ails.  You should have  received  a copy of the  GNU  General Public
-# License along with GNU Make; see the file  COPYING.  If  not,  write
-# to the Free Software Foundation, Inc., 51 Franklin St,  Fifth Floor,
-# Boston, MA 02110-1301 USA.
+# Copyright (C) 2023 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+
 """Handling of site-internal init scripts"""
 
+import contextlib
 import logging
 import os
 import subprocess
 import sys
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import Literal
 
-if TYPE_CHECKING:
-    from omdlib.contexts import SiteContext
-
-from omdlib.utils import chdir
-
-import cmk.utils.tty as tty
+from cmk.utils import tty
+from cmk.utils.local_secrets import SiteInternalSecret
 from cmk.utils.log import VERBOSE
+from cmk.utils.log.security_event import log_security_event, SiteStartStoppedEvent
 
 logger = logging.getLogger("cmk.omd")
 
 
 def call_init_scripts(
-    site: "SiteContext",
-    command: str,
-    daemon: Optional[str] = None,
-    exclude_daemons: Optional[List[str]] = None,
-) -> int:
+    site_dir: str,
+    command: Literal["start", "stop", "restart", "reload", "status"],
+    daemon: str | None = None,
+    exclude_daemons: list[str] | None = None,
+) -> Literal[0, 2]:
     # Restart: Do not restart each service after another,
     # but first do stop all, then start all again! This
     # preserves the order.
     if command == "restart":
-        # TODO: Why is the result of call_init_scripts not returned?
-        call_init_scripts(site, "stop", daemon)
-        call_init_scripts(site, "start", daemon)
-        return 0
+        log_security_event(SiteStartStoppedEvent(event="restart", daemon=daemon))
+        code_stop = call_init_scripts(site_dir, "stop", daemon)
+        code_start = call_init_scripts(site_dir, "start", daemon)
+        return 0 if (code_stop, code_start) == (0, 0) else 2
 
     # OMD guarantees OMD_ROOT to be the current directory
-    with chdir(site.dir):
+    with contextlib.chdir(site_dir):
+        if command == "start":
+            log_security_event(SiteStartStoppedEvent(event="start", daemon=daemon))
+            SiteInternalSecret().regenerate()
+        elif command == "stop":
+            log_security_event(SiteStartStoppedEvent(event="stop", daemon=daemon))
+
         if daemon:
-            success = _call_init_script("%s/etc/init.d/%s" % (site.dir, daemon), command)
+            success = _call_init_script(f"{site_dir}/etc/init.d/{daemon}", command)
 
         else:
             # Call stop scripts in reverse order. If daemon is set,
             # then only that start script will be affected
-            rc_dir, scripts = _init_scripts(site.name)
+            rc_dir, scripts = _init_scripts(site_dir)
             if command == "stop":
                 scripts.reverse()
             success = True
@@ -73,21 +58,19 @@ def call_init_scripts(
                 if exclude_daemons and script in exclude_daemons:
                     continue
 
-                if not _call_init_script("%s/%s" % (rc_dir, script), command):
+                if not _call_init_script(f"{rc_dir}/{script}", command):
                     success = False
 
-    if success:
-        return 0
-    return 2
+    return 0 if success else 2
 
 
-def check_status(  # pylint: disable=too-many-branches
-    site: "SiteContext", display: bool = True, daemon: Optional[str] = None, bare: bool = False
+def check_status(
+    site_dir: str, display: bool = True, daemon: str | None = None, bare: bool = False
 ) -> int:
     num_running = 0
     num_unused = 0
     num_stopped = 0
-    rc_dir, scripts = _init_scripts(site.name)
+    rc_dir, scripts = _init_scripts(site_dir)
     components = [s.split("-", 1)[-1] for s in scripts]
     if daemon and daemon not in components:
         if not bare:
@@ -99,13 +82,17 @@ def check_status(  # pylint: disable=too-many-branches
         if daemon and komponent != daemon:
             continue
 
-        state = os.system("%s/%s status >/dev/null 2>&1" % (rc_dir, script)) >> 8  # nosec
+        state = subprocess.call(
+            [os.path.join(rc_dir, script), "status"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
         if display and (state != 5 or is_verbose):
             if bare:
                 sys.stdout.write(komponent + " ")
             else:
-                sys.stdout.write("%-16s" % (komponent + ":"))
+                sys.stdout.write("%-20s" % (komponent + ":"))
                 sys.stdout.write(tty.bold)
 
         if bare:
@@ -143,14 +130,13 @@ def check_status(  # pylint: disable=too-many-branches
         if bare:
             sys.stdout.write("OVERALL %d\n" % exit_code)
         else:
-            sys.stdout.write("-----------------------\n")
-            sys.stdout.write("Overall state:  %s\n" % (tty.bold + ovstate + tty.normal))
+            sys.stdout.write("---------------------------\n")
+            sys.stdout.write("Overall state:      %s\n" % (tty.bold + ovstate + tty.normal))
     return exit_code
 
 
-# TODO: Use site context
-def _init_scripts(sitename: str) -> Tuple[str, List[str]]:
-    rc_dir = "/omd/sites/%s/etc/rc.d" % sitename
+def _init_scripts(site_dir: str) -> tuple[str, list[str]]:
+    rc_dir = f"{site_dir}/etc/rc.d"
     try:
         scripts = sorted(os.listdir(rc_dir))
         return rc_dir, scripts
@@ -166,5 +152,5 @@ def _call_init_script(scriptpath: str, command: str) -> bool:
     try:
         return subprocess.call([scriptpath, command]) in [0, 5]
     except OSError as e:
-        sys.stderr.write("ERROR: Failed to run '%s': %s\n" % (scriptpath, e))
+        sys.stderr.write(f"ERROR: Failed to run '{scriptpath}': {e}\n")
         return False

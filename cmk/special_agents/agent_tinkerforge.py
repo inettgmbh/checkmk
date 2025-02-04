@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 ###################################################
-# plugin to retrieve data from tinkerforge devices.
+# plug-in to retrieve data from tinkerforge devices.
 #
-# please note that for this plugin to work, the tinkerforge api has to be installed
+# please note that for this plug-in to work, the tinkerforge api has to be installed
 #  (included in OMD, otherwise get it from http://download.tinkerforge.com/bindings/python/)
 # Also, if the tinkerforge device is connected directly to the computer via usb,
 # the brick deamon has to be installed and running: http://download.tinkerforge.com/tools/brickd/)
@@ -23,7 +23,7 @@
 # segment_display_brightness = 2      # brightness of the 7-segment display (0-7)
 #
 # to find the uid of a sensor, either use brickv or run the plugin
-# manually. plugin output looks like this:
+# manually. plug-in output looks like this:
 #   temperature,Ab3d5F.a.xyz,2475
 # xyz is the uid you're looking for. It's always the last of the dot-separated sensor path
 # (Ab3d5F is the id of the master brick to which the sensor is connected, a is the port
@@ -35,15 +35,12 @@
 # Support for individual bricklets has to be added in init_device_handlers.
 #  Currently the bricklets included in the Starter Kit: Server Room Monitoring are
 #  implemented
-# type: ignore[import] # pylint: disable=import-error,import-outside-toplevel
 
 import os
-import socket
 import sys
 import time
-from optparse import OptionParser  # pylint: disable=deprecated-module
+from optparse import OptionParser
 from pathlib import Path
-from typing import List
 
 DEFAULT_SETTINGS = {
     "host": "localhost",
@@ -59,7 +56,7 @@ segment_display = None
 
 
 def id_to_string(identifier):
-    return "%s.%s.%s" % (identifier.connected_uid, identifier.position, identifier.uid)
+    return f"{identifier.connected_uid}.{identifier.position}.{identifier.uid}"
 
 
 def print_generic(settings, sensor_type, ident, factor, unit, *values):
@@ -67,25 +64,35 @@ def print_generic(settings, sensor_type, ident, factor, unit, *values):
         global segment_display_value, segment_display_unit
         segment_display_value = int(values[0] * factor)
         segment_display_unit = unit
-    print("%s,%s,%s" % (sensor_type, id_to_string(ident), ",".join([str(val) for val in values])))
+    sys.stdout.write(
+        "{},{},{}\n".format(
+            sensor_type, id_to_string(ident), ",".join([str(val) for val in values])
+        )
+    )
 
 
 def print_ambient_light(conn, settings, uid):
-    from tinkerforge.bricklet_ambient_light import BrickletAmbientLight
+    from tinkerforge.bricklet_ambient_light import (  # type: ignore[import-not-found]
+        BrickletAmbientLight,
+    )
 
     br = BrickletAmbientLight(uid, conn)
     print_generic(settings, "ambient", br.get_identity(), 0.01, "L", br.get_illuminance())
 
 
 def print_ambient_light_v2(conn, settings, uid):
-    from tinkerforge.bricklet_ambient_light_v2 import BrickletAmbientLightV2
+    from tinkerforge.bricklet_ambient_light_v2 import (  # type: ignore[import-not-found]
+        BrickletAmbientLightV2,
+    )
 
     br = BrickletAmbientLightV2(uid, conn)
     print_generic(settings, "ambient", br.get_identity(), 0.01, "L", br.get_illuminance())
 
 
 def print_temperature(conn, settings, uid):
-    from tinkerforge.bricklet_temperature import BrickletTemperature
+    from tinkerforge.bricklet_temperature import (  # type: ignore[import-not-found]
+        BrickletTemperature,
+    )
 
     br = BrickletTemperature(uid, conn)
     print_generic(
@@ -94,7 +101,9 @@ def print_temperature(conn, settings, uid):
 
 
 def print_temperature_ext(conn, settings, uid):
-    from tinkerforge.bricklet_ptc import BrickletPTC
+    from tinkerforge.bricklet_ptc import (  # type: ignore[import-not-found]
+        BrickletPTC,
+    )
 
     br = BrickletPTC(uid, conn)
     print_generic(
@@ -108,14 +117,18 @@ def print_temperature_ext(conn, settings, uid):
 
 
 def print_humidity(conn, settings, uid):
-    from tinkerforge.bricklet_humidity import BrickletHumidity
+    from tinkerforge.bricklet_humidity import (  # type: ignore[import-not-found]
+        BrickletHumidity,
+    )
 
     br = BrickletHumidity(uid, conn)
     print_generic(settings, "humidity", br.get_identity(), 0.1, "RH", br.get_humidity())
 
 
 def print_master(conn, settings, uid):
-    from tinkerforge.brick_master import BrickMaster
+    from tinkerforge.brick_master import (  # type: ignore[import-not-found]
+        BrickMaster,
+    )
 
     br = BrickMaster(uid, conn)
     print_generic(
@@ -131,7 +144,9 @@ def print_master(conn, settings, uid):
 
 
 def print_motion_detector(conn, settings, uid):
-    from tinkerforge.bricklet_motion_detector import BrickletMotionDetector
+    from tinkerforge.bricklet_motion_detector import (  # type: ignore[import-not-found]
+        BrickletMotionDetector,
+    )
 
     br = BrickletMotionDetector(uid, conn)
     print_generic(settings, "motion", br.get_identity(), 1.0, "", br.get_motion_detected())
@@ -166,10 +181,12 @@ def display_on_segment(conn, settings, text):
         "\N{DEGREE SIGN}": 0x63,
     }
 
-    from tinkerforge.bricklet_segment_display_4x7 import BrickletSegmentDisplay4x7
+    from tinkerforge.bricklet_segment_display_4x7 import (  # type: ignore[import-not-found]
+        BrickletSegmentDisplay4x7,
+    )
 
     br = BrickletSegmentDisplay4x7(segment_display, conn)
-    segments: List[int] = []
+    segments: list[int] = []
     for letter in text:
         if len(segments) >= 4:
             break
@@ -229,12 +246,11 @@ def enumerate_callback(
 def read_config():
     settings = DEFAULT_SETTINGS
     if (cfg_path := Path(os.getenv("MK_CONFDIR", "/etc/check_mk"), "tinkerforge.cfg")).is_file():
-        exec(cfg_path.read_text(), settings, settings)
+        exec(cfg_path.read_text(), settings, settings)  # nosec B102 # BNS:aee528
     return settings
 
 
 def main():
-
     # host = "localhost"
     # port = 4223
     # segment_display_uid = "abc"         # uid of the sensor to display on the 7-segment display
@@ -282,23 +298,25 @@ def main():
     }
 
     try:
-        from tinkerforge.ip_connection import IPConnection
+        from tinkerforge.ip_connection import (  # type: ignore[import-not-found]
+            IPConnection,
+        )
     except ImportError:
-        print("<<<tinkerforge:sep(44)>>>")
-        print("master,0.0.0,tinkerforge api isn't installed")
+        sys.stdout.write("<<<tinkerforge:sep(44)>>>\n")
+        sys.stdout.write("master,0.0.0,tinkerforge api isn't installed\n")
         return 1
 
     conn = IPConnection()
     try:
         conn.connect(settings["host"], settings["port"])
-    except socket.error as e:
+    except OSError as e:
         sys.stderr.write("%s\n" % e)
         return 1
 
     device_handlers = init_device_handlers()
 
     try:
-        print("<<<tinkerforge:sep(44)>>>")
+        sys.stdout.write("<<<tinkerforge:sep(44)>>>\n")
 
         def cb(
             uid,

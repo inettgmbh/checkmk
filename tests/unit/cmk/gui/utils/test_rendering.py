@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -14,41 +14,41 @@ from cmk.gui.utils.rendering import text_with_links_to_user_translated_html
     [
         (
             [],
-            "",
-            HTML(""),
+            None,
+            HTML.empty(),
         ),
         (
             [("element", None)],
-            "",
-            HTML("element"),
+            None,
+            HTML.without_escaping("element"),
         ),
         (
             [("element", "link")],
-            "",
-            HTML('<a href="link" title="element">element</a>'),
+            None,
+            HTML.without_escaping('<a href="link" title="element">element</a>'),
         ),
         (
             [("element1", "link1"), ("element2", None), ("element3", "link3")],
-            "",
-            HTML(
+            HTML.empty(),
+            HTML.without_escaping(
                 '<a href="link1" title="element1">element1</a>element2<a href="link3" title="element3">element3</a>'
             ),
         ),
         (
             [("element1", "link1"), ("element2", None), ("element3", "link3")],
-            " / ",
-            HTML(
+            HTML.without_escaping(" / "),
+            HTML.without_escaping(
                 '<a href="link1" title="element1">element1</a> / element2 / <a href="link3" title="element3">element3</a>'
             ),
         ),
     ],
 )
 def test_text_with_links_to_user_translated_html(
-    request_context,
-    elements,
-    separator,
-    rendered_title,
-):
+    request_context: None,
+    elements: list[tuple[str, str | None]],
+    separator: HTML | None,
+    rendered_title: HTML,
+) -> None:
     assert (
         text_with_links_to_user_translated_html(
             elements,

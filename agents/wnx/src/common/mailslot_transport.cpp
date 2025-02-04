@@ -1,18 +1,7 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
-
-// Simple Mail Slot Transport
-// Windows only
-// by SK
-// CODE STYLE is a bit old-fashioned, this is mix of MSN example with
-// very old implementation
-
-// Thread Safe
-
-// Sender is using postman
-// Receiver is using mailbox (with thread/callback)
 
 #include <stdafx.h>
 //
@@ -29,8 +18,11 @@
 #include <thread>
 
 #include "common/mailslot_transport.h"
-#include "tools/_xlog.h"  // trace and log
-#include "wtools.h"
+#include "common/wtools.h"
+#include "tools/_process.h"
+#include "tools/_tgt.h"
+#include "tools/_xlog.h"
+namespace fs = std::filesystem;
 
 namespace cma::mailslot {
 constexpr bool kUsePublicProfileLog = true;  // to Profile(not to Windows)
@@ -67,14 +59,13 @@ std::string BuildCustomMailSlotName(std::string_view slot_name, uint32_t id,
 
 std::string GetApiLog() {
     if (kUsePublicProfileLog) {
-        std::filesystem::path path{
-            tools::win::GetSomeSystemFolder(FOLDERID_Public)};
+        const fs::path path{tools::win::GetSomeSystemFolder(FOLDERID_Public)};
         if (!path.empty()) {
             return wtools::ToUtf8((path / kMailSlotLogFileName).wstring());
         }
     }
 
-    if (std::filesystem::path win_path =
+    if (const fs::path win_path =
             tools::win::GetSomeSystemFolder(FOLDERID_Windows);
         !win_path.empty()) {
         return wtools::ToUtf8(
@@ -130,7 +121,7 @@ bool Slot::ExecPost(const void *data, uint64_t length) {
 }
 
 bool Slot::Create(wtools::SecurityLevel sl) {
-    std::lock_guard<std::mutex> lck(lock_);
+    std::lock_guard lck(lock_);
 
     if (handle_ != nullptr) {
         return true;  // bad(already exists) call
@@ -157,7 +148,7 @@ bool Slot::Create(wtools::SecurityLevel sl) {
 }
 
 bool Slot::Open() {
-    std::lock_guard<std::mutex> lck(lock_);
+    std::lock_guard lck(lock_);
 
     if (handle_ != nullptr) {
         return true;  // bad(already exists) call
@@ -176,7 +167,7 @@ bool Slot::Open() {
 }
 
 bool Slot::Close() {
-    std::lock_guard<std::mutex> lck(lock_);
+    std::lock_guard lck(lock_);
     if (handle_ == nullptr) {
         return true;
     }
@@ -193,8 +184,8 @@ bool Slot::Close() {
 }
 
 bool Slot::Post(const void *data, int len) {
-    std::lock_guard<std::mutex> lck(lock_);
-    if ((handle_ == nullptr) || IsOwner()) {
+    std::lock_guard lck(lock_);
+    if (handle_ == nullptr || IsOwner()) {
         ApiLog("Bad situation %p %d", handle_, static_cast<int>(IsOwner()));
         return false;
     }
@@ -209,30 +200,30 @@ bool Slot::Post(const void *data, int len) {
 }
 
 int Slot::Get(void *data, unsigned int max_len) {
-    std::lock_guard<std::mutex> lck(lock_);
-    if ((handle_ == nullptr) || IsClient()) {
-        return ErrCodes::FAILED_INIT;
+    std::lock_guard lck(lock_);
+    if (handle_ == nullptr || IsClient()) {
+        return ErrCodes::failed_init;
     }
-    auto msg_size = CheckMessageSize();
+    const auto msg_size = CheckMessageSize();
     if (!msg_size.has_value()) {
-        return ErrCodes::FAILED_INFO;
+        return ErrCodes::failed_info;
     }
-    auto message_size = *msg_size;
+    const auto message_size = *msg_size;
 
     if (message_size == MAILSLOT_NO_MESSAGE) {
-        return ErrCodes::SUCCESS;
+        return ErrCodes::success;
     }
     if (data == nullptr) {
-        return message_size;
+        return static_cast<int>(message_size);
     }
     if (max_len < message_size) {
-        return ErrCodes::TOO_SMALL;
+        return ErrCodes::too_small;
     }
 
     OVERLAPPED ov = CreateOverlapped();
     if (ov.hEvent == nullptr) {
         ApiLog("Failed Create Event with error %d", ::GetLastError());
-        return ErrCodes::FAILED_CREATE;
+        return ErrCodes::failed_create;
     }
     ON_OUT_OF_SCOPE(::CloseHandle(ov.hEvent));
     if (DWORD message_read{0U};
@@ -242,11 +233,11 @@ int Slot::Get(void *data, unsigned int max_len) {
 
     ApiLog("Failed read mail slot with error %d", ::GetLastError());
 
-    return ErrCodes::FAILED_READ;
+    return ErrCodes::failed_read;
 }
 
-OVERLAPPED Slot::CreateOverlapped() const noexcept {
-    OVERLAPPED ov = {0};
+OVERLAPPED Slot::CreateOverlapped() noexcept {
+    OVERLAPPED ov = {};
     ov.Offset = 0;
     ov.OffsetHigh = 0;
     ov.hEvent = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -254,7 +245,7 @@ OVERLAPPED Slot::CreateOverlapped() const noexcept {
     return ov;
 }
 
-std::optional<DWORD> Slot::CheckMessageSize() {
+std::optional<DWORD> Slot::CheckMessageSize() const {
     DWORD message_size = 0;
     DWORD message_count = 0;
 
@@ -286,8 +277,8 @@ void Slot::MailBoxThread(ThreadProc foo, int sleep_value, void *context) {
         }
 
         ::Sleep(sleep_value > 0 ? sleep_value
-                                : DEFAULT_THREAD_SLEEP);  // we need sleep to
-                                                          // prevent polling
+                                : g_default_thread_sleep);  // we need sleep to
+                                                            // prevent polling
     }
 }
 

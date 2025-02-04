@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-"""Check_MK Special agent to monitor JMX using Mbeans exposed by jolokia
-"""
+"""Check_MK Special agent to monitor JMX using Mbeans exposed by jolokia"""
+
 import argparse
 import os
 import sys
-from typing import List
 
 # TODO: is there a better way to do this?
 import cmk.utils.paths
 from cmk.utils.password_store import replace_passwords
 
-from cmk.special_agents.utils import vcrtrace
+from cmk.special_agents.v0_unstable.misc import vcrtrace
 
 sys.path.append(str(cmk.utils.paths.local_agents_dir / "plugins"))
 sys.path.append(os.path.join(cmk.utils.paths.agents_dir, "plugins"))
-import mk_jolokia  # type:ignore  # pylint: disable=import-error,wrong-import-order
+import mk_jolokia  # type: ignore[import-not-found]
+
+__version__ = "2.5.0b1"
+
+USER_AGENT = "checkmk-special-jolokia-" + __version__
 
 
 def parse_arguments(argv):
@@ -31,10 +34,9 @@ def parse_arguments(argv):
         "--vcrtrace", action=vcrtrace(**mk_jolokia.JolokiaInstance.FILTER_SENSITIVE)
     )
 
-    opts_with_help: List[List[str]] = []
-    for opt in mk_jolokia.DEFAULT_CONFIG_TUPLES:
-        if len(opt) == 3:
-            opts_with_help.append([str(elem) for elem in opt])
+    opts_with_help: list[tuple[str, str | None | float, str]] = [
+        opt for opt in mk_jolokia.DEFAULT_CONFIG_TUPLES if len(opt) == 3
+    ]
 
     for key, default, help_str in opts_with_help:
         if default is not None:
@@ -67,7 +69,7 @@ def main(sys_argv=None):
         if hasattr(args, key):
             config[key] = getattr(args, key)
 
-    instance = mk_jolokia.JolokiaInstance(config)
+    instance = mk_jolokia.JolokiaInstance(config, USER_AGENT)
     try:
         mk_jolokia.query_instance(instance)
     except mk_jolokia.SkipInstance:

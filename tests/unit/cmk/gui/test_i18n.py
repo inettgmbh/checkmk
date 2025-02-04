@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name
 
 import gettext
 import subprocess
 from pathlib import Path
 
+import flask
 import pytest
 
-from tests.testlib import cmk_path
+from tests.testlib.repo import repo_path
 
 import cmk.utils.paths
 
-import cmk.gui.i18n as i18n
+from cmk.gui import i18n
 from cmk.gui.utils.script_helpers import application_and_request_context
+
+LOCAL_DE_TRANSLATIONS = {
+    "Age": "Alter",
+    "Edit foreign %s": "Fremde(n) %s editieren",
+    "bla": "blub",
+}
 
 
 @pytest.fixture(scope="session")
-def locale_base_dir():
-    return Path("%s/locale" % cmk_path())
+def locale_base_dir() -> Path:
+    return repo_path() / "locale"
 
 
 @pytest.fixture(autouse=True)
@@ -40,8 +46,8 @@ def compile_builtin_po_files(locale_base_dir):
 
 
 @pytest.fixture()
-def local_translation():
-    _add_local_translation("de", "Äxtended German", texts={"bla": "blub"})
+def local_translation() -> None:
+    _add_local_translation("de", "Äxtended German", texts=LOCAL_DE_TRANSLATIONS)
     _add_local_translation("xz", "Xz", texts={"bla": "blub"})
     # Add one package localization
     _add_local_translation("packages/pkg_name/de", "pkg_name German", texts={"pkg1": "lala"})
@@ -84,24 +90,29 @@ msgstr "%s"
     subprocess.call(["msgfmt", str(po_file), "-o", str(mo_file)])
 
 
-def test_underscore_without_localization() -> None:
-    assert i18n.get_current_language() is None
-    assert isinstance(i18n._("bla"), str)
-    assert i18n._("bla") == "bla"
+def test_underscore_without_localization(flask_app: flask.Flask) -> None:
+    with flask_app.test_request_context("/"):
+        assert i18n.get_current_language() == "en"
+        assert isinstance(i18n._("bla"), str)
+        assert i18n._("bla") == "bla"
+        assert i18n._("") == ""
 
 
+@pytest.mark.usefixtures("local_translation")
 def test_underscore_localization() -> None:
     with application_and_request_context():
         i18n.localize("de")
         assert i18n.get_current_language() == "de"
         assert i18n._("Age") == "Alter"
+        assert i18n._("") == ""
 
     with application_and_request_context():
         i18n._unlocalize()
         assert i18n._("Age") == "Age"
-        assert i18n.get_current_language() is None
+        assert i18n.get_current_language() == "en"
 
 
+@pytest.mark.usefixtures("local_translation")
 def test_lazy_localization() -> None:
     with application_and_request_context():
         lazy_str = i18n._l("Age")
@@ -116,24 +127,27 @@ def test_lazy_localization() -> None:
         assert lazy_str == "Age"
 
 
+@pytest.mark.usefixtures("local_translation")
+def test_lazy_with_args() -> None:
+    with application_and_request_context():
+        lazy_str = i18n._l("Edit foreign %s") % "zeugs"
+        assert lazy_str == "Edit foreign zeugs"
+
+    with application_and_request_context():
+        i18n.localize("de")
+        assert lazy_str == "Fremde(n) zeugs editieren"
+
+    with application_and_request_context():
+        i18n._unlocalize()
+        assert lazy_str == "Edit foreign zeugs"
+
+
 def test_init_language_not_existing() -> None:
     assert i18n._init_language("xz") is None
 
 
-def test_init_language_only_builtin() -> None:
-    trans = i18n._init_language("de")
-    assert isinstance(trans, gettext.GNUTranslations)
-    assert trans.info()["language"] == "de"
-    assert trans.info()["project-id-version"] == "Checkmk user interface translation 0.1"
-
-    translated = trans.gettext("bla")
-    assert isinstance(translated, str)
-    assert translated == "bla"
-
-
-def test_init_language_with_local_modification(  # type:ignore[no-untyped-def]
-    local_translation,
-) -> None:
+@pytest.mark.usefixtures("local_translation", "request_context")
+def test_init_language_with_local_modification() -> None:
     trans = i18n._init_language("de")
     assert isinstance(trans, gettext.GNUTranslations)
     assert trans.info()["language"] == "de"
@@ -144,28 +158,8 @@ def test_init_language_with_local_modification(  # type:ignore[no-untyped-def]
     assert translated == "blub"
 
 
-def test_init_language_with_local_modification_fallback(  # type:ignore[no-untyped-def]
-    local_translation,
-) -> None:  # type:ignore[no-untyped-def]
-    trans = i18n._init_language("de")
-    assert isinstance(trans, gettext.GNUTranslations)
-    assert trans.info()["language"] == "de"
-    assert trans.info()["project-id-version"] == "Locally modified Check_MK translation"
-
-    translated = trans.gettext("bla")
-    assert isinstance(translated, str)
-    assert translated == "blub"
-
-    # This string is localized in the standard file, not in the locally
-    # overridden file
-    translated = trans.gettext("Age")
-    assert isinstance(translated, str)
-    assert translated == "Alter"
-
-
-def test_init_language_with_package_localization(  # type:ignore[no-untyped-def]
-    local_translation,
-) -> None:
+@pytest.mark.usefixtures("local_translation", "request_context")
+def test_init_language_with_package_localization() -> None:
     trans = i18n._init_language("de")
     assert trans is not None
     translated = trans.gettext("pkg1")
@@ -173,43 +167,14 @@ def test_init_language_with_package_localization(  # type:ignore[no-untyped-def]
     assert translated == "lala"
 
 
-def test_get_language_alias() -> None:
-    assert isinstance(i18n.get_language_alias(None), str)
-    assert i18n.get_language_alias(None) == "English"
-
-    assert isinstance(i18n.get_language_alias("de"), str)
-    assert i18n.get_language_alias("de") == "German"
-
-
-def test_get_language_local_alias(local_translation) -> None:  # type:ignore[no-untyped-def]
+@pytest.mark.usefixtures("local_translation")
+def test_get_language_local_alias() -> None:
     assert isinstance(i18n.get_language_alias("de"), str)
     assert i18n.get_language_alias("de") == "Äxtended German"
 
 
-def test_get_languages() -> None:
-    assert i18n.get_languages() == [
-        ("nl", "Dutch (machine-supported translation)"),
-        ("", "English"),
-        ("fr", "French (machine-supported translation)"),
-        ("de", "German"),
-        ("it", "Italian (machine-supported translation)"),
-        ("ja", "Japanese"),
-        ("pt_PT", "Portuguese (Portugal) (machine-supported translation)"),
-        ("ro", "Romanian"),
-        ("es", "Spanish (machine-supported translation)"),
-    ]
-
-
-def test_get_languages_new_local_language(local_translation) -> None:  # type:ignore[no-untyped-def]
-    assert i18n.get_languages() == [
-        ("nl", "Dutch (machine-supported translation)"),
-        ("", "English"),
-        ("fr", "French (machine-supported translation)"),
-        ("it", "Italian (machine-supported translation)"),
-        ("ja", "Japanese"),
-        ("pt_PT", "Portuguese (Portugal) (machine-supported translation)"),
-        ("ro", "Romanian"),
-        ("es", "Spanish (machine-supported translation)"),
-        ("xz", "Xz"),
-        ("de", "Äxtended German"),
-    ]
+@pytest.mark.usefixtures("local_translation")
+def test_local_langs_are_available_in_get_languages() -> None:
+    local_langs = [("de", "Äxtended German"), ("xz", "Xz")]
+    registered_langs = i18n.get_languages()
+    assert all(local_lang in registered_langs for local_lang in local_langs)

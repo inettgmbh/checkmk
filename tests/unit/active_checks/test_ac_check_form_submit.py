@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
+from collections.abc import Mapping, Sequence
 from types import ModuleType
-from typing import Mapping, Optional, Sequence
 
 import pytest
-import vcr  # type: ignore[import]
+import vcr  # type: ignore[import-untyped]
 
-from tests.testlib import import_module
+from tests.testlib.unit.utils import import_module_hack
 
 
 @pytest.fixture(name="check_form_submit", scope="module")
 def fixture_check_form_submit() -> ModuleType:
-    return import_module("active_checks/check_form_submit")
+    return import_module_hack("active_checks/check_form_submit")
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ def test_check_form_submit_main(
     expected_exitcode: int,
     expected_info: str,
 ) -> None:
-    filepath = "%s/_check_form_submit_response" % os.path.dirname(os.path.abspath(__file__))
+    filepath = "%s/_check_form_submit_response" % os.path.dirname(__file__)
     with vcr.use_cassette(filepath, record_mode="none"):
         exitcode, info = check_form_submit.main(args)
         assert exitcode == expected_exitcode
@@ -138,7 +138,7 @@ def test_ac_check_form_submit_host_states_no_levels(
 def test_ac_check_form_submit_host_states_levels(
     check_form_submit: ModuleType,
     states: Mapping[str, tuple[int, str]],
-    levels: Optional[tuple[int, int]],
+    levels: tuple[int, int] | None,
     expected_status: int,
     expected_info: str,
 ) -> None:

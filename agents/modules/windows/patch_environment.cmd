@@ -1,5 +1,5 @@
 :: Python environemnet patching script.
-:: Adds postinstall script and optionally runtime to support 
+:: Adds postinstall script and optionally runtime to support
 :: out of the box Mid-age OS, like Windows Server 2012.
 :: May be called only from exec_cmd.bat.
 
@@ -15,9 +15,6 @@ echo include-system-site-packages = false>>.venv\pyvenv.cfg
 
 :: postinstall
 copy /Y %cur_dir%\postinstall.cmd .\postinstall.cmd
-if "%PY_VER%" == "3.4" exit /b 0
-
-:: runtime
 copy /Y %cur_dir%\runtime\*.dll .venv\Scripts\
 
 exit /b 0

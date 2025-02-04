@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+from collections.abc import Sequence
 
 import pytest
 
@@ -23,5 +25,5 @@ from cmk.gui.default_name import unique_default_name_suggestion
         ),
     ],
 )
-def test_urlencode_vars(template, used_names, suggestion) -> None:  # type:ignore[no-untyped-def]
+def test_urlencode_vars(template: str, used_names: Sequence[str], suggestion: str) -> None:
     assert unique_default_name_suggestion(template, used_names) == suggestion

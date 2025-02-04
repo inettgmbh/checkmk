@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# Copyright (C) 2023 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -12,6 +17,7 @@
 #
 import os
 import sys
+from datetime import datetime
 
 DOC_ROOT = os.path.dirname(__file__)
 
@@ -20,9 +26,10 @@ sys.path.insert(0, os.path.join(DOC_ROOT, "..", ".."))
 
 # -- Project information -----------------------------------------------------
 
+year = datetime.now().year
 project = "CheckMK"
-copyright = "2019, tribe29 GmbH"
-author = "tribe29 GmbH"
+author = "Checkmk GmbH"
+copyright = f"{year}, {author}"  # noqa: A001
 
 
 # -- General configuration ---------------------------------------------------
@@ -35,16 +42,19 @@ extensions = [
     "sphinxcontrib.spelling",
     "sphinxcontrib.plantuml",
 ]
+
+plantuml_path = os.getenv("PLANTUML_JAR_PATH")
+if not plantuml_path:
+    raise Exception("PLANTUML_JAR_PATH must be defined")
+
 plantuml = " ".join(
     [
         "java",
         "-Djava.awt.headless=true",
         "-jar",
-        os.path.realpath(
-            os.path.join(
-                DOC_ROOT,
-                "plantuml.jar",
-            )
+        os.path.join(
+            plantuml_path,
+            "plantuml.jar",
         ),
     ]
 )

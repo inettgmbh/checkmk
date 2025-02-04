@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -40,7 +40,7 @@ def _parameter_valuespec_vm_guest_tools():
             (
                 "guestToolsUnmanaged",
                 MonitoringState(
-                    title=_("VMware Tools is installed, but it is not managed by VMWare"),
+                    title=_("VMware Tools is installed, but it is not managed by VMware"),
                     default_value=0,
                 ),
             ),
