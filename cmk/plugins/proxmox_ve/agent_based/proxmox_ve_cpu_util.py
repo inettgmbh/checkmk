@@ -17,7 +17,6 @@ from cmk.agent_based.v2 import (
     Result,
     State,
     StringTable,
-    get_average,
     get_value_store,
 )
 

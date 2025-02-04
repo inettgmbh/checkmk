@@ -3,7 +3,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.graphing.v1 import graphs, metrics, perfometers, Title
+from cmk.graphing.v1 import graphs, metrics, Title
 
 metric_disk_read_throughput = metrics.Metric(
     name="cpu_core_usage",

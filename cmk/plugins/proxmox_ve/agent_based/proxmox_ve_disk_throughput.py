@@ -14,12 +14,8 @@ from cmk.agent_based.v2 import (
     CheckResult,
     DiscoveryResult,
     render,
-    Result,
     Service,
-    State,
-    Metric,
     StringTable,
-    get_average,
     get_value_store,
 )
 
