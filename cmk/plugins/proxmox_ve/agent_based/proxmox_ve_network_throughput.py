@@ -70,9 +70,9 @@ def check_proxmox_ve_network_throughput(params: Mapping[str, Any], section: Sect
     in_levels = params["in_levels"]
     out_levels = params["out_levels"]
     if in_levels is not None:
-        in_levels = (in_levels[0] * 1000 ** 2, in_levels[1] * 1000 ** 2)
+        in_levels = (in_levels[0] * 1024**2, in_levels[1] * 1024**2)
     if out_levels is not None:
-        out_levels = (out_levels[0] * 1000 ** 2, out_levels[1] * 1000 ** 2)
+        out_levels = (out_levels[0] * 1024**2, out_levels[1] * 1024**2)
 
     yield from check_levels_v1(
         value=in_throughput,

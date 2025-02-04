@@ -24,8 +24,8 @@ def _parameter_valuespec_proxmox_ve_network_throughput():
                         Tuple(
                             title=_("Set conditions"),
                             elements=[
-                                Integer(unit="MB/s", title=_("Warning at")),
-                                Integer(unit="MB/s", title=_("Critical at")),
+                                Integer(unit="MiB/s", title=_("Warning at")),
+                                Integer(unit="MiB/s", title=_("Critical at")),
                             ],
                         ),
                         FixedValue(value=None, title=_("No Conditions"), totext=""),
@@ -40,8 +40,8 @@ def _parameter_valuespec_proxmox_ve_network_throughput():
                         Tuple(
                             title=_("Set conditions"),
                             elements=[
-                                Integer(unit="MB/s", title=_("Warning at")),
-                                Integer(unit="MB/s", title=_("Critical at")),
+                                Integer(unit="MiB/s", title=_("Warning at")),
+                                Integer(unit="MiB/s", title=_("Critical at")),
                             ],
                         ),
                         FixedValue(value=None, title=_("No Conditions"), totext=""),

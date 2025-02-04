@@ -52,25 +52,22 @@ def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> Ch
     value_store = get_value_store()
 
     yield from check_cpu_util(
-        util=cpu_util*100,
+        util=cpu_util * 100,
         params=params,
         value_store=value_store,
         this_time=uptime,
     )
 
-    yield Result(
-        state=State.OK,
-        summary=f"CPU cores assigned: {max_cpu}"
-    )
+    yield Result(state=State.OK, summary=f"CPU cores assigned: {max_cpu}")
 
     if params["util"] is not None:
         (warn, crit) = params["util"]
-        cores_levels = (warn*max_cpu/100, crit*max_cpu/100)
+        cores_levels = (warn * max_cpu / 100, crit * max_cpu / 100)
     else:
         cores_levels = None
 
     yield from check_levels_v1(
-        value=round(max_cpu*cpu_util, 2),
+        value=round(max_cpu * cpu_util, 2),
         levels_upper=cores_levels,
         metric_name="cpu_core_usage",
         label="CPU Core usage",
@@ -91,5 +88,5 @@ check_plugin_proxmox_ve_cpu_util = CheckPlugin(
     check_ruleset_name="proxmox_ve_cpu_util",
     check_default_parameters={
         "util": (90.0, 95.0),
-    }
+    },
 )

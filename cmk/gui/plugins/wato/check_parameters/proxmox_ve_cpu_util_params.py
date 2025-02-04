@@ -25,20 +25,25 @@ def _parameter_valuespec_proxmox_ve_cpu_util():
                         Tuple(
                             title=_("Set conditions"),
                             elements=[
-                                Float(minvalue=0.0, maxvalue=100.0, unit="%", default_value=90.0,
-                                      title=_("Warning at")),
-                                Float(minvalue=0.0, maxvalue=100.0, unit="%", default_value=95.0,
-                                      title=_("Critical at")),
+                                Float(minvalue=0.0,
+                                      maxvalue=100.0,
+                                      unit="%",
+                                      default_value=90.0,
+                                      title=_("Warning at")
+                                      ),
+                                Float(minvalue=0.0,
+                                      maxvalue=100.0,
+                                      unit="%",
+                                      default_value=95.0,
+                                      title=_("Critical at")
+                                      ),
                             ],
                         ),
                         FixedValue(value=None, title=_("No Conditions"), totext=""),
                     ],
                 ),
             ),
-            (
-                "average",
-                Integer(minvalue=1, unit="minutes", title=_("Average CPU Value over"))
-            ),
+            ("average", Integer(minvalue=1, unit="minutes", title=_("Average CPU Value over"))),
         ],
     )
 

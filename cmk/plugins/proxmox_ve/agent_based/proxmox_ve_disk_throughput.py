@@ -70,9 +70,9 @@ def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section
     read_levels = params["read_levels"]
     write_levels = params["write_levels"]
     if read_levels is not None:
-        read_levels = (read_levels[0]*1000**2, read_levels[1]*1000**2)
+        read_levels = (read_levels[0] * 1024**2, read_levels[1] * 1024**2)
     if write_levels is not None:
-        write_levels = (write_levels[0]*1000**2, write_levels[1]*1000**2)
+        write_levels = (write_levels[0] * 1024**2, write_levels[1] * 1024**2)
 
     yield from check_levels_v1(
         value=read_throughput,
