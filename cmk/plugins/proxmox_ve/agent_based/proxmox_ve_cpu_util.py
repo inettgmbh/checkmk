@@ -61,10 +61,7 @@ def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> Ch
             boundaries=(0.0, max_cpu),
         )
     except AssertionError:
-        yield Result(
-            state=State.UNKNOWN,
-            summary="error checking datastore status"
-        )
+        yield Result(state=State.UNKNOWN, summary="error checking datastore status")
 
 
 agent_section_proxmox_ve_cpu_util = AgentSection(
