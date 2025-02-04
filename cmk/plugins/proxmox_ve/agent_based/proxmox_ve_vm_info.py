@@ -3,9 +3,9 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import datetime
 import json
 from collections.abc import Mapping
-import datetime
 from typing import Any
 
 from cmk.agent_based.v2 import (
