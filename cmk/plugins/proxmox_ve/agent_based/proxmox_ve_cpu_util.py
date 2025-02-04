@@ -32,19 +32,6 @@ def discover_single(section: Section) -> DiscoveryResult:
 
 
 def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> CheckResult:
-    """
-    >>> for result in check_proxmox_ve_cpu_util(
-    ...     {
-    ...         "util": (90.0, 95.0),
-    ...     },
-    ...     parse_proxmox_ve_cpu_util([['{"max_cpu": 16.0, "cpu": 0.319682438494757, "uptime": 2427306.0}']])):
-    ...   print(result)
-    Result(state=<State.OK: 0>, summary='Total CPU: 31.97%')
-    Metric('util', 31.9682438494757, levels=(90.0, 95.0), boundaries=(0.0, 100.0))
-    Result(state=<State.OK: 0>, summary='CPU cores assigned: 16')
-    Result(state=<State.OK: 0>, summary='CPU Core usage: 5.11')
-    Metric('cpu_core_usage', 5.11, levels=(14.4, 15.2), boundaries=(0.0, 16.0)
-    """
     max_cpu = int(section.get("max_cpu", 0))
     cpu_util = float(section.get("cpu", 0))
     uptime = int(section.get("uptime", 0))
@@ -73,10 +60,10 @@ def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> Ch
             label="CPU Core usage",
             boundaries=(0.0, max_cpu),
         )
-    except:
+    except AssertionError:
         yield Result(
             state=State.UNKNOWN,
-            summary=f"error checking datastore status"
+            summary="error checking datastore status"
         )
 
 

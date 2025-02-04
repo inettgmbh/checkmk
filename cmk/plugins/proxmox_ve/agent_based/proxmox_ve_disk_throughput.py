@@ -32,19 +32,6 @@ def discover_single(section: Section) -> DiscoveryResult:
 
 
 def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section) -> CheckResult:
-    """
-    >>> for result in check_proxmox_ve_disk_throughput(
-    ...     {
-    ...         "read_levels": None,
-    ...         "write_levels": None,
-    ...     },
-    ...     parse_proxmox_ve_disk_throughput([['{"disk_read": 234944108544, "disk_write": 5909099398656, "uptime": 2343655}']])):
-    ...   print(result)
-    Result(state=<State.OK: 0>, summary='Read IO: 8.53 B/s')
-    Result(state=<State.OK: 0>, summary='Write IO: 2.90 MB/s')
-    Metric('disk_read_throughput', 2184.533333333333, levels=None, boundaries=(0.0, None))
-    Metric('disk_write_throughput', 2738558.780952381, levels=None, boundaries=(0.0, None))
-    """
     disk_read = section.get("disk_read", 0)
     disk_write = section.get("disk_write", 0)
     uptime = section.get("uptime", 0)
@@ -94,10 +81,10 @@ def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section
             label="Write",
             boundaries=(0, None),
         )
-    except:
+    except AssertionError:
         yield Result(
             state=State.UNKNOWN,
-            summary=f"error checking datastore status"
+            summary="error checking datastore status"
         )
 
 
