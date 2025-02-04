@@ -13,11 +13,11 @@ from cmk.agent_based.v2 import (
     CheckPlugin,
     CheckResult,
     DiscoveryResult,
-    Service,
+    get_value_store,
     Result,
+    Service,
     State,
     StringTable,
-    get_value_store,
 )
 
 from cmk.plugins.lib.cpu_util import check_cpu_util

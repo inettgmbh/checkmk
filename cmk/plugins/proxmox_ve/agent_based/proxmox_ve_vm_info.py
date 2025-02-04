@@ -5,8 +5,8 @@
 
 import json
 from collections.abc import Mapping
-from typing import Any
 import datetime
+from typing import Any
 
 from cmk.agent_based.v2 import (
     AgentSection,

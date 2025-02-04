@@ -9,7 +9,7 @@ from cmk.gui.plugins.wato.utils import (
     rulespec_registry,
     RulespecGroupCheckParametersOperatingSystem,
 )
-from cmk.gui.valuespec import Dictionary, Alternative, Tuple, FixedValue, Integer
+from cmk.gui.valuespec import Alternative, Dictionary, FixedValue, Integer, Tuple
 
 
 def _parameter_valuespec_proxmox_ve_disk_throughput():

@@ -13,10 +13,10 @@ from cmk.agent_based.v2 import (
     CheckPlugin,
     CheckResult,
     DiscoveryResult,
+    get_value_store,
     render,
     Service,
     StringTable,
-    get_value_store,
 )
 
 Section = Mapping[str, int]
