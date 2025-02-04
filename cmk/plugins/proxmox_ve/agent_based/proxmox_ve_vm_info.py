@@ -6,6 +6,7 @@
 import json
 from collections.abc import Mapping
 from typing import Any
+import datetime
 
 from cmk.agent_based.v2 import (
     AgentSection,
@@ -53,6 +54,7 @@ def check_proxmox_ve_vm_info(params: Mapping[str, Any], section: Section) -> Che
         state=State.OK if not req_vm_status or vm_status == req_vm_status else State.WARN,
         summary=f"Status: {vm_status}%s" % (req_vm_status and f" (required: {req_vm_status})"),
     )
+    yield Result(state=State.OK, summary=f"Uptime: {str(datetime.timedelta(seconds=section.get('uptime', 0), ))}") #00:00:00
     yield Result(state=State.OK, summary=f"Type: {section.get('type')}")
     yield Result(state=State.OK, summary=f"Host: {section.get('node')}")
 
