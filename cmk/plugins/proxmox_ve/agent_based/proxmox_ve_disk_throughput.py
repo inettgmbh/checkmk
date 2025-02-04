@@ -43,7 +43,8 @@ def check_proxmox_ve_disk_throughput(params: Mapping[str, Any], section: Section
     ...     },
     ...     parse_proxmox_ve_disk_throughput([['{"disk_read": 234944108544, "disk_write": 5909099398656, "uptime": 2343655}']])):
     ...   print(result)
-    Result(state=<State.OK: 0>, summary='Read IO: 8.53 B/s, Write IO: 2.90 MB/s')
+    Result(state=<State.OK: 0>, summary='Read IO: 8.53 B/s')
+    Result(state=<State.OK: 0>, summary='Write IO: 2.90 MB/s')
     Metric('disk_read_throughput', 2184.533333333333, levels=None, boundaries=(0.0, None))
     Metric('disk_write_throughput', 2738558.780952381, levels=None, boundaries=(0.0, None))
     """

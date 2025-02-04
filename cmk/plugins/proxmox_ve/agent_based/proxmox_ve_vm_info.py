@@ -39,13 +39,16 @@ def check_proxmox_ve_vm_info(params: Mapping[str, Any], section: Section) -> Che
     ...         ' "node": "pve-muc",'
     ...         ' "status": "running",'
     ...         ' "type": "qemu",'
-    ...         ' "vmid": "109"}'
+    ...         ' "vmid": "109",'
+    ...         ' "uptime": "265421"}'
     ...     ]])):
     ...   print(result)
     Result(state=<State.OK: 0>, summary='VM ID: 109')
     Result(state=<State.OK: 0>, summary='Status: running')
     Result(state=<State.OK: 0>, summary='Type: qemu')
     Result(state=<State.OK: 0>, summary='Host: pve-muc')
+    Result(state=<State.OK: 0>, summary='Up since 2025-02-01 15:33:09')
+    Result(state=<State.OK: 0>, summary='Uptime: 3 days 1 hours')
     """
     vm_status = section.get("status", "n/a").lower()
     req_vm_status = (params.get("required_vm_status") or "").lower()
@@ -54,9 +57,17 @@ def check_proxmox_ve_vm_info(params: Mapping[str, Any], section: Section) -> Che
         state=State.OK if not req_vm_status or vm_status == req_vm_status else State.WARN,
         summary=f"Status: {vm_status}%s" % (req_vm_status and f" (required: {req_vm_status})"),
     )
-    yield Result(state=State.OK, summary=f"Uptime: {str(datetime.timedelta(seconds=section.get('uptime', 0), ))}") #00:00:00
     yield Result(state=State.OK, summary=f"Type: {section.get('type')}")
     yield Result(state=State.OK, summary=f"Host: {section.get('node')}")
+    td = datetime.timedelta(seconds=section.get('uptime', 0))
+    startup_date = datetime.datetime.today() - td
+    startup_string = startup_date.strftime("%Y-%m-%d %H:%M:%S")
+    if td.days % 365 > 0:
+        uptime_string = f"Uptime: {td.days % 365} years {td.days//365} days"
+    else:
+        uptime_string = f"Uptime: {td.days} days {td.seconds//3600} hours"
+    yield Result(state=State.OK, summary=f"Up since {startup_string}")
+    yield Result(state=State.OK, summary=f"Up since {uptime_string}")
 
 
 agent_section_proxmox_ve_vm_info = AgentSection(

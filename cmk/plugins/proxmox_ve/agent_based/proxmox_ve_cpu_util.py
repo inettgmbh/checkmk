@@ -45,6 +45,7 @@ def check_proxmox_ve_cpu_util(params: Mapping[str, Any], section: Section) -> Ch
     Result(state=<State.OK: 0>, summary='Total CPU: 31.97%')
     Metric('util', 31.9682438494757, levels=(90.0, 95.0), boundaries=(0.0, 100.0))
     Result(state=<State.OK: 0>, summary='CPU cores assigned: 16')
+    Result(state=<State.OK: 0>, summary='CPU Core usage: 5.11')
     Metric('cpu_core_usage', 5.11, levels=(14.4, 15.2), boundaries=(0.0, 16.0)
     """
     max_cpu = int(section.get("max_cpu", 0))

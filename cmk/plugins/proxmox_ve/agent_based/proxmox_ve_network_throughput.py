@@ -43,7 +43,8 @@ def check_proxmox_ve_network_throughput(params: Mapping[str, Any], section: Sect
     ...     },
     ...     parse_proxmox_ve_network_throughput([['{"net_in": 18999433043, "net_out": 25363852710, "uptime": 2406220}']])):
     ...   print(result)
-    Result(state=<State.OK: 0>, summary='Inbound: 1.29 kB/s, Outbound: 855 B/s')
+    Result(state=<State.OK: 0>, summary='Inbound: 1.29 kB/s')
+    Result(state=<State.OK: 0>, summary='Outbound: 855 B/s')
     Metric('net_in_throughput', 1285.7333333333333, levels=None, boundaries=(0.0, None))
     Metric('net_out_throughput', 855.3166666666667, levels=None, boundaries=(0.0, None))
     """
